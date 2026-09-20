@@ -1,0 +1,93 @@
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+experiment_name: flame_rd_tree_budget6_20260920
+mode: train
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_6frame/20260919T182703_ccad30/ckpt-0-15000.pth
+trainer:
+  cache_data_on_device: true
+  testing_steps: []
+  saving_ckpt_steps: []
+  saving_ckpt_every_n_frames: 10
+  num_init_steps: 15000
+  num_incr_steps: 200
+data:
+  root: /home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak/recongs_300frames
+  resolution: -1
+  white_background: false
+  split_train_test: true
+  shuffle: false
+  eval_train: true
+  eval_test: true
+  extra_dataset_kwargs:
+    num_frames: 6
+  extra_dataloader_kwargs:
+    num_workers: 8
+module:
+  sh_degree: 1
+  random_background: false
+  lambda_dssim: 0.2
+  lambda_deform: 0.0
+  noise_scale: 0.01
+  saving_gs_steps: []
+  saving_gs_every_n_frames: 1000
+  num_saving_images: 0
+  full_eval: true
+  lpips_required: false
+  merge_to_base: true
+  re_hierarchization: true
+  densify:
+    from_step: 500
+    until_step: 5000
+    interval: 100
+    grad_threshold: 0.0002
+    opacity_reset_interval: 30000
+    max_gaussians: 10000000
+  gaussian:
+    position_lr_init: 0.00016
+    position_lr_final: 0.0000016
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.0025
+    opacity_lr: 0.05
+    scaling_lr: 0.005
+    rotation_lr: 0.001
+    percent_dense: 0.01
+  gaussian_stage2:
+    position_lr_init: 0.0024
+    position_lr_final: 0.000024
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.0375
+    opacity_lr: 0.75
+    scaling_lr: 0.075
+    rotation_lr: 0.015
+    percent_dense: 0.01
+  renderer:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug_from: -1
+    debug: false
+  deformation:
+    hierarchy_mode: rd_tree
+    num_stage1_steps: 100
+    momentum: null
+    densify_interval: 40
+    densify_grad_threshold: 0.00015
+    opacity_threshold: 0.01
+    grid_reset_interval: 2
+    rd_tree:
+      max_depth: 16
+      min_leaf_size: 12
+      partition: geometry_2means_batched
+      clustering_iterations: 4
+      quant_xyz: 0.0001
+      quant_rotation: 0.001
+      rho_xyz: 0.001
+      rho_rotation: 0.01
+      normalized_rate: 0.0001
+      step_fraction: 0.5
+      accumulation_steps: 4
+      rebuild_tree_on_export: false
+gui_ip: 127.0.0.1
+gui_port: 6027
+detect_anomaly: false
+quiet: false

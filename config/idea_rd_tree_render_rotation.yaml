@@ -1,0 +1,26 @@
+# Six-dimensional coefficient tree; rotations composed once with base quaternion.
+experiment_name: idea_rd_tree_render_rotation
+base_config: config/flame_steak_recongs_100_controlled.yaml
+frame: 1
+seed: 20260920
+gradient_view_indices: [0, 5, 10, 15]
+check_view_indices: [2, 7, 12, 17]
+max_depth: 13
+min_leaf_size: 24
+partition: geometry_2means
+clustering_iterations: 4
+rotation: true
+quant_step: [0.0001, 0.0001, 0.0001, 0.001, 0.001, 0.001]
+curvatures: []
+normalized_rate_weights: []
+envelope_runs:
+  - name: conservative_rotation
+    curvature: [0.001, 0.001, 0.001, 0.0001, 0.0001, 0.0001]
+    normalized_rate: 0.0001
+    step_fraction: 0.5
+    iterations: 16
+  - name: larger_rotation
+    curvature: [0.001, 0.001, 0.001, 0.00001, 0.00001, 0.00001]
+    normalized_rate: 0.0001
+    step_fraction: 0.5
+    iterations: 16

@@ -1,0 +1,10 @@
+experiment_name: idea_rd_tree_projection_benchmark
+input_directory: output/idea_rd_tree_render_rotation_scaled_20260920T011426_744051
+repeats: 5
+normalized_rate: 0.0001
+curvature: [0.001, 0.001, 0.001, 0.01, 0.01, 0.01]
+quant_step: [0.0001, 0.0001, 0.0001, 0.001, 0.001, 0.001]
+partitions: [median, geometry_2means, geometry_2means_batched]
+max_depth: 13
+min_leaf_size: 24
+clustering_iterations: 4

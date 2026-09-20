@@ -1,0 +1,25 @@
+# Diagnostic from our degraded frame50; compare rate and update count, no test camera.
+experiment_name: idea_rd_tree_render_pointleaf51
+base_config: config/flame_steak_recongs_100_controlled.yaml
+checkpoint_path: output/flame_rd_tree_envelope_full100_20260920/20260920T020653_189351/ckpt-50-180.pth
+frame: 51
+seed: 20260920
+gradient_view_indices: [0, 1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14, 15, 16, 18, 19]
+gradient_group_size: 4
+shuffle_gradient_groups: true
+check_view_indices: [2, 7, 12, 17]
+max_depth: 32
+min_leaf_size: 1
+partition: geometry_2means_batched
+clustering_iterations: 4
+rotation: true
+optimized_projection: true
+quant_step: [0.0001, 0.0001, 0.0001, 0.001, 0.001, 0.001]
+curvatures: []
+normalized_rate_weights: []
+envelope_runs:
+  - name: zero_rate
+    curvature: [0.001, 0.001, 0.001, 0.01, 0.01, 0.01]
+    normalized_rate: 0.0
+    step_fraction: 0.5
+    iterations: 21

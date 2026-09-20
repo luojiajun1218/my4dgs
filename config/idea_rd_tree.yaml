@@ -1,0 +1,14 @@
+# Mathematical research only; not a ReCon-GS training configuration.
+experiment_name: idea_rd_tree_projection
+seed: 20260920
+points: 64
+max_depth: 6
+quant_step: 0.125
+rate_weights: [0.0, 0.001, 0.01, 0.1, 1.0]
+proximal_iterations: 80
+proximal_points: 16
+proximal_rate: 0.001
+optimization_seeds: [0, 7, 13, 29, 20260920]
+curvature_multipliers: [1.01, 4.0]
+proposal_scales: [1.0, 0.25, 0.0625]
+optimization_modes: [hard_prox, shadow_accumulation, rd_line_search]
