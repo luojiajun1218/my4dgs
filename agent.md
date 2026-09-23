@@ -1,0 +1,1 @@
+对应conda环境是s2gs，记得conda activate s2gs
