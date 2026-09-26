@@ -296,6 +296,7 @@ def render_mask(viewpoint_camera: SequentialCamera, pc : GaussianModel, pipe, bg
     # They will be excluded from value updates used in the splitting criteria.
     render_pkg = {"render": rendered_image,
                   "flow": None,
+                  "gaussian_xyz": xyz.detach(),
                   "alpha": alpha,
                   "influence": infl,
                   "count_influence": count_infl,

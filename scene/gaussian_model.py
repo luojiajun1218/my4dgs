@@ -32,8 +32,66 @@ from utils.graphics_utils import knn_gpu
 from utils.compress_utils import CompressedLatents, init_latents
 from arguments import QuantizeParams, ModelParams
 from scene.decoders import LatentDecoder, DecoderIdentity, DecoderLayer, LatentDecoderRes, Gate
+from scripts.adaptive_hierarchy import quaternion_multiply
 import time
 from torch_scatter import scatter_max
+
+
+def residual_decoder_gate_for_attribute(gate_before, adaptive_v7b,
+                                        attribute_gate_enabled,
+                                        sqres_floor=0.0,
+                                        sqres_cue_floor=0.0,
+                                        point_evidence=None,
+                                        attribute_name=None):
+    """Select an old Gate mask for a residual decoder.
+
+    Legacy S²GS/V7 behavior applies the offset Gate to every ``sq_res``
+    decoder. V7b respects per-attribute Gate configuration; V7c can apply a
+    global floor to unconfigured attributes, while V7d applies a floor only
+    to old-OFF points with current dynamic evidence.
+    """
+    sqres_floor = float(sqres_floor)
+    if not 0.0 <= sqres_floor <= 1.0:
+        raise ValueError("sqres_floor must be in [0, 1]")
+    sqres_cue_floor = float(sqres_cue_floor)
+    if not 0.0 <= sqres_cue_floor <= 1.0:
+        raise ValueError("sqres_cue_floor must be in [0, 1]")
+    if sqres_floor > 0.0 and sqres_cue_floor > 0.0:
+        raise ValueError("global and cue sq_res floors are mutually exclusive")
+    if gate_before is None:
+        return None
+    if adaptive_v7b and not attribute_gate_enabled:
+        if attribute_name in {"f_dc", "sc", "rot", "op"}:
+            if sqres_cue_floor > 0.0:
+                if point_evidence is None:
+                    raise ValueError(
+                        "point_evidence is required for cue-based sq_res gating")
+                evidence = torch.as_tensor(
+                    point_evidence, device=gate_before.device).flatten().bool()
+                if evidence.numel() != gate_before.numel():
+                    raise ValueError(
+                        "point_evidence must have one value per previous Gate")
+                old = gate_before
+                reopen = ((old.flatten() <= 0.05) & evidence).reshape(old.shape)
+                return torch.where(
+                    reopen,
+                    torch.clamp(old, min=sqres_cue_floor),
+                    old)
+            if sqres_floor > 0.0:
+                return torch.clamp(gate_before, min=sqres_floor)
+        return None
+    return gate_before
+
+
+def adaptive_gate_offset_size_bits(offset_latents, active_mask):
+    """Identity-offset payload bits retained by a deterministic Gate mask."""
+    active_mask = torch.as_tensor(
+        active_mask, device=offset_latents.device).flatten().bool()
+    if offset_latents.ndim < 1 or active_mask.numel() != offset_latents.shape[0]:
+        raise ValueError("active offset mask must have one bit per Gaussian")
+    components = offset_latents.numel() // max(1, offset_latents.shape[0])
+    return int(active_mask.sum().item()) * components * torch.finfo(
+        offset_latents.dtype).bits
 
 class GaussianModel:
     """3D Gaussian Splatting model with quantized latent representations and temporal consistency."""
@@ -124,6 +182,16 @@ class GaussianModel:
         self.frz_rotation =  opt_lod.frz_rot
         self.frz_opacity =  opt_lod.frz_op
         self.gate_atts = None
+        self.shared_motion = None
+        self.hierarchy_update_mask = None
+        self.hierarchy_residual_gate = None
+        self.current_frame_shared_bits = 0
+        self.adaptive_gate_partition = None
+        self.adaptive_gate_partition_enabled = False
+        self.adaptive_gate_partition_v7b_enabled = False
+        self.adaptive_gate_topology_bits = 0
+        # Set only for V7d to the actual selected reopen-mask bitstream cost.
+        self.adaptive_gate_sqres_reopen_mask_bits = 0
         self.latent_args = latent_args
         self.model_args = model_args
         self.setup_functions()
@@ -207,7 +275,48 @@ class GaussianModel:
     def _anchor(self):
         """Get anchor parameters with optional gating."""
         anchor = self.latent_decoders["anchor"](self._latents["anchor"])
-        return anchor
+        return self._apply_hierarchy_update("anchor", anchor)
+
+    def _apply_hierarchy_update(self, attribute_name, value):
+        # Shared motion and the per-Gaussian offset gate have separate jobs.
+        # Other attributes retain their normal S²GS residual-decoder paths.
+        if attribute_name != "offset":
+            return value
+        mask = self.hierarchy_update_mask
+        previous = self.prev_atts[attribute_name]
+        if mask is None or previous is None:
+            return value
+        if mask.numel() != value.shape[0] or previous.shape != value.shape:
+            raise RuntimeError(
+                f"Hierarchy mask mismatch for {attribute_name}: "
+                f"mask={mask.shape}, previous={previous.shape}, value={value.shape}")
+        view_shape = [mask.shape[0]] + [1] * (value.dim() - 1)
+        residual = value - previous
+        if self.hierarchy_residual_gate is not None:
+            residual = self.hierarchy_residual_gate(residual)
+        return previous + mask.reshape(view_shape).to(dtype=value.dtype) * residual
+
+    @torch.no_grad()
+    def prepare_hierarchy_frame(self):
+        """Start a new frame from the previous *rendered* offset state."""
+        previous = self.prev_atts["offset"]
+        if previous is not None and isinstance(
+                self.latent_decoders["offset"], DecoderIdentity):
+            # Inactive points can have unused raw offset latents.  They must
+            # not reappear when this frame selects a different UPDATE region.
+            self._latents["offset"].data.copy_(previous)
+        self.hierarchy_residual_gate = None
+        self.hierarchy_update_mask = None
+
+    def set_hierarchy_update_mask(self, mask):
+        if mask is None:
+            self.hierarchy_update_mask = None
+            return
+        mask = mask.flatten().bool()
+        if mask.numel() != self.get_atts["anchor"].shape[0]:
+            raise ValueError("Hierarchy update mask must match Gaussian count")
+        self.hierarchy_update_mask = mask
+        self.mask_offset.data = mask.unsqueeze(-1).clone()
 
     @property
     def _offset(self):
@@ -225,7 +334,7 @@ class GaussianModel:
         # Apply gating if previous frame attributes exist and gating is enabled
         if self.prev_atts["offset"] is not None and self.gate_atts is not None and self.gate_params["offset"]:
             offset = self.gate_atts(offset-self.prev_atts["offset"])+self.prev_atts["offset"]
-        return offset
+        return self._apply_hierarchy_update("offset", offset)
 
     def _offset_fixed(self):
         # Decode latents to get offset attribute
@@ -249,7 +358,7 @@ class GaussianModel:
             if (torch.isnan(offset).sum() > 0):
                 raise ValueError("Nan")
             
-        return offset
+        return self._apply_hierarchy_update("offset", offset)
 
     @property
     def _ungated_offset_res(self):
@@ -271,7 +380,7 @@ class GaussianModel:
         # Apply gating if enabled
         if self.prev_atts["f_dc"] is not None and self.gate_atts is not None and self.gate_params["f_dc"]:
             features_dc = self.gate_atts(features_dc-self.prev_atts["f_dc"])+self.prev_atts["f_dc"]
-        return features_dc  # shape (N, 1, 3)
+        return self._apply_hierarchy_update("f_dc", features_dc)
     
     @property
     def _features_rest(self):
@@ -285,7 +394,7 @@ class GaussianModel:
         # Apply gating if enabled
         if self.prev_atts["f_rest"] is not None and self.gate_atts is not None and self.gate_params["f_rest"]:
             features_rest = self.gate_atts(features_rest-self.prev_atts["f_rest"])+self.prev_atts["f_rest"]
-        return features_rest  # shape (N, C-1, 3)
+        return self._apply_hierarchy_update("f_rest", features_rest)
     
     @property
     def _scaling(self):
@@ -297,7 +406,7 @@ class GaussianModel:
         if (torch.isnan(scaling).sum() > 0):
             raise ValueError("Nan")
         
-        return scaling
+        return self._apply_hierarchy_update("sc", scaling)
     
     @property
     def _rotation(self):
@@ -305,7 +414,7 @@ class GaussianModel:
         rot = self.latent_decoders["rot"](self._latents["rot"])
         if self.prev_atts["rot"] is not None and self.gate_atts is not None and self.gate_params["rot"]:
             rot = self.gate_atts(rot-self.prev_atts["rot"])+self.prev_atts["rot"]
-        return rot
+        return self._apply_hierarchy_update("rot", rot)
     
     @property
     def _opacity(self):
@@ -313,7 +422,7 @@ class GaussianModel:
         op = self.latent_decoders["op"](self._latents["op"])
         if self.prev_atts["op"] is not None and self.gate_atts is not None and self.gate_params["op"]:
             op = self.gate_atts(op-self.prev_atts["op"])+self.prev_atts["op"]
-        return op
+        return self._apply_hierarchy_update("op", op)
     
     @property
     def get_flow(self):
@@ -642,16 +751,36 @@ class GaussianModel:
 
         self._latents["flow"] *= 0
 
+    @torch.no_grad()
+    def adaptive_gate_active_mask(self, threshold=0.05):
+        """Return deterministic per-Gaussian activity for the current Gate map."""
+        partition = self.adaptive_gate_partition
+        if partition is None or self.gate_atts is None:
+            return None
+        point_group_ids = partition["point_group_ids"]
+        point_count = self._latents["offset"].shape[0]
+        if point_group_ids.numel() != point_count:
+            raise RuntimeError(
+                "Adaptive Gate partition no longer matches the Gaussian count")
+        group_gates = self.gate_atts.sample_gate_Gumbel_Softmax(
+            stochastic=False)
+        return group_gates.index_select(0, point_group_ids) > threshold
+
     def size(self):
         """Calculate compressed model size in bits for storage estimation."""
         with torch.no_grad():
             latents_size = ldec_size = 0
             frz, masks = self.get_frz, self.get_masks
+            adaptive_gate_mask = self.adaptive_gate_active_mask()
             
             for param_name in self.param_names:
                 if param_name == "anchor":
                     continue
                 mask = masks[param_name].flatten()
+                hierarchy_mask = self.hierarchy_update_mask
+                if (param_name == "offset"
+                        and self.hierarchy_residual_gate is not None):
+                    hierarchy_mask = self.hierarchy_residual_gate.active_mask()
                     
                 # Add decoder size
                 ldec_size += self.latent_decoders[param_name].size()
@@ -677,6 +806,15 @@ class GaussianModel:
                     if self.gate_atts is not None and self.gate_params[param_name]:
                         assert frz[param_name] == "none"
                         mask_frac = mask
+                    if (param_name == "offset" and hierarchy_mask is not None
+                            and self.frame_idx > 1):
+                        mask_frac = hierarchy_mask.float().mean().item()
+                    if (param_name == "offset" and adaptive_gate_mask is not None
+                            and self.frame_idx > 1
+                            and self.gate_params.get("offset", False)):
+                        latents_size += adaptive_gate_offset_size_bits(
+                            p, adaptive_gate_mask)
+                        continue
                     latents_size += p.numel()*torch.finfo(p.dtype).bits*mask_frac
                 else:
                     if frz[param_name] == "all":
@@ -701,6 +839,16 @@ class GaussianModel:
                             weight = torch.round(self._latents[param_name][:,dim]).long() 
                         if frz[param_name] == "st":
                             weight = weight[mask]
+                        if (param_name == "offset" and hierarchy_mask is not None
+                                and self.frame_idx > 1):
+                            weight = weight[hierarchy_mask]
+                        if (param_name == "offset"
+                                and adaptive_gate_mask is not None
+                                and self.frame_idx > 1
+                                and self.gate_params.get("offset", False)):
+                            weight = weight[adaptive_gate_mask]
+                        if weight.numel() == 0:
+                            continue
                         
                         unique_vals, counts = torch.unique(weight, return_counts = True)
                         probs = counts/torch.sum(counts)
@@ -712,8 +860,59 @@ class GaussianModel:
             # Add gate size if present
             if self.gate_atts is not None:
                 latents_size += self.gate_atts.size()
+            if self.hierarchy_residual_gate is not None:
+                latents_size += self.hierarchy_residual_gate.size_bits()
+            if self.adaptive_gate_partition is not None:
+                latents_size += int(self.adaptive_gate_topology_bits)
+            # The V7d cue-derived sq_res mask is one shared side channel for
+            # all unconfigured attributes, so charge its coded bytes once.
+            latents_size += int(self.adaptive_gate_sqres_reopen_mask_bits)
                 
+        if self.shared_motion is not None:
+            latents_size += self.shared_motion.storage_bits()
+        else:
+            latents_size += self.current_frame_shared_bits
         return ldec_size+latents_size
+
+    def apply_shared_motion(self, xyz, rotation, point_mask=None):
+        """Apply the current frame's shared motion at render time."""
+        if self.shared_motion is None:
+            # Keep the first frame bit-for-bit on S²GS's rendering path.
+            return xyz, rotation
+        if point_mask is None:
+            point_mask = slice(None)
+        translation, quaternion = self.shared_motion()
+        xyz = xyz + translation[point_mask]
+        rotation = quaternion_multiply(quaternion[point_mask], rotation)
+        return xyz, F.normalize(rotation, dim=-1)
+
+    @torch.no_grad()
+    def _encode_decoded_attribute(self, attribute_name, decoded_value):
+        decoder = self.latent_decoders[attribute_name]
+        target = decoded_value
+        if isinstance(decoder, LatentDecoderRes):
+            target = target - decoder.decoded_att
+        encoded = decoder.invert(target)
+        if encoded.shape != self._latents[attribute_name].shape:
+            raise RuntimeError(
+                f"Cannot bake hierarchy motion into {attribute_name}: "
+                f"encoded={encoded.shape}, latent="
+                f"{self._latents[attribute_name].shape}")
+        self._latents[attribute_name].data.copy_(encoded)
+
+    @torch.no_grad()
+    def commit_shared_motion(self):
+        """Bake the transmitted shared change into the sequential GS state."""
+        if self.shared_motion is None:
+            return
+        self.current_frame_shared_bits = self.shared_motion.storage_bits()
+        translation, quaternion = self.shared_motion()
+        moved_anchor = self._anchor.detach() + translation
+        moved_rotation = F.normalize(quaternion_multiply(
+            quaternion, self.get_rotation.detach()), dim=-1)
+        self._encode_decoded_attribute("anchor", moved_anchor)
+        self._encode_decoded_attribute("rot", moved_rotation)
+        self.shared_motion = None
     
     def training_setup(self, training_args, opt_lod):
         # self.percent_dense = training_args.percent_dense
@@ -820,7 +1019,9 @@ class GaussianModel:
                 net_std += self._latents[att_name].std(dim=0).mean()
         return net_std
     
-    def update_residuals(self,dataset):
+    def update_residuals(self, dataset, adaptive_gate_sqres_floor=0.0,
+                         adaptive_gate_sqres_cue_floor=0.0,
+                         point_evidence=None):
         """Initialize residual encoders for temporal compression in subsequent frames."""
         atts = self.get_atts # All the latent variables
         
@@ -832,7 +1033,15 @@ class GaussianModel:
         
         for i, att_name in enumerate(atts):
             if self.latent_args.quant_type[i] == 'sq_res':
-                decoded_att = self.latent_decoders[att_name](self._latents[att_name])
+                if (self.adaptive_gate_partition_enabled
+                        or self.adaptive_gate_partition is not None):
+                    # V7 OFF points may contain unused residuals.  Start its
+                    # next frame from the actually rendered, gated value.
+                    decoded_att = self.get_decoded_atts[att_name].detach()
+                else:
+                    # Preserve the original S²GS path outside V7.
+                    decoded_att = self.latent_decoders[att_name](
+                        self._latents[att_name])
                 
                 if self.frame_idx == 2:
                     # Switch from identity to residual decoder after frame 1
@@ -848,19 +1057,36 @@ class GaussianModel:
                         use_shift=self.latent_args.use_shift[i],
                         ldec_std=self.latent_args.ldec_std[i],
                         final_activation=self.latent_args.final_activation[i],
-                        gates = self.gate_before if self.gate_atts is not None else None,
+                        gates = residual_decoder_gate_for_attribute(
+                            self.gate_before if self.gate_atts is not None else None,
+                            self.adaptive_gate_partition_v7b_enabled,
+                            self.gate_params.get(att_name, False),
+                            sqres_floor=adaptive_gate_sqres_floor,
+                            sqres_cue_floor=adaptive_gate_sqres_cue_floor,
+                            point_evidence=point_evidence,
+                            attribute_name=att_name),
                     ).cuda()
                     self.latent_decoders[att_name] = decoder
                 else:
                     # Verify residual decoder type for subsequent frames
                     decoder = self.latent_decoders[att_name]
                     assert isinstance(self.latent_decoders[att_name], LatentDecoderRes)
-                    decoder.gates = self.gate_before if self.gate_atts is not None else None
+                    decoder.gates = residual_decoder_gate_for_attribute(
+                        self.gate_before if self.gate_atts is not None else None,
+                        self.adaptive_gate_partition_v7b_enabled,
+                        self.gate_params.get(att_name, False),
+                        sqres_floor=adaptive_gate_sqres_floor,
+                        sqres_cue_floor=adaptive_gate_sqres_cue_floor,
+                        point_evidence=point_evidence,
+                        attribute_name=att_name)
 
                 self.latent_decoders[att_name].frame_idx = self.frame_idx
 
                 # Initialize decoder with previous frame's decoded attributes
-                if "f_" in att_name and self.frame_idx == 2:
+                if ("f_" in att_name
+                        and (self.frame_idx == 2
+                             or self.adaptive_gate_partition_enabled
+                             or self.adaptive_gate_partition is not None)):
                     decoder.init_decoded(decoded_att.reshape(decoded_att.shape[0], -1))  # SH coefficients in (N, X)
                 else:
                     decoder.init_decoded(decoded_att)
@@ -928,6 +1154,8 @@ class GaussianModel:
         scale = scaling[:,3:].detach().cpu().numpy()
         # scale = scaling.detach().cpu().numpy()
         xyz = anchor + offsets
+        rotation = self.get_rotation
+        xyz, rotation = self.apply_shared_motion(xyz, rotation)
         # xyz = anchor
         xyz = xyz.detach().cpu().numpy()
         xyz = xyz.astype(np.float32)
@@ -938,7 +1166,7 @@ class GaussianModel:
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
+        rotation = rotation.detach().cpu().numpy()
 
         vertex_ids = np.arange(xyz.shape[0])
         dtype_full = [(attribute, 'f4') for attribute in ['x', 'y', 'z', 'nx', 'ny', 'nz']]
@@ -1183,6 +1411,89 @@ class GaussianModel:
         if prune_mask.shape[0]>0:
             self.prune_anchor(prune_mask)   # 最终从模型中物理删除被标记的锚点。
 
+    @torch.no_grad()
+    def grow_hierarchy_dynamic(self, iteration, opt, max_candidates=32):
+        """Use S²GS anchor growth only inside UPDATE regions, without pruning.
+
+        Pruning is deliberately separate: removing old anchors here would also
+        invalidate this frame's stored hierarchy-to-Gaussian mapping.
+        """
+        if self.shared_motion is not None:
+            raise RuntimeError("Commit shared motion before hierarchy growth")
+        if self.hierarchy_update_mask is None:
+            raise RuntimeError("Hierarchy growth needs an UPDATE mask")
+        old_count = self.get_anchor.shape[0]
+        grads = self.offset_gradient_accum / self.offset_denom.clamp_min(1.0)
+        grads = torch.nan_to_num(grads).norm(dim=-1)
+        allowed = self.hierarchy_update_mask.repeat_interleave(self.n_offsets)
+        observed = ((self.offset_denom > opt.update_interval
+                     * opt.success_threshold * 0.5).flatten() & allowed)
+        candidate_ids = torch.nonzero(observed, as_tuple=False).flatten()
+        if candidate_ids.numel() > max_candidates:
+            strongest = torch.topk(grads[candidate_ids],
+                                   k=max_candidates).indices
+            observed.zero_()
+            observed[candidate_ids[strongest]] = True
+        self.anchor_growing(
+            iteration, grads, opt.densify_grad_threshold,
+            opt.update_ratio, opt.extra_ratio, opt.extra_up,
+            observed, opt.overlap)
+        self.offset_denom[observed] = 0
+        self.offset_gradient_accum[observed] = 0
+        target_size = self.get_anchor.shape[0] * self.n_offsets
+        padding = target_size - self.offset_denom.shape[0]
+        if padding:
+            zeros = self.offset_denom.new_zeros(padding, 1)
+            self.offset_denom = torch.cat((self.offset_denom, zeros), dim=0)
+            self.offset_gradient_accum = torch.cat(
+                (self.offset_gradient_accum, zeros.clone()), dim=0)
+        return self.get_anchor.shape[0] - old_count
+
+    @torch.no_grad()
+    def _sync_hierarchy_growth(self, new_values, sources, old_decoded, old_count):
+        """Give newborn GS valid temporal baselines and an active hierarchy mask."""
+        new_count = sources.numel()
+        if not new_count:
+            return
+        for name in self.param_names:
+            decoder = self.latent_decoders[name]
+            old_shape = old_decoded[name].shape[1:]
+            if isinstance(decoder, LatentDecoderRes):
+                if name in ("f_dc", "f_rest"):
+                    desired = old_decoded[name][sources].reshape(new_count, -1)
+                else:
+                    desired = new_values[name].reshape(new_count, -1)
+                latent = self._latents[name].data[old_count:]
+                latent.zero_()
+                if decoder.identity:
+                    zero_residual = torch.zeros_like(desired)
+                else:
+                    zero_residual = decoder.final_activation(
+                        decoder.layers(latent / decoder.div))
+                decoder.decoded_att = torch.cat(
+                    (decoder.decoded_att, desired - zero_residual), dim=0)
+                decoded_new = desired.reshape(new_count, *old_shape)
+            else:
+                decoded_new = decoder(
+                    self._latents[name][old_count:]).reshape(
+                        new_count, *old_shape).detach()
+            if self.prev_atts[name] is not None:
+                self.prev_atts[name] = torch.cat(
+                    (self.prev_atts[name], decoded_new), dim=0)
+            if (self.prev_latents[name] is not None
+                    and not isinstance(decoder, LatentDecoderRes)):
+                previous_shape = self.prev_latents[name].shape[1:]
+                new_latents = self._latents[name].detach()[old_count:]
+                if new_latents[0].numel() == self.prev_latents[name][0].numel():
+                    new_latents = new_latents.reshape(new_count, *previous_shape)
+                    self.prev_latents[name] = torch.cat(
+                        (self.prev_latents[name], new_latents), dim=0)
+        self.hierarchy_update_mask = torch.cat(
+            (self.hierarchy_update_mask,
+             torch.ones(new_count, device=sources.device, dtype=torch.bool)))
+        if self.hierarchy_residual_gate is not None:
+            self.hierarchy_residual_gate.append_new_points(new_count)
+
     def add_densification_stats(self, render_pkg, width, height):
         viewspace_point_tensor = render_pkg["viewspace_points"]
         update_filter = render_pkg["visibility_filter"]
@@ -1398,7 +1709,8 @@ class GaussianModel:
         offsets = grid_offsets.view([-1, 3]) * scaling[:,:3]
         scaling = scaling[:,3:] 
         
-        xyz = anchor + offsets 
+        xyz = anchor + offsets
+        xyz, rotation = self.apply_shared_motion(xyz, rotation, visible_mask)
         mask = torch.ones(xyz.shape[0], dtype=torch.bool, device="cuda")
 
         return xyz, color, opacity, scaling, rotation, mask
@@ -1583,6 +1895,24 @@ class GaussianModel:
                 new_indices_ds = torch.zeros([0], dtype=torch.long, device='cuda')
             # 参数初始化
             if candidate_anchor.shape[0] + candidate_anchor_ds.shape[0] > 0:
+
+                if self.hierarchy_update_mask is not None:
+                    old_count = self.get_anchor.shape[0]
+                    old_decoded = {name: value.detach().clone()
+                                   for name, value in self.get_decoded_atts.items()}
+                    source_ids = torch.arange(
+                        old_count, device=self.get_anchor.device).repeat_interleave(
+                            self.n_offsets)
+                    source_1 = (scatter_max(
+                        source_ids[candidate_mask], inverse_indices, dim=0)[0]
+                        [remove_duplicates] if candidate_anchor.shape[0] else
+                        source_ids.new_empty(0))
+                    source_2 = (scatter_max(
+                        source_ids[candidate_ds_mask], inverse_indices_ds,
+                        dim=0)[0][remove_duplicates_ds]
+                        if candidate_anchor_ds.shape[0] else
+                        source_ids.new_empty(0))
+                    new_sources = torch.cat((source_1, source_2), dim=0)
                 
                 new_anchor = torch.cat([candidate_anchor, candidate_anchor_ds], dim=0)
                 new_level = torch.cat([new_level, new_level_ds]).unsqueeze(dim=1).float().cuda()
@@ -1631,6 +1961,19 @@ class GaussianModel:
                     "op": new_opacities
                 }   
 
+                if self.hierarchy_update_mask is not None:
+                    # S²GS growth builds decoded raw attributes, whereas a
+                    # temporal residual decoder can have a different latent
+                    # width (for example 6-D scale versus 8-D scale latent).
+                    # Store the raw target as the newborn baseline and append
+                    # correctly shaped zero residual latents to the optimizer.
+                    new_decoded_targets = d.copy()
+                    for name in self.param_names:
+                        if isinstance(self.latent_decoders[name], LatentDecoderRes):
+                            d[name] = self._latents[name].new_zeros(
+                                new_anchor.shape[0],
+                                self._latents[name].shape[1])
+
                 temp_anchor_demon = torch.cat([self.anchor_demon, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
                 del self.anchor_demon
                 self.anchor_demon = temp_anchor_demon
@@ -1652,6 +1995,10 @@ class GaussianModel:
                 self._level = torch.cat([self._level, new_level], dim=0)
                 self._extra_level = torch.cat([self._extra_level, new_extra_level], dim=0)
                 self.root_indices = torch.cat([self.root_indices, new_indices], dim=0)
+                if self.hierarchy_update_mask is not None:
+                    self._sync_hierarchy_growth(
+                        new_decoded_targets, new_sources,
+                        old_decoded, old_count)
 
     def prune_anchor(self, mask):
         valid_points_mask = ~mask
