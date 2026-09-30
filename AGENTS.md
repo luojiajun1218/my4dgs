@@ -1,13 +1,14 @@
-项目为基于 ReCon-GS 的 GradHet v2 原型，使用 conda 环境 ReConGS。
+项目为基于 ReCon-GS 的分层运动压缩原型，使用 conda 环境 ReConGS。
 数据通过软链接访问，不复制大型数据。
-output 中既有实验目录及 references/official_full3_scratch6 为指向原目录的软链接；references/original_backup 是独立副本，历史结果仅用于读取，新实验使用新的 experiment_name。
+本地 data/colmap4d/flame_steak 指向 /home/gamer-02/Documents/DeepLearning/ReCon-GS/data/colmap4d/flame_steak；其帧图像与 COLMAP 文件链接到 /home/gamer-02/Documents/DeepLearning/S2GS/data/standard_flame_steak_300。当前 motion-only 配置使用 resolution: -1、num_frames: 300，并加载共享首帧；libgs 会自动缩小宽图。
+output 中历史结果仅用于读取；目录可能包含软链接，不修改链接目标。新实验使用新的 experiment_name。实验汇总位于 docs/experiments/，Git 不保存原始训练产物。
 内部 pipeline 名称保留 ReCon-GS，以兼容 libgs 动态加载。
 
 # 仓库贡献指南
 
 ## 项目结构与模块组织
 
-`main.py` 是训练入口。GradHet v2 与 ReCon-GS 的核心代码位于 `pipeline/ReCon-GS/`；`libgs` 会动态加载此名称，因此不得重命名该目录。实验配置放在 `config/`，数值回归检查放在 `tests/`，可复用的启动及结果汇总脚本放在 `scripts/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
+`main.py` 是训练入口。GradHet v2 与 ReCon-GS 的核心代码位于 `pipeline/ReCon-GS/`；`libgs` 会动态加载此名称，因此不得重命名该目录。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
 
 ## 构建、测试与开发命令
 
@@ -16,15 +17,23 @@ output 中既有实验目录及 references/official_full3_scratch6 为指向原�
 ```bash
 conda activate ReConGS
 python tests/test_nested_prototype.py
-bash scripts/run_prototype.sh gradhet
-python main.py --pipeline=ReCon-GS --config=config/prototype_gradhet_scratch6.yaml
+python tests/test_experiment_inventory.py
+python main.py --pipeline=ReCon-GS --config=config/flame_steak_motion_only.yaml experiment_name=fs_motion_only_new_run
 ```
 
-测试脚本无需加载渲染器，可检查层级采样、权重混合、梯度诊断、训练调度和 checkpoint 恢复。`run_prototype.sh` 运行共享首帧的原型并汇总结果。本项目没有单独的构建步骤。
+测试脚本无需加载渲染器，可检查层级采样、权重混合、梯度诊断、训练调度和 checkpoint 恢复。本项目没有单独的构建步骤。
 
 ## 编码风格与命名约定
 
 Python 使用四空格缩进并遵循 PEP 8：函数、变量和模块采用 `snake_case`，类采用 `PascalCase`。在接口不直观时补充类型标注，并明确张量的形状、设备和数据类型。遵循相邻代码的 PyTorch 写法，实验参数写入 YAML，不要硬编码。仓库目前未配置统一格式化或 lint 工具，避免无关的格式调整。
+
+## 与用户协作
+
+- 文档使用短句、通俗说法和具体例子。先说明要解决什么、怎么做；公式和实现细节放在后面，避免写成长篇术语说明。
+- 新增或修改的可调超参数统一写入 YAML，并由代码读取。配置中简短说明参数含义；待讨论的候选值不代表已经选定。
+- 运行代码前，先和用户讨论并确定本次使用的超参数，再开始运行。代码修改和候选配置可以先准备好。
+- 当前实验的训练由用户手动启动；配置准备好后提供命令，除非用户另行明确要求，不自行启动训练。
+- 委派代码实现时优先使用用户指定的 GPT-6 Sol，主 agent 负责检查和解释，控制不必要的 token 开销。
 
 ## 测试规范
 
@@ -32,7 +41,7 @@ Python 使用四空格缩进并遵循 PEP 8：函数、变量和模块采用 `sn
 
 ## 提交与拉取请求规范
 
-当前快照不含 Git 历史，无法归纳既有提交格式。建议使用简短、祈使式且可带范围的标题，例如 `deformation: fix fine residual blending`，并保证每个提交聚焦单一改动。拉取请求应说明方法变化、列出已执行命令和受影响配置，并报告相关 PSNR 或诊断指标差异。适用时关联 issue；视觉变化需附曲线图或渲染样例。
+使用简短、祈使式且可带范围的标题，例如 `deformation: fix fine residual blending`，并保证每个提交聚焦单一改动。拉取请求应说明方法变化、列出已执行命令和受影响配置，并报告相关 PSNR 或诊断指标差异。适用时关联 issue；视觉变化需附曲线图或渲染样例。
 
 ## 数据与实验安全
 
