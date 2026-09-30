@@ -1,0 +1,21 @@
+# 每帧第200步随渲染图输出 *_residuals.png：三层区域框，以及逐GS残差。
+enabled: true
+online_enabled: true
+online_frames: null
+online_cameras: null
+max_boxes_per_panel: 35
+max_labels_per_panel: 8
+line_width: 1.2
+point_size: 0.3
+max_points: 20000
+point_alpha: 0.5
+dpi: 140
+region_figsize:
+- 14
+- 10
+box_alpha: 0.75
+label_fontsize: 7
+panel_fontsize: 10
+legend_fontsize: 8
+online_steps:
+- 200

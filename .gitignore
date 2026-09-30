@@ -4,3 +4,19 @@ __pycache__/
 data/
 output/
 references/
+
+# Local CUDA extension build products (sources are not present here).
+submodules/
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+
+# Training artifacts must stay local even outside output/.
+*.pth
+*.pt
+*.pkl
+*.ply
+*.npz
+*.tfevents.*

@@ -15,6 +15,8 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_xyz(self) -> Float[Tensor, "n 3"]:
+        if (override := getattr(self, "rigid_xyz", None)) is not None:
+            return override
         xyz = super().get_xyz
         if (delta_xyz := getattr(self, "delta_xyz", None)) is not None:
             return xyz + delta_xyz
@@ -24,6 +26,8 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_rotation(self) -> Float[Tensor, "n 3"]:
+        if (override := getattr(self, "rigid_rotation", None)) is not None:
+            return self.rotation_activation(override)
         if (delta_rot := getattr(self, "delta_rot", None)) is not None:
             return quaternion_multiply(super().get_rotation, delta_rot)
         return super().get_rotation
@@ -35,6 +39,11 @@ class GaussianModel(BaseGaussianModel):
     @property
     def get_rotation_ori(self) -> Float[Tensor, "n 3"]:
         return super().get_rotation
+
+    def get_covariance(self, scaling_modifier=1):
+        if getattr(self, 'rigid_rotation', None) is not None:
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self.get_rotation)
+        return super().get_covariance(scaling_modifier)
 
     def add_densification_stats(
         self,
@@ -183,6 +192,15 @@ class GaussianModel(BaseGaussianModel):
             self._rotation = tensors["rotation"]
         except TypeError:  # state stored in optimizer is None
             self._xyz, self._rotation = xyz, rotation
+
+    @torch.no_grad()
+    def apply_selected_motion(self, xyz: Tensor, raw_rotation: Tensor):
+        """Copy accepted values exactly; the base optimizer is never stepped."""
+        self._xyz.copy_(xyz)
+        self._rotation.copy_(raw_rotation)
+        self.optimizer.zero_grad(set_to_none=True)
+        for parameter in (self._xyz, self._rotation):
+            self.optimizer.state.pop(parameter, None)
 
     @torch.no_grad()
     def extend(self, gaussians: BaseGaussianModel) -> "GaussianModel":

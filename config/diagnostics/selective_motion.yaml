@@ -1,0 +1,27 @@
+# 旧KEEP/SHARED/SPLIT实验共用的显示参数。
+# 离线看图时，image_step要与已有图片的保存步数一致。
+enabled: true
+online_enabled: true
+online_frames: null
+online_cameras: null
+online_steps: null
+save_gs_projection: true
+offline_camera: cam00
+offline_frames: [5, 20]
+image_step: 200
+max_boxes_per_panel: 35
+max_labels_per_panel: 8
+shared_depth: null
+split_depth: 0
+line_width: 1.2
+point_size: 0.3
+shared_point_size: 3
+max_points: 20000
+point_alpha: 0.5
+dpi: 140
+region_figsize: [14, 10]
+gs_figsize: [18, 5]
+box_alpha: 0.75
+label_fontsize: 7
+panel_fontsize: 10
+legend_fontsize: 8

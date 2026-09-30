@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -9,7 +9,6 @@ from torch import Tensor, nn
 import time
 
 from .nested import NestedFineGrid, weighted_gradient_diagnostics
-from .rd_tree_motion import RDTreeConfig
 
 from ..utils import average_quaternions, batched_knn, batched_keops_knn, uniform_grid_sampling_optimized
     
@@ -88,25 +87,11 @@ class DeformConfig:
     score_start_step: int = 31
     selection_seed: int = 0
     fine_overlap_ratio: float = 0.15
-    # Independent adaptive binary motion mode; legacy/nested remain unchanged.
-    binary_root_size: int = 72
-    binary_max_depth: int = 4
-    binary_max_splits: int = 12000
-    binary_min_child: int = 8
-    binary_kmeans_steps: int = 6
-    binary_gradient_weight: float = 0.5
-    binary_candidate_batch: int = 2048
-    binary_split_start: int = 20
-    binary_split_until: int = 80
-    binary_split_interval: int = 15
-    binary_probe_steps: int = 4
-    binary_eval_views: int = 4
-    binary_decision_all_views: bool = False
-    binary_q_xyz: float = 0.0001
-    binary_q_rotation: float = 0.0002
-    binary_lambda_rate: float = 0.0001  # loss units per bit per base Gaussian
-    binary_detail_lr_scale: float = 1.0  # Scale Adam updates, not gradients.
-    rd_tree: RDTreeConfig = field(default_factory=RDTreeConfig)
+    gate_step_l2: int = 20
+    gate_step_l3: int = 40
+    gate_step_l4: int = 60
+    gate_score_window: int = 10
+    gate_keep_ratio: float = 0.5
 
 
 class Deformation(nn.Module):
