@@ -1,8 +1,20 @@
 项目为基于 ReCon-GS 的分层运动压缩原型，使用 conda 环境 ReConGS。
 数据通过软链接访问，不复制大型数据。
 本地 data/colmap4d/flame_steak 指向 /home/gamer-02/Documents/DeepLearning/ReCon-GS/data/colmap4d/flame_steak；其帧图像与 COLMAP 文件链接到 /home/gamer-02/Documents/DeepLearning/S2GS/data/standard_flame_steak_300。当前 motion-only 配置使用 resolution: -1、num_frames: 300，并加载共享首帧；libgs 会自动缩小宽图。
-output 中历史结果仅用于读取；目录可能包含软链接，不修改链接目标。新实验使用新的 experiment_name。实验汇总位于 docs/experiments/，Git 不保存原始训练产物。
-内部 pipeline 名称保留 ReCon-GS，以兼容 libgs 动态加载。
+output 中历史结果仅用于读取；目录可能包含软链接，不修改链接目标。新实验使用新的 experiment_name。Git 不保存原始训练产物。
+
+# 特别须知
+实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档，
+文档中记录这次实验的核心idea，以及对应的代码改动（简要版的，不需要特别详细，可以渐进式披露），运行的结果分析，以及可能造成这种结果的原因。
+相当于是一次实验记录文档，不然有些实验 我也记不清楚他们是干嘛的了。
+
+我（作者）一开始的想法很简单就是 让改动的地方动，不改动的地方不动。
+具体而言 我大致的做法是：
+1.自适应分层，这里的gate是个可学习参数，由模型自动判断是不是要开启下一层。
+2.storage loss，存储loss，尽量少的gs变化，让需要改变的gs变化
+3.atrribute gate（待做，等自适应分层和storage loss成功了在做），比如灯泡这种就只需要改颜色（位置gate可以关闭），刚体只需要改位置（颜色一般不变化）
+
+
 
 # 仓库贡献指南
 
@@ -16,9 +28,7 @@ output 中历史结果仅用于读取；目录可能包含软链接，不修改�
 
 ```bash
 conda activate ReConGS
-python tests/test_nested_prototype.py
-python tests/test_experiment_inventory.py
-python main.py --pipeline=ReCon-GS --config=config/flame_steak_motion_only.yaml experiment_name=fs_motion_only_new_run
+python main.py --config=config/xxxxx.yaml
 ```
 
 测试脚本无需加载渲染器，可检查层级采样、权重混合、梯度诊断、训练调度和 checkpoint 恢复。本项目没有单独的构建步骤。
@@ -33,7 +43,7 @@ Python 使用四空格缩进并遵循 PEP 8：函数、变量和模块采用 `sn
 - 新增或修改的可调超参数统一写入 YAML，并由代码读取。配置中简短说明参数含义；待讨论的候选值不代表已经选定。
 - 运行代码前，先和用户讨论并确定本次使用的超参数，再开始运行。代码修改和候选配置可以先准备好。
 - 当前实验的训练由用户手动启动；配置准备好后提供命令，除非用户另行明确要求，不自行启动训练。
-- 委派代码实现时优先使用用户指定的 GPT-6 Sol，主 agent 负责检查和解释，控制不必要的 token 开销。
+- 委派代码实现时优先使用用户指定的 GPT-6 luna xhigh，主 agent 负责检查和解释，控制不必要的 token 开销。
 
 ## 测试规范
 
