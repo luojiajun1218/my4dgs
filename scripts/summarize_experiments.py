@@ -183,6 +183,57 @@ def inventory_bytes(run):
 def stream_frame(run, report):
     stream = report['stream']
     frame = report['frame']
+    activity = stream['activities']['gs']['fractions']
+    storage_only = stream.get('storage_only', False)
+    stage_prefix = 'storage' if storage_only else 'codec'
+    result = dict(births=stream['new_count'],
+                  deletions=stream['deleted_count'], old_gs_count=stream['activities']['gs']['denominator'],
+                  gs_keep_fraction=activity['KEEP'], gs_shared_fraction=activity['SHARED'],
+                  gs_local_fraction=activity['SPLIT'],
+                  **{f'{stage_prefix}_{key}_seconds': value for key, value in stream['stage_seconds'].items()})
+    if storage_only:
+        if stream.get('codec_enabled', False) or any(stream.get(key) is not None for key in
+                ('actual', 'actual_bytes_by_class', 'total_stream_bytes', 'bootstrap_bytes',
+                 'estimated_total_bits', 'estimated_bits_by_class')):
+            raise ValueError('Storage-only reports must not claim encoded bytes or estimated bits')
+        for state_row in [stream['activities']['gs'], *stream['activities'].get('levels', [])]:
+            denominator = state_row['denominator']
+            counts = state_row.get('counts')
+            fractions = state_row['fractions']
+            if (not isinstance(denominator, int) or denominator < 0 or
+                    (state_row.get('visited_count', denominator) != denominator)):
+                raise ValueError('Storage activity denominator must count old GS or visited nodes')
+            if counts is not None:
+                if (sum(counts.get(name, 0) for name in ('KEEP', 'SHARED', 'SPLIT')) != denominator or
+                        any(not math.isclose(fractions[name], counts[name] / denominator if denominator else 0.,
+                                             rel_tol=1e-6, abs_tol=1e-6)
+                            for name in ('KEEP', 'SHARED', 'SPLIT'))):
+                    raise ValueError('Storage activity fractions do not match their denominator')
+        for total_key, parts_key in (
+                ('hard_storage_bytes', 'storage_bytes_by_class'),
+                ('expected_storage_bytes', 'expected_storage_bytes_by_class')):
+            total, parts = stream[total_key], stream[parts_key]
+            if (not isinstance(parts, dict) or not parts or
+                    not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+                            for value in [total, *parts.values()])):
+                raise ValueError('Storage byte counts must be finite and nonnegative')
+            if not math.isclose(sum(parts.values()), total, rel_tol=1e-6, abs_tol=1e-5):
+                raise ValueError('Storage class totals do not match parameter bytes')
+        reference = stream['reference_storage_bytes']
+        if not isinstance(reference, (int, float)) or not math.isfinite(reference) or reference <= 0:
+            raise ValueError('Reference storage bytes must be finite and positive')
+        return dict(result, storage_measurement='parameter_bytes_estimate',
+                    expected_storage_bytes=stream['expected_storage_bytes'],
+                    hard_storage_bytes=stream['hard_storage_bytes'],
+                    reference_storage_bytes=reference,
+                    **{f'storage_{key}': value for key, value in stream['storage_bytes_by_class'].items()})
+    result['estimated_bits'] = stream['estimated_total_bits']
+    if not stream.get('codec_enabled', True):
+        # No compressed file exists. Keep estimates separate from measured bytes.
+        if any(stream.get(key) is not None for key in
+               ('actual', 'actual_bytes_by_class', 'total_stream_bytes', 'bootstrap_bytes')):
+            raise ValueError('Codec-disabled reports must not claim actual encoded bytes')
+        return dict(result, rate_measurement='estimated_only')
     packet = run / 'incremental_stream' / f'frame_{frame:03d}.bin'
     actual_bytes = packet.stat().st_size
     if actual_bytes != stream['actual']['total_bytes']:
@@ -196,14 +247,9 @@ def stream_frame(run, report):
     for key in ('frame', 'total_stream_bytes', 'estimated_total_bits', 'decoded_reference_sha256'):
         if sidecar[key] != stream[key]:
             raise ValueError(f'{packet}: sidecar and summary differ at {key}')
-    activity = stream['activities']['gs']['fractions']
-    return dict(stream_bytes=stream['total_stream_bytes'], bootstrap_bytes=bootstrap_bytes,
-                estimated_bits=stream['estimated_total_bits'], births=stream['new_count'],
-                deletions=stream['deleted_count'], old_gs_count=stream['activities']['gs']['denominator'],
-                gs_keep_fraction=activity['KEEP'], gs_shared_fraction=activity['SHARED'],
-                gs_local_fraction=activity['SPLIT'],
-                **stream['actual_bytes_by_class'],
-                **{f'codec_{key}_seconds': value for key, value in stream['stage_seconds'].items()})
+    return dict(result, rate_measurement='actual',
+                stream_bytes=stream['total_stream_bytes'], bootstrap_bytes=bootstrap_bytes,
+                **stream['actual_bytes_by_class'])
 
 
 def summarize_run(run, external=False):
@@ -266,7 +312,8 @@ def summarize_run(run, external=False):
         if reports:
             for path in reports:
                 report = read_json(path)
-                quality = (report.get('decoded_evaluation') or report.get('evaluation', {})).get('test')
+                quality = (report.get('decoded_evaluation') or report.get('quantized_evaluation')
+                           or report.get('evaluation', {})).get('test')
                 if not quality:
                     entry['warnings'].append(f'{path.name}: missing final test evaluation; excluded.')
                     continue
@@ -368,6 +415,15 @@ def summarize_run(run, external=False):
         entry['last_frame'] = dynamic[-1]
         entry['psnr_min'] = min(dynamic, key=lambda row: row['psnr'])
         entry['psnr_max'] = max(dynamic, key=lambda row: row['psnr'])
+    storage_estimates = [row for row in dynamic
+                         if row.get('storage_measurement') == 'parameter_bytes_estimate']
+    if storage_estimates:
+        entry['storage'] = dict(
+            measurement='parameter_bytes_estimate', frames=len(storage_estimates),
+            mean_hard_bytes=statistics.fmean(row['hard_storage_bytes'] for row in storage_estimates),
+            mean_expected_bytes=statistics.fmean(row['expected_storage_bytes'] for row in storage_estimates),
+            semantics='Effective parameter-byte estimates per completed frame; excludes the external frame-0 '
+                      'reference, headers, training files, logs and optimizer.')
     streamed = [row for row in dynamic if 'stream_bytes' in row]
     if streamed:
         bootstrap_path = run / 'incremental_stream' / 'bootstrap.json'
@@ -466,6 +522,11 @@ def plot_records(destination, entries, frames):
               'fs_residual_rate0001_300_steps200': 'Residual, rate=1e-4 (150+50)',
               'fs_motion_only_300_steps200': 'Motion only (200+0, decay=0.6)'}
     colors = dict(zip(labels, ['#222222', '#9675ba', '#ce7446', '#c9507c', '#ddab32', '#428c7d', '#3776b6']))
+    new_names = sorted(entry['experiment'] for entry in entries
+                       if entry['family'] == 'recongs' and entry['experiment'] not in labels)
+    for index, name in enumerate(new_names):
+        labels[name] = name
+        colors[name] = plt.colormaps['tab20'](index % 20)
     fig, axes = plt.subplots(2, 2, figsize=(14, 9), layout='constrained')
     for name, label in labels.items():
         rows = series.get(name, [])
@@ -499,6 +560,21 @@ def plot_records(destination, entries, frames):
     axes[1, 0].legend(fontsize=8)
     fig.savefig(destination / 'recongs_results.png', dpi=150)
     plt.close(fig)
+    storage_series = {name: [row for row in rows if 'hard_storage_bytes' in row]
+                      for name, rows in series.items()}
+    if any(storage_series.values()):
+        fig, ax = plt.subplots(figsize=(11, 4.5), layout='constrained')
+        for name, rows in storage_series.items():
+            if rows:
+                ax.plot([row['frame'] for row in rows],
+                        [row['hard_storage_bytes'] / 1024 for row in rows],
+                        label=name, lw=1.3)
+        ax.set(title='Estimated effective parameter storage; shared frame 0 excluded',
+               xlabel='Zero-based frame index', ylabel='KiB / frame (1024 bytes)')
+        ax.grid(alpha=.2)
+        ax.legend(fontsize=8)
+        fig.savefig(destination / 'parameter_storage.png', dpi=150)
+        plt.close(fig)
     fig, ax = plt.subplots(figsize=(11, 4.5), layout='constrained')
     for entry in entries:
         if entry['family'] != 's2gs_legacy':
@@ -588,7 +664,9 @@ def main():
     print(json.dumps([dict(experiment=entry['experiment'], status=entry['status'],
         frames=entry['completed_dynamic_frames'],
         psnr=entry.get('mean', {}).get('psnr'), ssim=entry.get('mean', {}).get('ssim'),
-        mean_stream_bytes=entry.get('mean', {}).get('stream_bytes')) for entry in entries], indent=2))
+        mean_stream_bytes=entry.get('mean', {}).get('stream_bytes'),
+        mean_parameter_storage_bytes=entry.get('storage', {}).get('mean_hard_bytes'))
+        for entry in entries], indent=2))
 
 
 if __name__ == '__main__':

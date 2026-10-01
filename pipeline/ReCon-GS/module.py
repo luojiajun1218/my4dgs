@@ -25,9 +25,9 @@ from .model.selective_motion import SelectiveMotion, SelectiveMotionConfig
 from .model.selective_diagnostics import summarize, concise
 from .model.learned_selective import LearnedSelectiveMotion, LearnedSelectiveConfig
 from .model.residual_motion import (QuantizedResidualConfig, QuantizedResidualMotion,
-    QuantizedNewGaussianView, RAW_FIELDS, RAW_ATTRIBUTES, LAYOUT_VERSION,
-    model_raw, reference_digest, replay_frame)
-from .model import residual_codec
+    QuantizedNewGaussianView, RAW_FIELDS, RAW_ATTRIBUTES,
+    model_raw, materialize_quantized_gaussians, reference_digest, survivor_rows)
+from .model.gated_residual import GatedResidualMotion
 
 import json
 import csv
@@ -58,6 +58,22 @@ class DensifyConfig:
 
 
 @dataclass
+class QuantizedDiagnosticsConfig:
+    deletion_damage_enabled: bool = False
+    deletion_damage_view_name: Optional[str] = None
+    deletion_damage_every_n_frames: Optional[int] = None
+
+    def validate(self):
+        if not self.deletion_damage_enabled:
+            return
+        interval = self.deletion_damage_every_n_frames
+        if not self.deletion_damage_view_name:
+            raise ValueError('Deletion diagnostics require an explicit test camera filename')
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
+            raise ValueError('Deletion diagnostic interval must be a positive integer')
+
+
+@dataclass
 class ModuleConfig(BaseModuleConfig):
     sh_degree: int = 3
     random_background: bool = False  # for training
@@ -81,7 +97,8 @@ class ModuleConfig(BaseModuleConfig):
     selective_motion: SelectiveMotionConfig = field(default_factory=SelectiveMotionConfig)
     learned_selective_motion: LearnedSelectiveConfig = field(default_factory=LearnedSelectiveConfig)
     quantized_residual: QuantizedResidualConfig = field(default_factory=QuantizedResidualConfig)
-    selective_diagnostics_config: str = 'config/diagnostics/selective_motion.yaml'
+    quantized_diagnostics: QuantizedDiagnosticsConfig = field(default_factory=QuantizedDiagnosticsConfig)
+    selective_diagnostics_config: Optional[str] = 'config/diagnostics/selective_motion.yaml'
 
 
 class Module(BaseModule):
@@ -121,11 +138,13 @@ class Module(BaseModule):
         if self.config.motion_mode == 'quantized_residual':
             cfg = self.config.quantized_residual
             cfg.validate()
+            self.config.quantized_diagnostics.validate()
             if self.trainer.config.num_incr_steps != cfg.total_steps or self.config.deformation.num_stage1_steps != cfg.motion_steps:
                 raise ValueError('Quantized residual budgets must agree with trainer and deformation stage boundary')
             if self.config.random_background:
                 raise ValueError('Quantized residual comparisons require a fixed background')
-            self.residual_motion = QuantizedResidualMotion(cfg)
+            self.residual_motion = (GatedResidualMotion(cfg) if cfg.enable_learned_gates
+                                    else QuantizedResidualMotion(cfg))
             self.quant_previous_new_count = 0
             self.quant_first_frame_gs_count = None
             self.quant_previous_reference = None
@@ -134,8 +153,9 @@ class Module(BaseModule):
             self.quant_report = None
             self.quant_predictor_tree = None
             self.quant_finalized = False
-            self.quant_header_cache = {}
-            self.quant_bootstrap_bits = 0
+            self.quant_stats_window_initialized = False
+            self.quant_birth_control = None
+            self.quant_point_birth_frame = None
         white_background = self.datamodule.config.white_background
         bg_color_fn = torch.ones if white_background else torch.zeros
         self.register_buffer("background", bg_color_fn(3, device=self.device))
@@ -172,7 +192,9 @@ class Module(BaseModule):
             ckpt['quantized_frame_state'] = dict(previous_new_count=self.quant_previous_new_count,
                 first_frame_gs_count=self.quant_first_frame_gs_count, previous_reference=self.quant_previous_reference,
                 deleted_indices=self.quant_deleted_indices, report=self.quant_report, finalized=self.quant_finalized,
-                bootstrap_bits=self.quant_bootstrap_bits)
+                stats_window_initialized=self.quant_stats_window_initialized,
+                birth_control=self.quant_birth_control,
+                point_birth_frame=self.quant_point_birth_frame)
 
     def on_load_checkpoint(self, ckpt: dict):
         if (not self.trainer.is_first_frame and ckpt.get('motion_mode') == 'quantized_residual'
@@ -199,8 +221,25 @@ class Module(BaseModule):
                 self.quant_previous_sha256 = reference_digest(self.quant_previous_reference)
                 self.quant_deleted_indices = frame_state['deleted_indices']
                 self.quant_report, self.quant_finalized = frame_state['report'], frame_state['finalized']
-                self.quant_header_cache = {}
-                self.quant_bootstrap_bits = frame_state.get('bootstrap_bits', 0)
+                self.quant_stats_window_initialized = frame_state.get(
+                    'stats_window_initialized', packet['last_step'] >= self.quant_stats_window_start())
+                self.quant_birth_control = frame_state.get('birth_control')
+                self.quant_point_birth_frame = frame_state.get('point_birth_frame')
+                if self.quant_point_birth_frame is None:
+                    self.quant_point_birth_frame = torch.full(
+                        (len(self.gaussians.get_xyz),), -1, dtype=torch.long)
+                    if self.quant_finalized and self.quant_previous_new_count:
+                        self.quant_point_birth_frame[-self.quant_previous_new_count:] = self.current_frame
+                if self.quant_birth_control is None:
+                    self.quant_birth_control = self.new_quant_birth_control()
+                    if self.config.quantized_residual.enable_incremental:
+                        self.quant_birth_control['stats_steps_observed'] = max(0, min(
+                            packet['last_step'], self.config.quantized_residual.motion_steps)
+                            - self.quant_birth_control['stats_window_start'] + 1)
+                else:
+                    defaults = self.new_quant_birth_control()
+                    defaults.update(self.quant_birth_control)
+                    self.quant_birth_control = defaults
                 self.freeze_quantized_base()
                 if self.residual_motion.committed:
                     for parameter in self.residual_motion.parameters():
@@ -375,6 +414,9 @@ class Module(BaseModule):
             self.gaussians.update_learning_rate(current_step)
         elif (current_stage2_step := current_step - num_stage1_steps) > 0:
             self.gaussians_incr.update_learning_rate(current_stage2_step)
+            if self.config.motion_mode == 'quantized_residual' and current_stage2_step == 1:
+                self.quant_birth_control['stage2_optimizer_lrs'] = {
+                    group['name']: float(group['lr']) for group in self.gaussians_incr.optimizer.param_groups}
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if current_step % 1000 == 0 and self.trainer.is_first_frame:
@@ -435,14 +477,20 @@ class Module(BaseModule):
 
         if self.config.motion_mode == 'quantized_residual' and not self.trainer.is_first_frame:
             render_pkg['quantized_started'] = selective_started
-            bits, rate_details = self.quantized_rate(render_pkg.get('quantized_new_view'))
             cfg = self.config.quantized_residual
-            multiplier = cfg.lambda_rate * self.residual_motion.rate_scale(current_step)
-            loss_rate = multiplier * bits / self.quant_first_frame_gs_count
-            loss = loss + loss_rate
-            metrics.update({'rate/' + name: value for name, value in rate_details.items()})
-            metrics['rate/estimated_total_bits'] = bits
-            metrics['loss/rate'] = loss_rate
+            storage, storage_details = self.quantized_storage(render_pkg.get('quantized_new_view'))
+            reference_bytes = self.residual_motion.reference_storage_bytes(self.quant_first_frame_gs_count)
+            loss_storage = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
+                            * storage / reference_bytes)
+            loss = loss + loss_storage
+            metrics.update({'storage/' + name: value for name, value in storage_details.items()})
+            metrics['storage/expected_total_bytes'] = storage
+            metrics['storage/reference_bytes'] = loss_rgb.new_tensor(reference_bytes)
+            metrics['loss/storage'] = loss_storage
+            if self.residual_motion.committed and cfg.enable_incremental:
+                # An empty newborn pool must still allow the stage's backward call.
+                loss = loss + self.gaussians_incr._xyz.sum() * 0
+            metrics['loss/total'] = loss
             self.residual_motion.last_metrics.update({name: float(value.detach()) for name, value in metrics.items() if torch.is_tensor(value)})
 
         self.timer.clock("training step").stop()
@@ -734,6 +782,34 @@ class Module(BaseModule):
         self.renderer.gaussians = self.gaussians
 
     @torch.no_grad()
+    def deletion_diagnostic_view(self, deleted_count):
+        cfg = self.config.quantized_diagnostics
+        if (not cfg.deletion_damage_enabled or not deleted_count or
+                self.current_frame % cfg.deletion_damage_every_n_frames):
+            return None
+        # DataLoader draws a worker seed. Diagnostics must not change training RNG.
+        with torch.random.fork_rng(devices=[]):
+            loader = self.datamodule.test_dataloader()
+            if loader is not None:
+                for viewpoint in loader:
+                    if viewpoint.path.name == cfg.deletion_damage_view_name:
+                        return viewpoint.to(self.device)
+        raise ValueError(f'Deletion diagnostic test camera not found: {cfg.deletion_damage_view_name}')
+
+    @torch.no_grad()
+    def deletion_diagnostic_render(self, viewpoint):
+        original = self.renderer.gaussians
+        try:
+            self.renderer.gaussians = self.gaussians
+            image = self.renderer(viewpoint, self.background)['render'].clamp(0., 1.)
+        finally:
+            self.renderer.gaussians = original
+        gt = viewpoint.image
+        metrics = dict(psnr=float(psnr(image, gt)), l1=float(l1_loss(image, gt)),
+                       ssim=float(ssim(image, gt)))
+        return image, metrics
+
+    @torch.no_grad()
     def prepare_quantized_frame(self):
         started = time.perf_counter()
         self.quant_previous_reference = {name: value.cpu() for name, value in model_raw(self.gaussians).items()}
@@ -745,102 +821,134 @@ class Module(BaseModule):
             raise ValueError('Incremental-disabled residual run cannot delete previous Gaussians')
         if count >= len(self.gaussians.get_xyz):
             raise ValueError('Previous new-point compensation would remove all reference Gaussians')
-        # Stable activated-opacity order references exact previous decoded point order.
-        deleted = torch.argsort(self.gaussians.get_opacity.detach().flatten(), stable=True)[:count]
+        # Deletion precedes this frame's gate fitting, so protect the previous
+        # frame's final KEEP decisions, in the exact materialized row order.
+        if (self.config.quantized_residual.enable_learned_gates and
+                self.residual_motion.index is not None):
+            deleted, deletion_protection = self.residual_motion.compensation_deletions(
+                self.gaussians.get_opacity, count)
+        else:
+            deleted = torch.argsort(self.gaussians.get_opacity.detach().flatten(), stable=True)[:count]
+            deletion_protection = dict(
+                enabled=False, protected_keep_old_count=0,
+                eligible_count=len(self.gaussians.get_xyz), requested_count=count,
+                deleted_count=len(deleted), deleted_keep_count=0,
+                semantics='No previous learned gate decisions are available.')
         self.quant_deleted_indices = deleted.to(torch.int32).cpu()
+        previous_rows = survivor_rows(len(self.quant_previous_reference['xyz']), deleted)
+        if self.quant_point_birth_frame is None:
+            # Older checkpoints did not record point origins. Keep that uncertainty explicit.
+            first_origin = 0 if self.current_frame == 1 else -1
+            self.quant_point_birth_frame = torch.full(
+                (len(self.quant_previous_reference['xyz']),), first_origin, dtype=torch.long)
+        if len(self.quant_point_birth_frame) != len(self.quant_previous_reference['xyz']):
+            raise ValueError('Point origin rows disagree with previous materialized Gaussian order')
+        origins = self.quant_point_birth_frame.cpu()
+        removed_origins = origins[self.quant_deleted_indices.long()]
+        point_origins = dict(
+            deleted_first_frame=int((removed_origins == 0).sum()),
+            deleted_previous_birth=int((removed_origins == self.current_frame - 1).sum())
+                if self.current_frame > 1 else 0,
+            deleted_older_birth=int(((removed_origins > 0) &
+                                     (removed_origins < self.current_frame - 1)).sum()),
+            deleted_untracked=int((removed_origins < 0).sum()))
+        diagnostic_started = time.perf_counter()
+        viewpoint = self.deletion_diagnostic_view(count)
+        before_image, before_metrics = self.deletion_diagnostic_render(viewpoint) if viewpoint is not None else (None, None)
         if count:
             self.gaussians.prune_points(deleted)
+        self.quant_point_birth_frame = origins[previous_rows.cpu()]
+        point_origins.update(
+            remaining_first_frame=int((self.quant_point_birth_frame == 0).sum()),
+            remaining_incremental=int((self.quant_point_birth_frame > 0).sum()),
+            remaining_untracked=int((self.quant_point_birth_frame < 0).sum()))
+        deletion_damage = dict(measured=False, deleted_count=count)
+        if viewpoint is not None:
+            after_image, after_metrics = self.deletion_diagnostic_render(viewpoint)
+            deletion_damage.update(measured=True, camera=viewpoint.path.name, frame=self.current_frame,
+                before=before_metrics, after=after_metrics,
+                delta_psnr=after_metrics['psnr'] - before_metrics['psnr'],
+                delta_l1=after_metrics['l1'] - before_metrics['l1'],
+                delta_ssim=after_metrics['ssim'] - before_metrics['ssim'],
+                render_change_mse=float((after_image - before_image).square().mean()),
+                semantics='Same current-frame held-out camera, before/after deletion and before motion fitting. Read-only diagnostic.')
+        diagnostic_seconds = time.perf_counter() - diagnostic_started
         self.gaussians_incr = GaussianModel(self.config.sh_degree)
         self.renderer.gaussians = self.gaussians
         self.freeze_quantized_base()
+        self.trainer.synchronize()
         layout_started = time.perf_counter()
-        self.residual_motion.setup(self.gaussians.get_xyz_ori, self.gaussians._rotation, self.datamodule.cameras_extent)
+        prior_motion_count = (len(self.residual_motion.base_xyz)
+                              if self.residual_motion.index is not None else None)
+        if (self.config.quantized_residual.motion_init_decay and prior_motion_count is not None and
+                len(self.quant_previous_reference['xyz']) != prior_motion_count + count):
+            raise ValueError('Motion warm start previous reference count disagrees with old motion and newborn count')
+        tree_kwargs = (dict(frame_index=self.current_frame)
+                       if self.config.quantized_residual.enable_learned_gates else {})
+        self.residual_motion.setup(self.gaussians.get_xyz_ori, self.gaussians._rotation,
+            self.datamodule.cameras_extent, previous_rows=previous_rows,
+            previous_new_count=count, **tree_kwargs)
         self.quant_predictor_tree = None
         self.quant_report = None
         self.quant_finalized = False
-        self.quant_header_cache = {}
-        self.quant_bootstrap_bits = 0
+        self.quant_stats_window_initialized = False
+        self.quant_birth_control = self.new_quant_birth_control()
+        self.quant_birth_control['point_origins'] = point_origins
+        self.quant_birth_control['deletion_damage'] = deletion_damage
+        self.quant_birth_control['deletion_protection'] = deletion_protection
+        self.quant_birth_control['motion_history'] = dict(
+            old_motion_rows=(int((previous_rows < prior_motion_count).sum())
+                             if prior_motion_count is not None else 0),
+            newborn_rows=(int((previous_rows >= prior_motion_count).sum())
+                          if prior_motion_count is not None else 0),
+            first_frame_rows=len(previous_rows) if prior_motion_count is None else 0,
+            initialization_decay=(self.residual_motion.tree_setup['initialization_decay']
+                if self.config.quantized_residual.enable_learned_gates
+                else self.config.quantized_residual.motion_init_decay),
+            semantics='Disjoint counts of surviving rows by available motion history. '
+                      'Old-row mapping does not imply a nonzero inherited motion; '
+                      'newborn and first-frame rows have no own previous motion residual.')
         self.trainer.synchronize()
         self.residual_motion.stage_seconds['layout'] = time.perf_counter() - layout_started
-        if self.current_frame == 1:
-            bootstrap = dict(layout_version=LAYOUT_VERSION, config=self.quantized_metadata()['config'],
-                extent=float(self.datamodule.cameras_extent), first_frame_gs_count=self.quant_first_frame_gs_count,
-                reference_sha256=reference_digest(self.quant_previous_reference),
-                reference_kind='External shared first-frame raw Gaussian model in stable tensor order',
-                active_sh_degree=self.gaussians.active_sh_degree, max_sh_degree=self.gaussians.max_sh_degree)
-            path = self.output_dir / 'incremental_stream' / 'bootstrap.json'
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(bootstrap, separators=(',', ':')))
-            self.quant_bootstrap_bits = path.stat().st_size * 8
+        self.residual_motion.stage_seconds['deletion_diagnostics'] = diagnostic_seconds if viewpoint is not None else 0.
         self.trainer.synchronize()
         self.residual_motion.stage_seconds['frame_prepare'] = time.perf_counter() - started
 
-    def quantized_metadata(self):
-        from dataclasses import asdict
-        return dict(frame=self.current_frame, layout_version=LAYOUT_VERSION,
-                    config=asdict(self.config.quantized_residual), extent=float(self.datamodule.cameras_extent),
-                    first_frame_gs_count=self.quant_first_frame_gs_count,
-                    previous_reference_sha256=self.quant_previous_sha256,
-                    active_sh_degree=self.gaussians.active_sh_degree, max_sh_degree=self.gaussians.max_sh_degree)
+    def quant_stats_window_start(self):
+        return self.config.quantized_residual.densification_stats_start
 
-    def quantized_components(self, view=None, integer=False):
-        packet = self.residual_motion.symbol_tensors(integer=integer)
-        packet['deleted_prev_indices'] = self.quant_deleted_indices
-        models = self.residual_motion.entropy_models()
-        if view is not None:
-            packet.update(view.integer_packet())
-            models.update(view.entropy_models())
-        else:
-            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-                raw = getattr(self.gaussians, attr)
-                channels = int(np.prod(raw.shape[1:]))
-                packet['new_' + name] = torch.empty((0, channels), dtype=torch.int32)
-                models['new_' + name] = dict(scale=[self.config.quantized_residual.new_entropy_scales[name]] * channels, sparse=False)
-            packet['new_source_old_index'] = torch.empty(0, dtype=torch.int32)
-        return packet, models
-
-    def quantized_header_bits(self, view=None):
-        retained = int(view.keep.sum()) if view is not None else 0
-        if retained in self.quant_header_cache:
-            return self.quant_header_cache[retained]
-        packet = {f'region_{n}': torch.empty((count, 6), dtype=torch.int32, device='meta')
-                  for n, count in enumerate(self.residual_motion.counts)}
-        packet['gs_local'] = torch.empty((len(self.residual_motion.base_xyz), 6), dtype=torch.int32, device='meta')
-        packet['deleted_prev_indices'] = self.quant_deleted_indices
-        models = self.residual_motion.entropy_models()
-        for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-            channels = int(np.prod(getattr(self.gaussians, attr).shape[1:]))
-            packet['new_' + name] = torch.empty((retained, channels), dtype=torch.int32, device='meta')
-            models['new_' + name] = dict(scale=[self.config.quantized_residual.new_entropy_scales[name]] * channels, sparse=False)
-        packet['new_source_old_index'] = torch.empty(retained, dtype=torch.int32, device='meta')
+    def new_quant_birth_control(self):
         cfg = self.config.quantized_residual
-        cost = residual_codec.container_overhead_bits(packet, self.quantized_metadata(), models,
-            cfg.entropy_radius, cfg.entropy_chunk_rows) + self.quant_bootstrap_bits
-        self.quant_header_cache[retained] = cost
-        return cost
+        return dict(
+            enabled=cfg.enable_incremental,
+            stats_window_start=self.quant_stats_window_start(), stats_window_end=cfg.motion_steps,
+            stats_steps_observed=0, clone_eligible=0, clone_added=0,
+            clone_blocked=0, split_added=0, split_blocked=0,
+            split_eligible=0, candidate_pool_peak=0, candidate_pruned=0,
+            final_candidate_count=0, opacity_pruned=0,
+            final_retained=0, max_new_gaussians=cfg.max_new_gaussians,
+            motion_history=None,
+            point_origins={},
+            budget_touched=False, previous_compensation_deleted=int(self.quant_deleted_indices.numel()),
+            split_count_semantics='split_added counts net new Gaussians; split_blocked counts parent candidates blocked by the budget.',
+            capacity_reuse='Pruning follows split; freed slots are available at the next densification interval.')
 
-    def quantized_rate(self, view=None):
-        cfg = self.config.quantized_residual
-        motion_symbols = self.residual_motion.symbol_tensors(self.global_step)
-        parts = {}
-        for name, symbols in motion_symbols.items():
-            parts[name] = residual_codec.expected_torchac_bits(symbols, cfg.motion_entropy_scales,
-                entropy_radius=cfg.entropy_radius, mask_probability=cfg.tuple_mask_probability,
-                support_temperature=cfg.support_temperature, sparse=True)
+    def quantized_storage(self, view=None, hard=False):
+        """Count effective motion, gate, birth and deletion parameter bytes."""
+        parts = self.residual_motion.storage_parts(self.global_step, hard=hard)
         zero = next(iter(parts.values())) * 0
-        new_bits = zero
-        if view is not None:
-            point_cost = view.keep_st * 32  # Prediction source index for every retained birth.
-            for name, symbols in view.symbols.items():
-                row_bits = residual_codec.expected_torchac_bits(symbols.flatten(1), cfg.new_entropy_scales[name],
-                    entropy_radius=cfg.entropy_radius, sparse=False, reduction='none')
-                point_cost = point_cost + view.keep_st * row_bits
-            new_bits = point_cost.sum()
-        overhead = self.quantized_header_bits(view)
-        deletion_bits = self.quant_deleted_indices.numel() * 32
-        total = sum(parts.values()) + new_bits + overhead + deletion_bits
-        return total, dict(motion_bits=sum(parts.values()), new_bits=new_bits,
-                           deletion_bits=zero + deletion_bits, header_bits=zero + overhead)
+        birth_bytes_per_row = 4  # int32 source among surviving old Gaussians.
+        for attr in RAW_ATTRIBUTES:
+            value = getattr(self.gaussians, attr)
+            birth_bytes_per_row += int(np.prod(value.shape[1:])) * value.element_size()
+        if view is None:
+            birth_bytes = zero
+        else:
+            count = view.keep.sum().to(zero) if hard else view.keep_st.sum()
+            birth_bytes = count * birth_bytes_per_row
+        details = dict(parts, new_bytes=birth_bytes,
+                       deletion_bytes=zero + self.quant_deleted_indices.numel() * 4)
+        return sum(details.values()), details
 
     @torch.no_grad()
     def post_quantized_residual(self, render_pkg):
@@ -849,8 +957,15 @@ class Module(BaseModule):
         if not motion.committed:
             motion.optimizer_step()
             self.gaussians.optimizer.zero_grad(set_to_none=True)
-            if cfg.enable_incremental:
+            birth = self.quant_birth_control
+            if cfg.enable_incremental and self.global_step >= birth['stats_window_start']:
+                if not self.quant_stats_window_initialized:
+                    if cfg.densification_stats_steps is not None:
+                        self.gaussians.xyz_gradient_accum.zero_()
+                        self.gaussians.denom.zero_()
+                    self.quant_stats_window_initialized = True
                 self.gaussians.add_densification_stats(render_pkg['viewspace_points'], render_pkg['visibility_filter'])
+                birth['stats_steps_observed'] += 1
             stage = render_pkg['quantized_stage']
             self.trainer.synchronize()
             motion.stage_seconds[stage] = motion.stage_seconds.get(stage, 0.) + time.perf_counter() - render_pkg['quantized_started']
@@ -862,12 +977,20 @@ class Module(BaseModule):
                     parameter.requires_grad_(False)
                 if cfg.enable_incremental:
                     before = len(xyz)
-                    self.gaussians.adaptive_densify_and_clone(self.deform.config.densify_grad_threshold,
-                        self.datamodule.cameras_extent, sigma_scale=cfg.clone_sigma_scale)
+                    clone = self.gaussians.adaptive_densify_and_clone(self.deform.config.densify_grad_threshold,
+                        self.datamodule.cameras_extent, sigma_scale=cfg.clone_sigma_scale,
+                        max_new_gaussians=cfg.max_new_gaussians)
+                    birth['clone_eligible'] = clone['eligible']
+                    birth['clone_added'] = clone['added']
+                    birth['clone_blocked'] = clone['blocked']
+                    birth['candidate_pool_peak'] = clone['added']
                     self.gaussians_incr.restore(self.gaussians.capture(), self.config.gaussian_stage2)
                     mask = torch.arange(len(self.gaussians.get_xyz), device=self.device) >= before
                     self.gaussians.prune_points(mask)
                     self.gaussians_incr.prune_points(~mask)
+                    self.gaussians_incr.initialize_incremental_optimizer(self.config.gaussian_stage2)
+                    birth['stage2_optimizer_lrs_after_reset'] = {
+                        group['name']: float(group['lr']) for group in self.gaussians_incr.optimizer.param_groups}
                 self.freeze_quantized_base()
         else:
             # Base parameters and motion stay fixed; only quantized birth candidates learn.
@@ -880,8 +1003,16 @@ class Module(BaseModule):
                     self.gaussians_incr.max_radii2D[visibility[num_old:]], radii[num_old:][visibility[num_old:]])
                 self.gaussians_incr.add_densification_stats(render_pkg['viewspace_points'], visibility[num_old:], align='right')
                 if stage2_step % self.deform.config.densify_interval == 0:
-                    self.gaussians_incr.adaptive_densify_and_prune(self.deform.config.densify_grad_threshold,
-                        self.deform.config.opacity_threshold, self.datamodule.cameras_extent, cfg.new_max_screen_size)
+                    result = self.gaussians_incr.adaptive_densify_and_prune(
+                        self.deform.config.densify_grad_threshold,
+                        self.deform.config.opacity_threshold, self.datamodule.cameras_extent,
+                        cfg.new_max_screen_size, max_points=cfg.max_new_gaussians)
+                    birth = self.quant_birth_control
+                    birth['split_eligible'] += result['eligible']
+                    birth['split_added'] += result['added']
+                    birth['split_blocked'] += result['blocked']
+                    birth['candidate_pruned'] += result['pruned']
+                    birth['candidate_pool_peak'] = max(birth['candidate_pool_peak'], result['peak_before_prune'])
             self.gaussians_incr.optimizer.step()
             self.gaussians_incr.optimizer.zero_grad(set_to_none=True)
             self.gaussians.optimizer.zero_grad(set_to_none=True)
@@ -896,56 +1027,96 @@ class Module(BaseModule):
         finalize_started = time.perf_counter()
         cfg = self.config.quantized_residual
         view = self.make_quantized_new_view() if cfg.enable_incremental else None
-        estimated, details = self.quantized_rate(view)
-        packet, models = self.quantized_components(view, integer=True)
-        path = self.output_dir / 'incremental_stream' / f'frame_{self.current_frame:03d}.bin'
+        expected_storage, expected_parts = self.quantized_storage(view)
+        hard_storage, hard_parts = self.quantized_storage(view, hard=True)
+        reference_bytes = self.residual_motion.reference_storage_bytes(self.quant_first_frame_gs_count)
+        self.quant_birth_control['final_candidate_count'] = (
+            len(self.gaussians_incr.get_xyz) if cfg.enable_incremental else 0)
+
         self.trainer.synchronize()
-        started = time.perf_counter()
-        actual = residual_codec.encode_entropy_frame(path, packet, self.quantized_metadata(),
-            entropy_radius=cfg.entropy_radius, chunk_rows=cfg.entropy_chunk_rows, entropy_models=models)
-        self.residual_motion.stage_seconds['encode'] = time.perf_counter() - started
-        started = time.perf_counter()
-        decoded = residual_codec.decode_entropy_frame(path)
-        raw = replay_frame(self.quant_previous_reference, decoded['tensors'], decoded['metadata'])
+        state_started = time.perf_counter()
+        raw, retained_sources = materialize_quantized_gaussians(model_raw(self.gaussians), view)
+        retained_count = len(retained_sources)
+        if cfg.enable_learned_gates:
+            self.residual_motion.register_materialized_layout(raw['xyz'], retained_sources)
         self.install_quantized_raw(raw)
-        self.gaussians_incr = GaussianModel(self.config.sh_degree)
-        self.quant_previous_new_count = len(packet['new_source_old_index'])
-        self.quant_finalized = True
         self.trainer.synchronize()
-        self.residual_motion.stage_seconds['decode'] = time.perf_counter() - started
-        chunk_costs = {}
-        for name, model in models.items():
-            rows, channels = packet[name].shape
-            chunks = (rows + cfg.entropy_chunk_rows - 1) // cfg.entropy_chunk_rows
-            chunk_costs[name] = (chunks * (residual_codec.ENTROPY_CHUNK.size + residual_codec.UINT32.size * channels)
-                                 if channels else 0)
-        motion_names = ('region_0', 'region_1', 'region_2', 'gs_local')
-        payload_costs = {name: cost - chunk_costs.get(name, 0) for name, cost in actual['tensor_bytes'].items()}
-        actual_classes = dict(motion_bytes=sum(payload_costs[name] for name in motion_names),
-            new_bytes=sum(cost for name, cost in payload_costs.items() if name.startswith('new_')),
-            deletion_bytes=payload_costs['deleted_prev_indices'],
-            header_bytes=actual['header_bytes'] + actual['chunk_header_bytes'] + self.quant_bootstrap_bits // 8)
-        self.quant_report = dict(frame=self.current_frame, estimated_total_bits=float(estimated),
-            bootstrap_bytes=self.quant_bootstrap_bits // 8,
-            total_stream_bytes=actual['total_bytes'] + self.quant_bootstrap_bits // 8,
-            estimated_bits_by_class={name: float(value) for name, value in details.items()},
-            actual=actual, actual_bytes_by_class=actual_classes, activities=self.residual_motion.statistics(),
-            stage_seconds=self.residual_motion.stage_seconds, new_count=self.quant_previous_new_count,
-            deleted_count=self.quant_deleted_indices.numel(), normalization_first_frame_gs=self.quant_first_frame_gs_count,
-            rate_semantics='Same quantized tuples, priors and 16bit CDF. Arithmetic termination/rounding is represented in actual bytes.',
-            method_semantics='Fixed nested spatial candidates with quantized residual-support effective hierarchy. '
-            'Position offsets add; world orientation composes coarse, middle, fine, then GS residual. '
-            'Regional rotations do not rotate Gaussian centers around regional pivots.',
-            timing_semantics='frame_prepare includes deletion/layout/bootstrap; layout is a subcomponent. '
-            'finalize includes packet preparation/encode/decode/model installation/report preparation; encode and decode are subcomponents. '
-            'birth_prediction_train_cpu is included in training; birth_prediction_eval_cpu is included in evaluation or finalization. '
-            'Reported pure training excludes frame_prepare and finalize; rendering/backward/data/rate and optimizer remain included.',
-            decoded_reference_sha256=reference_digest(raw))
+        state_update_seconds = time.perf_counter() - state_started
+        self.residual_motion.stage_seconds['state_update'] = state_update_seconds
+
+        self.quant_birth_control['final_retained'] = retained_count
+        self.quant_birth_control['opacity_pruned'] = (
+            self.quant_birth_control['final_candidate_count'] - retained_count)
+        limit = cfg.max_new_gaussians
+        self.quant_birth_control['budget_touched'] = (limit is not None and
+            (self.quant_birth_control['candidate_pool_peak'] >= limit or
+             self.quant_birth_control['clone_blocked'] > 0 or
+             self.quant_birth_control['split_blocked'] > 0))
+        self.gaussians_incr = GaussianModel(self.config.sh_degree)
+        self.quant_previous_new_count = retained_count
+        self.quant_point_birth_frame = torch.cat((self.quant_point_birth_frame.cpu(),
+            torch.full((retained_count,), self.current_frame, dtype=torch.long)))
+        if len(self.quant_point_birth_frame) != len(raw['xyz']):
+            raise ValueError('Final point origins disagree with quantized Gaussian order')
+        self.quant_birth_control['point_origins'].update(
+            new_retained=retained_count, final_total=len(raw['xyz']))
+        self.quant_finalized = True
+        reference_sha256 = reference_digest(raw)
+        self.quant_report = dict(
+            frame=self.current_frame, storage_only=True,
+            state_update_seconds=state_update_seconds,
+            expected_storage_bytes=float(expected_storage),
+            hard_storage_bytes=float(hard_storage),
+            storage_bytes_by_class={name: float(value) for name, value in hard_parts.items()},
+            expected_storage_bytes_by_class={name: float(value) for name, value in expected_parts.items()},
+            reference_storage_bytes=reference_bytes,
+            storage_semantics=('Estimated effective parameter bytes: reachable gate states, SHARE/SPLIT region motion, '
+                'open GS residuals, retained newborn raw attributes and int32 source, and int32 deletions. '
+                'Hierarchy membership is deterministically reconstructed from the previous materialized GS, '
+                'ordered surviving rows, configured rebuild interval and stable_layout algorithm; no membership '
+                'table bytes are charged. First-frame reference, configuration/algorithm metadata, file headers, '
+                'logs and optimizer are excluded.'
+                if cfg.enable_learned_gates else
+                'Estimated dense raw regional and per-GS motion parameter bytes, plus retained newborn raw attributes, '
+                'int32 source and int32 deletions. No nongated sparse positions are assumed; file headers, first-frame '
+                'reference, logs and optimizer are excluded.'),
+            activities=self.residual_motion.statistics(),
+            last_training_metrics=dict(self.residual_motion.last_metrics),
+            stage_seconds=None,
+            new_count=retained_count,
+            deleted_count=int(self.quant_deleted_indices.numel()),
+            normalization_first_frame_gs=self.quant_first_frame_gs_count,
+            birth_control=self.quant_birth_control,
+            tree_setup=(self.residual_motion.tree_setup if cfg.enable_learned_gates else None),
+            method_semantics=('Learned KEEP/SHARE/SPLIT hierarchy with optional periodic spatial rebuild. '
+                'Rebuild inherits same-level KNN motion/gate priors; otherwise region membership persists. '
+                'KEEP cancels all ancestor motion; '
+                'SHARE closes descendants; SPLIT retains shared rigid motion and opens children/local residuals. '
+                'Region rotations move centers around parent-advected pivots. Only reachable branches carry motion.'
+                if cfg.enable_learned_gates else
+                'Fixed nested spatial candidates with dense quantized residual-motion tensors. '
+                'Position offsets add; world orientation composes coarse, middle, fine, then GS residual.'),
+            timing_semantics=('frame_prepare includes deletion/layout; layout is a subcomponent. '
+                'tree_topology and tree_initialization are inside layout; tree_rebuild is their sum only on rebuild '
+                'frames and must not be added again. Topology includes row/pose validation and pivots. '
+                'finalize includes quantized state materialization/model installation/report preparation; '
+                'state_update is a subcomponent. birth_prediction_train_cpu is included in training; '
+                'birth_prediction_eval_cpu is included in evaluation or finalization. '
+                'Reported pure training excludes frame_prepare and finalize; rendering/backward/data/storage '
+                'and optimizer remain included. Frame summary JSON writing is measured under saving.'),
+            reference_sha256=reference_sha256)
+        self.trainer.synchronize()
         self.residual_motion.stage_seconds['finalize'] = time.perf_counter() - finalize_started
-        path.with_suffix('.json').write_text(json.dumps(self.quant_report, indent=2))
+        self.quant_report['stage_seconds'] = dict(self.residual_motion.stage_seconds)
+        save_started = time.perf_counter()
+        report_path = self.output_dir / 'frame_summary' / f'quantized_frame_{self.current_frame:03d}.json'
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(self.quant_report, indent=2))
+        self.trainer.record_io('saving', save_started)
 
     def save_quantized_image_diagnostics(self, viewpoint, image_path, camera_name):
-        if self.trainer.is_first_frame or not self.quant_finalized:
+        if (self.trainer.is_first_frame or not self.quant_finalized or
+                not self.config.selective_diagnostics_config):
             return
         import yaml
         from pathlib import Path
@@ -1153,7 +1324,9 @@ class Module(BaseModule):
         if self.trainer.is_last_step:
             self.timer.clock("frame").stop()
             if not self.trainer.is_first_frame:
-                num_incr_gs = self.gaussians_incr.get_xyz.shape[0]
+                num_incr_gs = (self.quant_report['new_count']
+                               if self.config.motion_mode == 'quantized_residual'
+                               else self.gaussians_incr.get_xyz.shape[0])
                 self.trainer.routine_info(f"Number of incremental gaussians: {num_incr_gs}")
                 if self.config.motion_mode == 'legacy' and isinstance(self.deform, GatedFourDeformation):
                     storage_dir = self.output_dir / "frame_storage"
@@ -1264,9 +1437,13 @@ class Module(BaseModule):
     def validation_step(
         self, viewpoint: TensorSpace, idx: int, loader_idx: int
     ) -> dict:
-        t0 = time.time()
+        if viewpoint.image.is_cuda:
+            torch.cuda.synchronize(viewpoint.image.device)
+        t0 = time.perf_counter()
         image = self.forward(viewpoint)["render"].clamp(0.0, 1.0)
-        t1 = time.time()
+        if image.is_cuda:
+            torch.cuda.synchronize(image.device)
+        t1 = time.perf_counter()
         gt_image = viewpoint.image
         if (self.config.motion_mode == 'learned_selective' and not self.trainer.is_first_frame
                 and not self.selective.committed and self.motion_config.diagnose_soft_hard):
@@ -1305,13 +1482,17 @@ class Module(BaseModule):
             metrics["ssim"] = ssim(image, gt_image)
             if self.config.lpips_required:
                 metrics["lpips"] = lpips(image, gt_image,net_type='vgg').mean()
-            metrics["fps"] = 1/(t1-t0)
+            metrics["forward_seconds"] = t1 - t0
         return metrics
 
     def validation_end(self, results: Union[dict, List[dict]], num_loaders: int = 1):
         def fn(metrics_list, idx):
             mean = lambda xs: sum(xs) / len(xs)
             metrics = {k: mean([ms[k] for ms in metrics_list]) for k in metrics_list[0]}
+            if 'forward_seconds' in metrics:
+                total_forward_seconds = sum(ms['forward_seconds'] for ms in metrics_list)
+                metrics['mean_forward_seconds'] = metrics.pop('forward_seconds')
+                metrics['fps'] = len(metrics_list) / total_forward_seconds
             name = self.datamodule.eval_names[idx]
             self.log_dict({f"eval-{name}/{k}": v for k, v in metrics.items()})
             self.trainer.frame_eval_metrics[name] = {k: float(v) for k, v in metrics.items()}

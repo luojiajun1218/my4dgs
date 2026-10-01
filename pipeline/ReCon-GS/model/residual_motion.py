@@ -1,6 +1,6 @@
 """Quantized cumulative regional offsets and per-Gaussian residuals."""
 from dataclasses import asdict, dataclass, fields
-from typing import Dict, List, Optional
+from typing import List, Optional
 import hashlib
 import math
 import numpy as np
@@ -36,68 +36,103 @@ class QuantizedResidualConfig:
     new_logscale_step: Optional[float] = None
     new_opacity_step: Optional[float] = None
     new_sh_step: Optional[float] = None
-    lambda_rate: Optional[float] = None
-    rate_warmup_steps: Optional[int] = None
-    rate_ramp_steps: Optional[int] = None
-    motion_entropy_scales: Optional[List[float]] = None
-    new_entropy_scales: Optional[Dict[str, float]] = None
-    tuple_mask_probability: Optional[float] = None
-    support_temperature: Optional[float] = None
-    entropy_radius: Optional[int] = None
-    entropy_chunk_rows: Optional[int] = None
     opacity_keep_threshold: Optional[float] = None
     opacity_support_temperature: Optional[float] = None
     clone_sigma_scale: Optional[float] = None
     new_max_screen_size: Optional[float] = None
+    densification_stats_steps: Optional[int] = None
+    max_new_gaussians: Optional[int] = None
+    enable_learned_gates: bool = False
+    tree_rebuild_interval: int = 0
+    tree_rebuild_neighbors: int = 3
+    gate_lr: Optional[float] = None
+    gate_initial_logits: Optional[List[float]] = None
+    gate_temperature_start: Optional[float] = None
+    gate_temperature_end: Optional[float] = None
+    gate_refine_steps: Optional[int] = None
+    storage_only: bool = True
+    storage_loss_weight: Optional[float] = None
+    storage_warmup_steps: Optional[int] = None
+    storage_ramp_steps: Optional[int] = None
 
     def validate(self):
         # libgs structured configs may contain OmegaConf containers.
+        if self.storage_only is not True:
+            raise ValueError('quantized_residual now requires storage_only: true; rate/codec training is unsupported')
         if self.adam_betas is not None:
             self.adam_betas = [float(value) for value in self.adam_betas]
-        if self.motion_entropy_scales is not None:
-            self.motion_entropy_scales = [float(value) for value in self.motion_entropy_scales]
-        if self.new_entropy_scales is not None:
-            self.new_entropy_scales = {str(name): float(value) for name, value in self.new_entropy_scales.items()}
-        missing = [f.name for f in fields(self) if getattr(self, f.name) is None]
+        gated = {'gate_lr', 'gate_initial_logits', 'gate_temperature_start',
+                 'gate_temperature_end', 'gate_refine_steps'}
+        if self.gate_initial_logits is not None:
+            self.gate_initial_logits = [float(value) for value in self.gate_initial_logits]
+        optional = {'densification_stats_steps', 'max_new_gaussians'} | (
+            set() if self.enable_learned_gates else gated)
+        missing = [f.name for f in fields(self) if f.name not in optional and getattr(self, f.name) is None]
         if missing:
             raise ValueError('quantized_residual requires explicit YAML values: ' + ', '.join(missing))
-        for name in ('fine_region_gs', 'motion_steps', 'rate_ramp_steps', 'entropy_radius', 'entropy_chunk_rows'):
+        positive_ints = ['fine_region_gs', 'motion_steps', 'storage_ramp_steps', 'tree_rebuild_neighbors']
+        for name in positive_ints:
             if isinstance(getattr(self, name), bool) or not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f'{name} must be a positive integer')
-        for name in ('shared_warmup_steps', 'incremental_steps', 'rate_warmup_steps'):
+        nonnegative_ints = ['shared_warmup_steps', 'incremental_steps', 'tree_rebuild_interval']
+        nonnegative_ints += ['storage_warmup_steps']
+        for name in nonnegative_ints:
             if isinstance(getattr(self, name), bool) or not isinstance(getattr(self, name), int) or getattr(self, name) < 0:
                 raise ValueError(f'{name} must be a nonnegative integer')
+        if self.tree_rebuild_interval and not self.enable_learned_gates:
+            raise ValueError('tree_rebuild_interval requires enable_learned_gates')
         if self.shared_warmup_steps >= self.motion_steps:
             raise ValueError('shared_warmup_steps must leave joint residual fitting steps')
+        for name in ('densification_stats_steps', 'max_new_gaussians'):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+                raise ValueError(f'{name} must be a positive integer or None')
+        if self.densification_stats_steps is not None and self.densification_stats_steps > self.motion_steps:
+            raise ValueError('densification_stats_steps must not exceed motion_steps')
         if not isinstance(self.enable_incremental, bool) or self.enable_incremental != (self.incremental_steps > 0):
             raise ValueError('enable_incremental must agree with incremental_steps')
         if (isinstance(self.motion_init_decay, bool) or
                 not math.isfinite(self.motion_init_decay) or not 0 <= self.motion_init_decay <= 1):
             raise ValueError('motion_init_decay must be finite and in [0, 1]')
-        if self.motion_init_decay and self.enable_incremental:
-            raise ValueError('motion_init_decay requires enable_incremental: false')
         if len(self.adam_betas) != 2 or not all(0 <= v < 1 for v in self.adam_betas):
             raise ValueError('adam_betas must contain two values in [0, 1)')
         for name in ('region_translation_lr', 'region_rotation_lr', 'gs_translation_lr', 'gs_rotation_lr',
                      'adam_eps', 'motion_xyz_step_extent', 'motion_rotation_step_rad',
                      'new_xyz_step_extent', 'new_rotation_step', 'new_logscale_step', 'new_opacity_step',
-                     'new_sh_step', 'support_temperature', 'opacity_support_temperature', 'clone_sigma_scale', 'new_max_screen_size'):
+                     'new_sh_step', 'opacity_support_temperature', 'clone_sigma_scale', 'new_max_screen_size'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be finite and positive')
-        if not math.isfinite(self.lambda_rate) or self.lambda_rate < 0:
-            raise ValueError('lambda_rate must be finite and nonnegative')
-        if not 0 < self.tuple_mask_probability < 1 or not 0 < self.opacity_keep_threshold < 1:
-            raise ValueError('Mask probability and opacity threshold must be in (0, 1)')
-        if len(self.motion_entropy_scales) != 6 or not all(math.isfinite(v) and v > 0 for v in self.motion_entropy_scales):
-            raise ValueError('motion_entropy_scales requires six positive symbol-domain Laplace scales')
-        if set(self.new_entropy_scales) != set(RAW_FIELDS) or not all(math.isfinite(v) and v > 0 for v in self.new_entropy_scales.values()):
-            raise ValueError('new_entropy_scales must provide a positive symbol-domain scale for every raw field')
-        if self.entropy_radius > 16382:
-            raise ValueError('Entropy alphabet must fit nonzero 16-bit CDF frequencies')
+        if not 0 < self.opacity_keep_threshold < 1:
+            raise ValueError('opacity_keep_threshold must be in (0, 1)')
+        if not math.isfinite(self.storage_loss_weight) or self.storage_loss_weight < 0:
+            raise ValueError('storage_loss_weight must be finite and nonnegative')
+        if not self.enable_learned_gates and self.storage_loss_weight != 0:
+            raise ValueError('nongated motion has no differentiable storage selector; storage_loss_weight must be zero')
+        if not isinstance(self.enable_learned_gates, bool):
+            raise ValueError('enable_learned_gates must be bool')
+        if self.enable_learned_gates:
+            if (len(self.gate_initial_logits) != 3 or
+                    not all(math.isfinite(v) for v in self.gate_initial_logits)):
+                raise ValueError('gate_initial_logits needs three finite values')
+            for name in ('gate_lr', 'gate_temperature_start', 'gate_temperature_end'):
+                value = getattr(self, name)
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'{name} must be finite and positive')
+            for name in ('gate_refine_steps',):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f'{name} must be a nonnegative integer')
+            if self.gate_refine_steps >= self.motion_steps:
+                raise ValueError('gate_refine_steps must leave joint gate training steps')
 
     @property
     def total_steps(self):
         return self.motion_steps + self.incremental_steps
+
+    @property
+    def densification_stats_start(self):
+        return (self.motion_steps - self.densification_stats_steps + 1
+                if self.densification_stats_steps is not None else 1)
 
 
 def quantized_symbols(value, step):
@@ -183,6 +218,18 @@ def model_raw(model):
     return {name: getattr(model, attr).detach().clone() for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)}
 
 
+def survivor_rows(reference_count, deleted_indices):
+    """Previous materialized row numbers, in the order retained by Gaussian pruning."""
+    deleted = torch.as_tensor(deleted_indices, dtype=torch.long).reshape(-1)
+    if (reference_count < 0 or deleted.numel() > reference_count or
+            bool(((deleted < 0) | (deleted >= reference_count)).any()) or
+            deleted.unique().numel() != deleted.numel()):
+        raise ValueError('Deleted previous-frame indices must be unique and in range')
+    keep = torch.ones(reference_count, dtype=torch.bool, device=deleted.device)
+    keep[deleted] = False
+    return torch.arange(reference_count, device=deleted.device)[keep]
+
+
 def reference_digest(raw):
     digest = hashlib.sha256()
     for name in RAW_FIELDS:
@@ -210,20 +257,45 @@ class QuantizedResidualMotion(nn.Module):
         self.stage_seconds = {}
         self.index = None
 
-    def setup(self, xyz, rotation, extent, warm_start=True):
+    def setup(self, xyz, rotation, extent, warm_start=True,
+              previous_rows=None, previous_new_count=None):
         previous = None
         if warm_start and self.config.motion_init_decay and self.index is not None:
             if not self.committed:
                 raise ValueError('Motion warm start requires a committed previous frame')
-            if len(xyz) != len(self.base_xyz):
-                raise ValueError('Motion warm start requires unchanged Gaussian count and order')
+            if previous_rows is None:
+                if len(xyz) != len(self.base_xyz):
+                    raise ValueError('Motion warm start requires unchanged Gaussian count and order')
+                previous_rows = torch.arange(len(xyz), device=xyz.device)
+                previous_new_count = 0
+            elif previous_new_count is None:
+                raise ValueError('Motion warm start mapping requires previous_new_count')
+            if (isinstance(previous_new_count, bool) or not isinstance(previous_new_count, int) or
+                    previous_new_count < 0):
+                raise ValueError('previous_new_count must be a nonnegative integer')
+            rows = torch.as_tensor(previous_rows, device=xyz.device)
+            if rows.ndim != 1 or rows.dtype not in (torch.int32, torch.int64) or len(rows) != len(xyz):
+                raise ValueError('Motion warm start mapping requires one integer row per surviving Gaussian')
+            rows = rows.to(torch.long)
+            previous_count = len(self.base_xyz) + previous_new_count
+            if (bool(((rows < 0) | (rows >= previous_count)).any()) or
+                    bool((rows[1:] <= rows[:-1]).any())):
+                raise ValueError('Motion warm start mapping must contain unique, ordered in-range rows')
+            old_mask = rows < len(self.base_xyz)
             expected_xyz, expected_rotation = self.forward(self.config.motion_steps)
-            aligned_rotation = torch.abs((F.normalize(expected_rotation, dim=-1) *
-                                          F.normalize(rotation, dim=-1)).sum(-1))
-            if (not torch.allclose(expected_xyz, xyz, rtol=1e-5, atol=1e-6) or
+            aligned_rotation = torch.abs((F.normalize(expected_rotation[rows[old_mask]], dim=-1) *
+                                          F.normalize(rotation[old_mask], dim=-1)).sum(-1))
+            if (not torch.allclose(expected_xyz[rows[old_mask]], xyz[old_mask], rtol=1e-5, atol=1e-6) or
                     not torch.allclose(aligned_rotation, torch.ones_like(aligned_rotation), rtol=1e-5, atol=1e-6)):
-                raise ValueError('Motion warm start requires the same ordered previous-frame Gaussians')
-            previous = self.final_quantized_total_motion()
+                raise ValueError('Motion warm start mapping does not match committed ordered previous-frame Gaussians')
+            old_translation, old_rotation = self.final_quantized_total_motion()
+            translation = torch.zeros_like(xyz)
+            relative_rotation = xyz.new_zeros(len(xyz), 4)
+            relative_rotation[:, 0] = 1
+            translation[old_mask] = old_translation[rows[old_mask]]
+            relative_rotation[old_mask] = old_rotation[rows[old_mask]]
+            # Newly added Gaussians have no previous motion history.
+            previous = translation, relative_rotation
         self.extent = float(extent)
         self.index, self.counts, self.parents = stable_layout(xyz, self.config.fine_region_gs)
         for name, value in (('base_xyz', xyz.detach().clone()), ('base_rotation', rotation.detach().clone())):
@@ -245,7 +317,7 @@ class QuantizedResidualMotion(nn.Module):
 
     @torch.no_grad()
     def final_quantized_total_motion(self):
-        """Per-GS final encoded translation and relative world rotation."""
+        """Per-GS final quantized translation and relative world rotation."""
         symbols = self.symbol_tensors(integer=True)
         steps = self.motion_steps_vector
         offset = symbols['gs_local'][:, :3].to(steps) * steps[:3]
@@ -339,13 +411,20 @@ class QuantizedResidualMotion(nn.Module):
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
 
-    def rate_scale(self, step):
-        return min(max((step - self.config.rate_warmup_steps) / self.config.rate_ramp_steps, 0.), 1.)
+    def storage_parts(self, step, hard=False):
+        """Dense raw motion tensors; a nongated model has no stored selection map."""
+        bytes_per_tuple = 6 * self.base_xyz.element_size()
+        zero = self.base_xyz.new_zeros(())
+        region_count = sum(self.counts)
+        return dict(gate_bytes=zero, region_motion_bytes=zero + region_count * bytes_per_tuple,
+                    gs_motion_bytes=zero + len(self.base_xyz) * bytes_per_tuple)
 
-    def entropy_models(self):
-        return {name: dict(scale=list(self.config.motion_entropy_scales), sparse=True,
-                           mask_probability=self.config.tuple_mask_probability)
-                for name in ('region_0', 'region_1', 'region_2', 'gs_local')}
+    def storage_scale(self, step):
+        return min(max((step - self.config.storage_warmup_steps) /
+                       self.config.storage_ramp_steps, 0.), 1.)
+
+    def reference_storage_bytes(self, first_frame_gs_count):
+        return first_frame_gs_count * 6 * self.base_xyz.element_size()
 
     def statistics(self):
         symbols = self.symbol_tensors(integer=True)
@@ -368,7 +447,7 @@ class QuantizedResidualMotion(nn.Module):
             keep = ~split & ~moving_path
             row = dict(level=n, denominator=self.counts[n],
                        counts=dict(KEEP=int(keep.sum()), SHARED=int(shared.sum()), SPLIT=int(split.sum())),
-                       encoded_active_fraction=float(active[n].float().mean()),
+                       nonzero_motion_fraction=float(active[n].float().mean()),
                        inherited_gs_fraction=float(inherited.float().mean()))
             row['fractions'] = {name: count / row['denominator'] for name, count in row['counts'].items()}
             result['levels'].append(row)
@@ -397,8 +476,20 @@ class QuantizedResidualMotion(nn.Module):
             return
         saved_config = dict(packet['config'])
         saved_config.setdefault('motion_init_decay', 0.0)
+        saved_config.setdefault('densification_stats_steps', None)
+        saved_config.setdefault('max_new_gaussians', None)
+        saved_config.setdefault('enable_learned_gates', False)
+        if not saved_config.get('storage_only', False):
+            raise ValueError('Legacy rate/codec dynamic-frame checkpoints cannot resume with storage-only motion')
+        removed = set(saved_config) - {field.name for field in fields(self.config)}
+        if removed:
+            raise ValueError('Dynamic-frame checkpoint uses removed rate/codec settings: '
+                             + ', '.join(sorted(removed)))
+        for name in ('gate_lr', 'gate_initial_logits', 'gate_temperature_start',
+                     'gate_temperature_end', 'gate_refine_steps'):
+            saved_config.setdefault(name, None)
         if saved_config != asdict(self.config):
-            raise ValueError('Quantized residual resume requires identical layout, quantization and rate settings')
+            raise ValueError('Quantized residual resume requires identical layout, quantization and storage settings')
         self.setup(packet['state']['base_xyz'], packet['state']['base_rotation'], packet['extent'], warm_start=False)
         self.load_state_dict(packet['state'])
         self.optimizer.load_state_dict(packet['optimizer'])
@@ -466,57 +557,29 @@ class QuantizedNewGaussianView:
     def get_covariance(self, scaling_modifier=1):
         return self.model.covariance_activation(self.get_scaling, scaling_modifier, self.get_rotation)
 
-    def entropy_models(self):
-        return {f'new_{name}': dict(scale=[self.config.new_entropy_scales[name]] * math.prod(value.shape[1:]),
-                                    sparse=False)
-                for name, value in self.symbols.items()}
-
-    def integer_packet(self):
-        packet = {f'new_{name}': integer_symbols(value[self.keep].flatten(1), 1)
-                  for name, value in self.symbols.items()}
-        packet['new_source_old_index'] = self.source[self.keep].to(torch.int32)
-        return packet
-
-
-def replay_frame(previous, tensors, metadata):
-    """Independent CPU replay: delete -> rebuild layout -> motion -> append retained births."""
-    if metadata['layout_version'] != LAYOUT_VERSION:
-        raise ValueError('Unsupported residual layout version')
-    previous = {name: value.detach().cpu() for name, value in previous.items()}
-    if reference_digest(previous) != metadata['previous_reference_sha256']:
-        raise ValueError('Incremental packet previous-reference digest mismatch')
-    deleted = tensors['deleted_prev_indices'].cpu().long()
-    if len(deleted) and (deleted.min() < 0 or deleted.max() >= len(previous['xyz']) or deleted.unique().numel() != deleted.numel()):
-        raise ValueError('Invalid previous-frame deletion indices')
-    keep = torch.ones(len(previous['xyz']), dtype=torch.bool)
-    keep[deleted] = False
-    remaining = {name: value[keep] for name, value in previous.items()}
-    cfg = QuantizedResidualConfig(**metadata['config'])
-    cfg.validate()
-    if not cfg.enable_incremental and (len(deleted) or len(tensors['new_source_old_index'])):
-        raise ValueError('Incremental-disabled residual packet cannot delete or add Gaussians')
-    index, counts, _ = stable_layout(remaining['xyz'], cfg.fine_region_gs)
-    region = [tensors[f'region_{n}'].cpu().float() for n in range(3)]
-    if [len(row) for row in region] != counts or tensors['gs_local'].shape != (len(remaining['xyz']), 6):
-        raise ValueError('Encoded motion dimensions do not match reconstructed layout')
-    extent = metadata['extent']
-    steps = remaining['xyz'].new_tensor([cfg.motion_xyz_step_extent * extent] * 3 + [cfg.motion_rotation_step_rad] * 3)
-    xyz, rotation = compose_motion(remaining['xyz'], remaining['rotation'], index,
-                                  [row * steps for row in region], tensors['gs_local'].cpu().float() * steps)
-    remaining.update(xyz=xyz, rotation=rotation)
-    attr_steps = attribute_steps(cfg, extent)
-    sources = tensors['new_source_old_index'].cpu().long()
-    if len(sources) and (sources.min() < 0 or sources.max() >= len(remaining['xyz'])):
-        raise ValueError('New Gaussian prediction source index is out of bounds')
-    births = {}
+def materialize_quantized_gaussians(base_raw, new_view=None):
+    """Append retained quantized births to already moved/deleted old raw tensors."""
+    raw = {name: base_raw[name].detach().clone() for name in RAW_FIELDS}
+    base_count = len(raw['xyz'])
+    if any(len(value) != base_count for value in raw.values()):
+        raise ValueError('Materialized base attributes disagree on Gaussian count')
+    if new_view is None:
+        return raw, torch.empty(0, dtype=torch.long, device=raw['xyz'].device)
+    keep = new_view.keep
+    if (keep.ndim != 1 or keep.dtype != torch.bool or
+            new_view.source.ndim != 1 or
+            new_view.source.dtype not in (torch.int32, torch.int64) or
+            len(keep) != len(new_view.source)):
+        raise ValueError('Quantized birth mask and sources must be aligned')
+    sources = new_view.source[keep].detach().to(
+        device=raw['xyz'].device, dtype=torch.long).clone()
+    if len(sources) and bool(((sources < 0) | (sources >= base_count)).any()):
+        raise ValueError('Retained birth source index is out of bounds')
     for name in RAW_FIELDS:
-        predictor = remaining[name][sources]
+        birth = new_view.raw_value(name)[keep].detach()
         if name == 'rotation':
-            predictor = F.normalize(predictor, dim=-1)
-        residual = tensors[f'new_{name}'].cpu().to(predictor).reshape_as(predictor)
-        births[name] = predictor + residual * attr_steps[name]
-    births['rotation'] = F.normalize(births['rotation'], dim=-1)
-    count = len(births['xyz'])
-    if any(len(value) != count or value.shape[1:] != remaining[name].shape[1:] for name, value in births.items()):
-        raise ValueError('Encoded new Gaussian attributes have inconsistent dimensions')
-    return {name: torch.cat((remaining[name], births[name]), dim=0) for name in RAW_FIELDS}
+            birth = F.normalize(birth, dim=-1)
+        if birth.shape[1:] != raw[name].shape[1:] or len(birth) != len(sources):
+            raise ValueError(f'Retained birth {name} shape disagrees with base')
+        raw[name] = torch.cat((raw[name], birth.to(raw[name])), dim=0)
+    return raw, sources

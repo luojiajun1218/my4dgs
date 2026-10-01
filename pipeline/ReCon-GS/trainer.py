@@ -67,7 +67,8 @@ class Trainer(BaseTrainer):
                    + list((self.output_dir / 'point_cloud').glob(f'initial-gaussians-{frame}.ply')),
             'motion_debug_and_diagnostics': list((self.output_dir / 'selective_motion').glob(f'frame_{frame:03d}.*'))
                    + list((self.output_dir / 'selective_diagnostics').glob(f'frame_{frame:03d}_*.json'))
-                   + list((self.output_dir / 'frame_summary').glob(f'evaluation_{frame:03d}_step*.json')),
+                   + list((self.output_dir / 'frame_summary').glob(f'evaluation_{frame:03d}_step*.json'))
+                   + list((self.output_dir / 'frame_summary').glob(f'quantized_frame_{frame:03d}.json')),
             'images': [],
         }
         image_dir = self.output_dir / 'image/frames' / f'{frame:04d}'
@@ -89,8 +90,11 @@ class Trainer(BaseTrainer):
         self.synchronize()
         started = time.perf_counter()
         stream = self.module.quant_report
-        report = dict(frame=self.current_frame, decoded_evaluation=self.frame_eval_metrics,
-                      stream=stream, debug_storage=self.frame_storage(), timing=dict(self.frame_times))
+        report = dict(frame=self.current_frame, stream=stream,
+                      quantized_evaluation=self.frame_eval_metrics,
+                      evaluation_fps_semantics='Views divided by summed synchronized forward-and-clamp seconds; '
+                                               'excludes loading, quality metrics, image writes and diagnostics.',
+                      debug_storage=self.frame_storage(), timing=dict(self.frame_times))
         path = self.output_dir / 'frame_summary' / f'frame_{self.current_frame:03d}.json'
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report, indent=2))
@@ -98,27 +102,92 @@ class Trainer(BaseTrainer):
         report['timing'] = dict(self.frame_times, wall=time.perf_counter() - wall_started)
         if stream is not None:
             stages = stream['stage_seconds']
-            report['timing']['training_loop_including_frame_codec'] = report['timing']['training']
-            report['timing']['training'] = max(0., report['timing']['training'] - stages.get('frame_prepare', 0.) - stages.get('finalize', 0.))
+            report['timing']['training_loop_including_state_update'] = report['timing']['training']
+            report['timing']['training'] = max(
+                0., report['timing']['training'] - stages.get('frame_prepare', 0.)
+                - stages.get('finalize', 0.))
+        report['timing_semantics'] = (
+            'CUDA synchronized at measured boundaries. training excludes frame_prepare/finalize when present; '
+            'training_loop_including_state_update includes them. evaluation includes validation, '
+            'excluding measured image/figure writes; deletion diagnostics are in frame_prepare. '
+            'saving includes the quantized detail and first frame summary writes. '
+            'wall spans frame setup, training, evaluation, drawing and saves up to the first summary write. '
+            'The final summary rewrite and console output are excluded; components need not sum to wall.')
         path.write_text(json.dumps(report, indent=2))
         self.routine_info('Quantized frame detail: %s', json.dumps(report, separators=(',', ':')))
-        quality = ' | '.join(f'{name} PSNR={row.get("psnr", float("nan")):.2f}'
+        quality = ' | '.join(f'{name} final PSNR={row.get("psnr", float("nan")):.2f}'
                              for name, row in self.frame_eval_metrics.items())
         clocks = report['timing']
         if stream is None:
-            logging.info('帧 %d | %s | 共享完整首帧参考；后续帧开始编码', self.current_frame, quality)
+            logging.info('帧 %d | %s | 共享完整首帧参考；后续帧估计有效参数存储',
+                         self.current_frame, quality)
             return
-        stages = stream['stage_seconds']
         activity = stream['activities']
+
         def ratio(row):
-            return '/'.join(f'{row["fractions"][name] * 100:.1f}' for name in ('KEEP', 'SHARED', 'SPLIT'))
-        ratios = ' '.join(f'L{row["level"] + 1}={ratio(row)}' for row in activity['levels'])
-        logging.info('帧 %d 解码 | %s | train=%.2fs eval=%.2fs layout=%.2fs encode=%.2fs decode=%.2fs draw=%.2fs wall=%.2fs | '
-                     '码流=%d bytes 估计=%.0f bits\nKEEP/SHARED/SPLIT(%%) %s GS=%s | 调试文件=%.2f MiB',
-                     self.current_frame, quality, clocks['training'], clocks['evaluation'], stages.get('layout', 0.),
-                     stages.get('encode', 0.), stages.get('decode', 0.), clocks['drawing'], clocks['wall'],
-                     stream['total_stream_bytes'], stream['estimated_total_bits'], ratios, ratio(activity['gs']),
-                     report['debug_storage']['total_bytes'] / 2**20)
+            return '/'.join(f'{row["fractions"][name] * 100:.1f}'
+                            for name in ('KEEP', 'SHARED', 'SPLIT'))
+
+        gated = self.module.config.quantized_residual.enable_learned_gates
+        level_kind = '到达节点' if gated else '固定层区域'
+        ratios = ' '.join(
+            f'L{row["level"] + 1}={ratio(row)}(n={row["denominator"]})'
+            if row['denominator'] else f'L{row["level"] + 1}=未到达(n=0)'
+            for row in activity['levels'])
+        logging.info(
+            '帧 %d 最终量化评估 | %s | 纯训练=%.2fs 评估=%.2fs 布局=%.2fs 状态更新=%.2fs 绘图=%.2fs 本帧总计=%.2fs | '
+            '有效参数=%.2f KiB（模型估算，排除文件头等） 调试/训练文件=%.2f MiB（磁盘实测）\n'
+            'KEEP/SHARED/SPLIT(%%；%s) %s | 旧GS(n=%d，不含新增)=%s',
+            self.current_frame, quality, clocks['training'], clocks['evaluation'],
+            stream['stage_seconds'].get('layout', 0.), stream['state_update_seconds'],
+            clocks['drawing'], clocks['wall'], stream['hard_storage_bytes'] / 1024,
+            report['debug_storage']['total_bytes'] / 2**20, level_kind, ratios,
+            activity['gs']['denominator'], ratio(activity['gs']))
+        tree = stream.get('tree_setup')
+        if tree:
+            logging.info(
+                '树布局 | action=%s 间隔=%d帧 区域数=%s→%s 初始化=%s | '
+                '拓扑/校验=%.4fs 参数初始化=%.4fs 重建合计=%.4fs（均已包含在布局耗时）',
+                tree['action'], tree['interval'], tree['old_region_counts'], tree['region_counts'],
+                tree['initialization'], tree['topology_seconds'], tree['initialization_seconds'],
+                stream['stage_seconds'].get('tree_rebuild', 0.))
+        birth = stream.get('birth_control')
+        if birth is not None and birth.get('enabled', True):
+            details = [
+                f'梯度窗口={birth.get("stats_window_start", "?")}..{birth.get("stats_window_end", "?")} '
+                f'实际累计={birth.get("stats_steps_observed", "?")}步',
+                f'clone 候选={birth.get("clone_eligible", "?")} 实际={birth.get("clone_added", "?")} '
+                f'预算阻止={birth.get("clone_blocked", "?")}',
+                f'split 净增GS={birth.get("split_added", "?")} 细分母点拦截={birth.get("split_blocked", "?")}',
+                f'候选池峰值={birth.get("candidate_pool_peak", "?")} '
+                f'最终候选={birth.get("final_candidate_count", "?")} '
+                f'最终保留={birth.get("final_retained", "?")} '
+                f'上限={birth.get("max_new_gaussians", "?")} 触顶={birth.get("budget_touched", "?")}',
+                f'候选prune={birth.get("candidate_pruned", "?")} '
+                f'opacity筛除={birth.get("opacity_pruned", "?")} '
+                f'上帧补偿删除={birth.get("previous_compensation_deleted", "?")}',
+            ]
+            history = birth.get('motion_history')
+            if history:
+                details.append(
+                    f'历史对应(非实际非零运动)：原有运动GS={history.get("old_motion_rows", "?")} '
+                    f'上一帧新生GS={history.get("newborn_rows", "?")} '
+                    f'首帧参考GS={history.get("first_frame_rows", "?")} '
+                    f'初始化衰减={history.get("initialization_decay", "?")}')
+            protection = birth.get('deletion_protection')
+            if protection:
+                details.append(
+                    f'上帧KEEP保护={protection.get("protected_keep_old_count", "?")} '
+                    f'误删KEEP={protection.get("deleted_keep_count", "?")} '
+                    f'可删候选={protection.get("eligible_count", "?")}')
+            for key, label in (
+                ('stage2_optimizer_lrs', '新增GS学习率'),
+                ('deletion_damage', '删点影响'),
+                ('point_origins', '点来源'),
+            ):
+                if key in birth:
+                    details.append(f'{label}={json.dumps(birth[key], ensure_ascii=False, separators=(",", ":"))}')
+            logging.info('帧 %d 补点 | %s', self.current_frame, ' | '.join(details))
 
     def finish_frame_summary(self, wall_started):
         if self.module.config.motion_mode == 'quantized_residual':
@@ -131,6 +200,8 @@ class Trainer(BaseTrainer):
         storage = self.frame_storage()
         report = dict(frame=self.current_frame, final_step=self.global_step,
                       evaluation=self.frame_eval_metrics, selection=selection,
+                      evaluation_fps_semantics='Views divided by summed synchronized forward-and-clamp seconds; '
+                                               'excludes loading, quality metrics, image writes and diagnostics.',
                       diagnostic_note=self.frame_diagnostic_note, storage=storage,
                       timing=dict(self.frame_times),
                       timing_semantics='CUDA synchronized at measured boundaries. Training is the training-step loop including data/selection, '
@@ -192,6 +263,7 @@ class Trainer(BaseTrainer):
         names = {'setup': '准备', 'initial': '首帧训练', 'motion': '运动拟合',
                  'soft_warmup': '预热', 'hard_joint': '联合选择', 'fixed_refine': '精修', 'fixed_leaf': '固定细区域运动',
                  'shared_warmup': '共享运动预热', 'joint_residual': '残差联合训练',
+                 'gate_joint': '门控与运动联合学习', 'gate_refine': '固定门控精修',
                  'probe': '运动探测', 'shared_fit': '共享拟合', 'refine': '精修',
                  'incremental': '新增GS', 'saving': '保存', 'evaluation': '评估/绘图'}
         return f'帧 {self.current_frame}/{self.num_frames - 1} · {names.get(phase, phase)}'
@@ -323,8 +395,8 @@ class Trainer(BaseTrainer):
             )
             if show_progress:
                 metrics_text = (
-                    f"loss={metrics_ema['loss']:.4f} "
-                    f"psnr={metrics_ema['psnr']:.2f} gs={metrics['gs']}"
+                    f"train_ema_loss={metrics_ema['loss']:.4f} "
+                    f"train_ema_psnr={metrics_ema['psnr']:.2f} gs={metrics['gs']}"
                 )
                 if progress_bar is not None:
                     phase = render_pkg.get('quantized_stage', render_pkg.get('selective_stage'))

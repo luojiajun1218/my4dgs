@@ -8,10 +8,29 @@ from libgs.model.gaussian import GaussianModel as BaseGaussianModel
 from libgs.utils.general import build_rotation, quaternion_multiply
 
 
+def select_budget_mask(mask: Tensor, scores: Tensor, limit: Optional[int]) -> Tensor:
+    """Keep highest scoring eligible rows, preserving row order on score ties."""
+    if limit is None or int(mask.sum().item()) <= limit:
+        return mask
+    indices = mask.nonzero(as_tuple=True)[0]
+    ranked = indices[torch.argsort(scores[indices], descending=True, stable=True)]
+    selected = torch.zeros_like(mask)
+    selected[ranked[:limit]] = True
+    return selected
+
+
 class GaussianModel(BaseGaussianModel):
     delta_xyz: Optional[Tensor]
     delta_rot: Optional[Tensor]
     noise_scale: Optional[float]
+
+    def initialize_incremental_optimizer(self, training_args) -> None:
+        """Start newborn optimization with stage-two rates and fresh Adam moments.
+
+        Call after restoring the clone snapshot and pruning it to newborn rows.
+        Restored optimizer groups carry the old stage's learning rates and state.
+        """
+        self.training_setup(training_args)
 
     @property
     def get_xyz(self) -> Float[Tensor, "n 3"]:
@@ -69,13 +88,18 @@ class GaussianModel(BaseGaussianModel):
         min_opacity: float,
         scene_extent: float,
         max_screen_size: Optional[float] = None,
+        *,
+        max_points: Optional[int] = None,
     ):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.adaptive_densify_and_split(grads, max_grad, scene_extent)
+        split_stats = self.adaptive_densify_and_split(
+            grads, max_grad, scene_extent, max_points=max_points
+        )
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        before_prune = len(self._xyz)
+        prune_mask = (self.get_opacity < min_opacity).reshape(-1)
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * scene_extent
@@ -85,12 +109,16 @@ class GaussianModel(BaseGaussianModel):
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
+        return dict(**split_stats, pruned=before_prune - len(self._xyz),
+                    peak_before_prune=before_prune)
 
     def adaptive_densify_and_clone(
         self,
         grad_threshold: float,
         scene_extent: float,
         sigma_scale: float = 2.0,
+        *,
+        max_new_gaussians: Optional[int] = None,
     ):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
@@ -104,6 +132,11 @@ class GaussianModel(BaseGaussianModel):
             torch.max(self.get_scaling, dim=1).values
             <= self.percent_dense * scene_extent,
         )
+        eligible = int(selected_pts_mask.sum().item())
+        if max_new_gaussians is not None:
+            selected_pts_mask = select_budget_mask(
+                selected_pts_mask, torch.norm(grads, dim=-1), max_new_gaussians)
+        added = int(selected_pts_mask.sum().item())
 
         means = self._xyz[selected_pts_mask]
         stds = self.get_scaling[selected_pts_mask]
@@ -125,6 +158,7 @@ class GaussianModel(BaseGaussianModel):
             new_scaling,
             new_rotation,
         )
+        return dict(eligible=eligible, added=added, blocked=eligible - added)
 
     def adaptive_densify_and_split(
         self,
@@ -132,17 +166,26 @@ class GaussianModel(BaseGaussianModel):
         grad_threshold: float,
         scene_extent: float,
         N: int = 2,
+        *,
+        max_points: Optional[int] = None,
     ):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
-        padded_grad[: grads.shape[0]] = grads.squeeze()
+        padded_grad[: grads.shape[0]] = grads.reshape(-1)
 
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
             self.get_scaling.max(dim=1).values > self.percent_dense * scene_extent,
         )
+        eligible = int(selected_pts_mask.sum().item())
+        if max_points is not None:
+            if isinstance(N, bool) or not isinstance(N, int) or N < 2:
+                raise ValueError('Budgeted split requires integer N >= 2')
+            available = max(0, (max_points - n_init_points) // (N - 1))
+            selected_pts_mask = select_budget_mask(selected_pts_mask, padded_grad, available)
+        selected = int(selected_pts_mask.sum().item())
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
@@ -177,6 +220,8 @@ class GaussianModel(BaseGaussianModel):
             )
         )
         self.prune_points(prune_filter)
+        return dict(eligible=eligible, added=selected * (N - 1),
+                    blocked=eligible - selected)
 
     @torch.no_grad()
     def apply_deformation(

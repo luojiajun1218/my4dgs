@@ -1,8 +1,8 @@
-# 本轮：共享首帧，再训练60个后续帧；每帧200步，只更新运动。
+# 本轮：共享首帧，再训练299个后续帧；每帧200步，只更新运动。
 # 每帧从上一帧运动的0.6倍开始拟合；新增和删除GS都关闭。
-# 码率loss先设为0，量化与真实码流输出保留。
+# Storage loss设为0；仍记录稠密量化运动的参数字节估算。
 output_dir: output
-experiment_name: fs_motion_only_300_steps200
+experiment_name: fs_motion_only_storage_300_steps200
 mode: train
 ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
 
@@ -14,7 +14,7 @@ trainer:
   num_init_steps: 15000
   num_incr_steps: 200
   saving_ckpt_steps: []
-  saving_ckpt_frames: [5] # 第5帧和最后第300帧保存完整checkpoint。
+  saving_ckpt_frames: [5] # 第5帧和最后第299帧保存完整checkpoint。
 
 data:
   root: data/colmap4d/flame_steak
@@ -26,14 +26,15 @@ data:
   first_frame_eval_train: true
   eval_test: true
   extra_dataset_kwargs:
-    num_frames: 300 # 含共享首帧0，以及后续帧1～300。
+    num_frames: 300 # 含共享首帧0，以及后续帧1～299。
   extra_dataloader_kwargs:
     num_workers: 8
     pin_memory: true
 
 module:
   motion_mode: quantized_residual
-  selective_diagnostics_config: config/diagnostics/residual_motion.yaml
+  # 使用有效参数字节估算；当前训练不使用码流。
+  selective_diagnostics_config: null # 可选区域覆盖图已关闭；该诊断配置文件不再使用。
   sh_degree: 1
   random_background: false
   lambda_dssim: 0.2
@@ -69,15 +70,10 @@ module:
     motion_xyz_step_extent: 1.0e-05
     motion_rotation_step_rad: 0.001
 
-    # 码率和编码参数沿用上一轮；本轮不施加码率惩罚。
-    lambda_rate: 0.0
-    rate_warmup_steps: 30
-    rate_ramp_steps: 50
-    motion_entropy_scales: [32, 32, 32, 4, 4, 4]
-    tuple_mask_probability: 0.1
-    support_temperature: 0.25
-    entropy_radius: 511
-    entropy_chunk_rows: 4096
+    storage_only: true # 估算所有区域和逐GS运动的float32参数字节，不假设稀疏索引免费。
+    storage_loss_weight: 0.0 # motion-only：只记录存储量，不用存储项更新参数。
+    storage_warmup_steps: 30 # 权重为0时不影响训练；保留原调度步数。
+    storage_ramp_steps: 50
 
     # 新增GS接口所需参数；关闭新增时不参与拟合。
     new_xyz_step_extent: 1.0e-05
@@ -85,13 +81,6 @@ module:
     new_logscale_step: 0.001
     new_opacity_step: 0.01
     new_sh_step: 0.001
-    new_entropy_scales:
-      xyz: 128
-      rotation: 16
-      logscale: 32
-      opacity: 256
-      sh_dc: 32
-      sh_rest: 32
     opacity_keep_threshold: 0.01
     opacity_support_temperature: 0.05
     clone_sigma_scale: 2.0

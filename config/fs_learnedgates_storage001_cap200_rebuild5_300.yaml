@@ -1,0 +1,128 @@
+# 本轮：真正学习KEEP/SHARE/SPLIT；共享首帧，再训练299个后续帧。
+# 每帧联合学习门控/运动150步＋固定门控精修50步＋新增GS100步。
+# 联合阶段各层运动候选反传不乘祖先门概率；门仍按图像效果与存储成本学习。
+# 区域归属通常跨帧保留，每5帧按当前位置重建；新点先继承来源区域。
+# 重建帧按同层近邻继承运动；gate按存活GS成员对应继承，GS身份不变。
+# 本轮按所需参数的字节数计算Storage loss，替换旧结构loss和码率loss。
+# 已确认：Storage权重0.001，前30步关闭、随后50步加满；补点上限200。
+# 不做实际编解码；直接更新量化后的GS和区域归属。
+# 增删沿用等量补偿，但上一帧KEEP旧点受保护；逐帧记录删除损伤。本文件修改后尚未启动训练。
+# 这一版本 gate 通过学习得到，加上了storge loss（去掉了码率估计等代码），新增gs控制在200以内，每5帧重建树分区（对应gate状态直接继承），跑300帧，前150步联合学习门控和运动，后50步固定门控精修运动，最后100步新增gs。删除损伤诊断仍按设置执行。
+
+output_dir: output
+experiment_name: fs_learnedgates_storage001_cap200_rebuild5_300
+mode: train
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+
+trainer:
+  selective_console_mode: compact
+  cache_data_on_device: true
+  testing_steps: [30, 150, 200] # 第150步联合学习结束，第200步运动结束，第300步自动评估补点后的结果。
+  first_frame_testing_steps: []
+  num_init_steps: 15000
+  num_incr_steps: 300 # 运动200步＋新增GS100步。
+  saving_ckpt_steps: []
+  saving_ckpt_frames: [5]
+
+data:
+  root: data/colmap4d/flame_steak
+  resolution: -1
+  white_background: false
+  split_train_test: true
+  shuffle: true
+  eval_train: false
+  first_frame_eval_train: true
+  eval_test: true
+  extra_dataset_kwargs:
+    num_frames: 300 # 包含共享首帧0和后续帧1～299。
+  extra_dataloader_kwargs:
+    num_workers: 8
+    pin_memory: true
+
+module:
+  motion_mode: quantized_residual
+  selective_diagnostics_config: null # 可选区域覆盖图已关闭；删除损伤诊断仍按下方设置执行。
+  sh_degree: 1
+  random_background: false
+  lambda_dssim: 0.2
+  lambda_deform: 0.0
+  saving_gs_steps: []
+  saving_gs_frames: [5]
+  num_saving_images: 5
+  full_eval: true
+  lpips_required: false
+  quantized_diagnostics:
+    deletion_damage_enabled: true # 删除前后各渲染一次，仅用于诊断，不参与训练或选择。
+    deletion_damage_view_name: cam00.png # 使用同一帧、同一测试相机比较删除影响。
+    deletion_damage_every_n_frames: 1 # 每隔多少帧测一次；无删除的帧跳过。
+  renderer:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug_from: -1
+    debug: false
+  deformation:
+    num_stage1_steps: 200 # 与下面的motion_steps一致。
+    densify_interval: 40 # 新增阶段每隔多少步检查细分和淘汰。
+    densify_grad_threshold: 0.00015 # 候选点仍需通过原有梯度门槛。
+    opacity_threshold: 0.01
+
+  # 新增阶段重新建立优化器，保证实际使用这些ReCon-GS学习率。
+  gaussian_stage2:
+    position_lr_init: 0.0024
+    position_lr_final: 0.000024
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.0375
+    opacity_lr: 0.75
+    scaling_lr: 0.075
+    rotation_lr: 0.015
+    percent_dense: 0.01
+
+  quantized_residual:
+    storage_only: true # 按有效参数字节数计价，替代熵码率和旧结构两项代价。
+    storage_loss_weight: 0.001 # 已确认；不是旧码率loss的同等强度。
+    storage_warmup_steps: 30 # 前30步只按图像误差学习运动和门控。
+    storage_ramp_steps: 50 # 第31～80步将存储权重从0逐渐提高到上面的值。
+    # 以首帧每个GS各存一份运动的体积作基准；本轮float32运动每份24字节。
+    # 每个到达的门控1字节；新GS按属性体积另加4字节来源；删除索引4字节。
+    enable_learned_gates: true # 门控控制运动，并决定需要保存哪些参数。
+    tree_rebuild_interval: 5 # 帧1初建；帧5、10、15…重建。0关闭；帧内不重建。
+    tree_rebuild_neighbors: 3 # 仅运动初始化：同层近邻平移均值、四元数均值；gate按成员对应继承。
+    gate_lr: 0.02 # 三类选择分数的学习率。
+    # 重建gate：某旧区域贡献过半成员则继承；否则来源状态一致时按成员数加权。
+    gate_initial_logits: [-1.0, 0.0, -0.5] # 首次、未到达来源或无过半来源且状态冲突时使用；gate仍可学习。
+    gate_temperature_start: 1.5 # 学习代理的概率较平缓，让关闭的候选也有梯度。
+    gate_temperature_end: 0.5 # 后期概率更集中；实际运动始终按最高分状态执行。
+    gate_refine_steps: 50 # 运动阶段最后50步固定门控，只精修已选运动。
+    fine_region_gs: 24
+    motion_steps: 200
+    shared_warmup_steps: 0 # 门控与候选运动从第1步共同学习，沿用上一帧状态，无单独候选预热。
+    motion_init_decay: 0.6 # 普通帧及重建帧继承运动的衰减；旋转在旋转向量上衰减。
+    enable_incremental: true
+    incremental_steps: 100
+    densification_stats_steps: 30 # 运动第171～200步累计补点梯度。
+    max_new_gaussians: 200 # 每帧活跃新增候选池上限，克隆和细分共用。
+    region_translation_lr: 0.0005
+    region_rotation_lr: 0.0005
+    gs_translation_lr: 0.0001
+    gs_rotation_lr: 0.0001
+    adam_betas: [0.9, 0.999]
+    adam_eps: 1.0e-08
+
+    motion_xyz_step_extent: 1.0e-05
+    motion_rotation_step_rad: 0.001
+
+    new_xyz_step_extent: 1.0e-05
+    new_rotation_step: 0.001
+    new_logscale_step: 0.001
+    new_opacity_step: 0.01
+    new_sh_step: 0.001
+    opacity_keep_threshold: 0.01
+    opacity_support_temperature: 0.05
+    clone_sigma_scale: 2.0
+    new_max_screen_size: 20.0
+
+gui_ip: 127.0.0.1
+gui_port: 6009
+detect_anomaly: false
+quiet: false

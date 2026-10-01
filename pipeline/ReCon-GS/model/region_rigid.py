@@ -17,5 +17,5 @@ def apply_region_rigid(xyz: Tensor, orientation: Tensor, center: Tensor,
     q = rotation_vector_quaternion(rotation_vector)
     local = xyz - center
     cross = torch.cross(q[:, 1:], local, dim=-1)
-    rotated = local + 2 * (q[:, :1] * cross + torch.cross(q[:, 1:], cross, dim=-1))
-    return rotated + center + translation, quaternion_multiply(q, orientation)
+    rotation_delta = 2 * (q[:, :1] * cross + torch.cross(q[:, 1:], cross, dim=-1))
+    return xyz + rotation_delta + translation, quaternion_multiply(q, orientation)
