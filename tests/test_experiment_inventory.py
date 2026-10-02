@@ -110,7 +110,9 @@ class ExperimentInventoryTests(unittest.TestCase):
             stats_steps_observed=2, clone_eligible=3, clone_added=3,
             clone_blocked=0, split_added=0, split_blocked=0,
             candidate_pool_peak=3, final_candidate_count=3, final_retained=3,
-            max_new_gaussians=200, budget_touched=False, candidate_pruned=0,
+            max_new_gaussians=None, max_retained_gaussians=200,
+            retention_budget_pruned=0, budget_touched=False, candidate_pruned=4,
+            candidate_prune_reasons=dict(low_opacity=2, screen_size=2, world_size=2, multiple=2),
             opacity_pruned=0, previous_compensation_deleted=1,
             motion_history=dict(old_motion_rows=8, newborn_rows=2,
                                 first_frame_rows=0, initialization_decay=.6),
@@ -135,6 +137,10 @@ class ExperimentInventoryTests(unittest.TestCase):
             finish_summary(fake, 0.)
             rendered = '\n'.join(call.args[0] % call.args[1:] for call in info.call_args_list)
             self.assertIn('最终保留=3', rendered)
+            self.assertIn('候选上限=None', rendered)
+            self.assertIn('最终保留上限=200', rendered)
+            self.assertIn('最终预算筛除=0', rendered)
+            self.assertIn('候选裁剪原因(可重叠)：低透明度=2 屏幕过大=2 世界过大=2 多原因=2', rendered)
             self.assertIn('旧GS(n=10，不含新增)', rendered)
             self.assertIn('到达节点', rendered)
             self.assertIn('历史对应(非实际非零运动)', rendered)

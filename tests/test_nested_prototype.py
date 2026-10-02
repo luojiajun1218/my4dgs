@@ -2,6 +2,7 @@
 import importlib
 import ast
 import copy
+import json
 import sys
 import tempfile
 import time
@@ -836,7 +837,8 @@ def test_residual_birth_budget_window_and_stable_selection():
     for name, bad in (('densification_stats_steps', 0), ('densification_stats_steps', 5),
                       ('densification_stats_steps', True), ('densification_stats_steps', 1.5),
                       ('max_new_gaussians', 0), ('max_new_gaussians', False),
-                      ('max_new_gaussians', 2.0)):
+                      ('max_new_gaussians', 2.0), ('max_retained_gaussians', 0),
+                      ('max_retained_gaussians', False), ('max_retained_gaussians', 2.0)):
         try:
             residual_test_config(**{name: bad}).validate()
         except ValueError as exc:
@@ -1419,6 +1421,126 @@ def test_periodic_rebuild_preserves_base_pose_and_inherits_only_same_level():
             recovered_pose = recovered(2)
             for expected, actual in zip(expected_pose, recovered_pose):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_final_birth_budget_is_separate_and_preserves_materialized_row_order():
+    cfg = residual_test_config(max_new_gaussians=None, max_retained_gaussians=2)
+    reference = residual_raw_fixture(count=5)
+    model = SimpleNamespace()
+    for name, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(model, attr, torch.nn.Parameter(reference[name].clone()))
+    with torch.no_grad():
+        model._opacity[:, 0] = torch.tensor([-10., 2., 2., 1., 0.])
+    view = Q.QuantizedNewGaussianView(model, cfg, 1., reference)
+    assert cfg.max_new_gaussians is None
+    assert int(view.keep.sum()) == 4  # Training is not limited to two candidates.
+    source = view.source.clone()
+    report = view.apply_retention_budget(cfg.max_retained_gaussians)
+    assert report['eligible'] == 4 and report['pruned'] == 2
+    assert view.keep.tolist() == [False, True, True, False, False]
+    torch.testing.assert_close(view.keep_st, view.keep.float(), rtol=0, atol=0)
+    materialized, retained_sources = Q.materialize_quantized_gaussians(reference, view)
+    assert len(materialized['xyz']) == 7
+    torch.testing.assert_close(retained_sources, source[1:3], rtol=0, atol=0)
+    for name in Q.RAW_FIELDS:
+        torch.testing.assert_close(materialized[name][:5], reference[name], rtol=0, atol=0)
+    # Equal scores prefer the earlier source row; a larger budget does not create points.
+    tied = Q.QuantizedNewGaussianView(model, cfg, 1., reference)
+    tied.apply_retention_budget(1)
+    assert tied.keep.tolist() == [False, True, False, False, False]
+    for limit in [None, 200]:
+        unchanged = Q.QuantizedNewGaussianView(model, cfg, 1., reference)
+        assert unchanged.apply_retention_budget(limit)['pruned'] == 0
+        assert int(unchanged.keep.sum()) == 4
+    with torch.no_grad():
+        model._opacity.fill_(-10.)
+    empty = Q.QuantizedNewGaussianView(model, cfg, 1., reference)
+    assert empty.apply_retention_budget(200)['eligible'] == 0
+    raw, sources = Q.materialize_quantized_gaussians(reference, empty)
+    assert len(raw['xyz']) == 5 and sources.numel() == 0
+
+
+def test_finalization_budget_updates_storage_tree_and_next_frame_count():
+    raw, motion = gated_fixture(count=5, enable_incremental=True, incremental_steps=1,
+                                max_new_gaussians=None, max_retained_gaussians=2)
+    cfg = motion.config
+    base, candidates = SimpleNamespace(), SimpleNamespace()
+    for name, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(base, attr, raw[name].clone())
+        setattr(candidates, attr, torch.nn.Parameter(raw[name].clone()))
+    with torch.no_grad():
+        candidates._opacity[:, 0] = torch.tensor([-10., 2., 2., 1., 0.])
+    candidates.get_xyz = candidates._xyz
+    view = Q.QuantizedNewGaussianView(candidates, cfg, 1., raw)
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    tree = ast.parse(source_path.read_text())
+    methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+               and node.name in {'finalize_quantized_frame', 'quantized_storage', 'new_quant_birth_control'}]
+    scope = dict(torch=torch, time=time, json=json, np=np, RAW_ATTRIBUTES=Q.RAW_ATTRIBUTES,
+                 materialize_quantized_gaussians=Q.materialize_quantized_gaussians,
+                 model_raw=Q.model_raw, reference_digest=Q.reference_digest,
+                 GaussianModel=lambda degree: SimpleNamespace())
+    exec(compile(ast.Module(body=methods, type_ignores=[]), str(source_path), 'exec'), scope)
+    with tempfile.TemporaryDirectory() as directory:
+        fake = SimpleNamespace(
+            config=SimpleNamespace(quantized_residual=cfg, sh_degree=1),
+            current_frame=1, global_step=cfg.total_steps, output_dir=Path(directory),
+            residual_motion=motion, gaussians=base, gaussians_incr=candidates,
+            quant_deleted_indices=torch.empty(0, dtype=torch.int32),
+            quant_point_birth_frame=torch.zeros(5, dtype=torch.long), quant_first_frame_gs_count=5,
+            trainer=SimpleNamespace(synchronize=lambda: None, record_io=lambda *args: None),
+            make_quantized_new_view=lambda: view,
+            quant_stats_window_start=lambda: cfg.densification_stats_start)
+        fake.install_quantized_raw = lambda value: setattr(fake, 'installed_raw', value)
+        fake.quantized_storage = lambda *args, **kwargs: scope['quantized_storage'](fake, *args, **kwargs)
+        fake.quant_birth_control = scope['new_quant_birth_control'](fake)
+        scope['finalize_quantized_frame'](fake)
+        report = json.loads((Path(directory) / 'frame_summary/quantized_frame_001.json').read_text())
+        birth = report['birth_control']
+        assert (birth['final_candidate_count'], birth['opacity_pruned'],
+                birth['retention_budget_pruned'], birth['final_retained']) == (5, 1, 2, 2)
+        assert report['new_count'] == fake.quant_previous_new_count == 2
+        bytes_per_birth = 4 + sum(value[0].numel() * value.element_size() for value in raw.values())
+        assert report['storage_bytes_by_class']['new_bytes'] == 2 * bytes_per_birth
+        assert report['expected_storage_bytes_by_class']['new_bytes'] == 2 * bytes_per_birth
+        assert len(fake.installed_raw['xyz']) == 7
+        assert len(fake.quant_point_birth_frame) == 7
+        assert motion.materialized_layout['index'].shape[1] == 7
+        torch.testing.assert_close(motion.materialized_layout['index'][:, 5:],
+                                   motion.index[:, view.source[view.keep]], rtol=0, atol=0)
+
+
+def test_candidate_prune_reason_counts_overlap_without_double_deletion():
+    for screen_limit, expected_count in [(20., 4), (None, 2)]:
+        fake = SimpleNamespace(
+            _xyz=torch.zeros(5, 3), xyz_gradient_accum=torch.zeros(5, 1), denom=torch.ones(5, 1),
+            get_opacity=torch.tensor([[.001], [.5], [.5], [.001], [.5]]),
+            get_scaling=torch.tensor([[.01]*3, [.01]*3, [.3]*3, [.3]*3, [.01]*3]),
+            max_radii2D=torch.tensor([30., 30., 0., 0., 0.]),
+            adaptive_densify_and_split=lambda *args, **kwargs: dict(eligible=0, added=0, blocked=0))
+        fake.prune_points = lambda mask: setattr(fake, '_xyz', fake._xyz[~mask])
+        result = GAUSS.GaussianModel.adaptive_densify_and_prune(fake, .1, .01, 1., screen_limit)
+        assert result['pruned'] == expected_count
+        assert len(fake._xyz) == 5 - expected_count
+        expected = dict(low_opacity=2, screen_size=2, world_size=2, multiple=2) if screen_limit else dict(
+            low_opacity=2, screen_size=0, world_size=0, multiple=0)
+        assert result['prune_reasons'] == expected
+
+
+def test_zero_refinement_keeps_gates_trainable_through_last_motion_step():
+    raw, motion = gated_fixture(gate_refine_steps=0)
+    cfg = motion.config
+    for step in [1, cfg.motion_steps - 1, cfg.motion_steps]:
+        assert motion.stage(step) == 'gate_joint'
+        motion(step, training=True)
+        assert motion.frozen_states is None
+        assert all(value.requires_grad for value in motion.gate_logits)
+    restored = GR.GatedResidualMotion(cfg)
+    restored.restore(copy.deepcopy(motion.capture()))
+    assert restored.frozen_states is None
+    assert all(value.requires_grad for value in restored.gate_logits)
+    for left, right in zip(motion(cfg.motion_steps), restored(cfg.motion_steps)):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
 
 
 def test_gate_membership_majority_agreement_conflict_and_relabeling():

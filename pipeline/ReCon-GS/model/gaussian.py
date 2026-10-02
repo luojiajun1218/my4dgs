@@ -99,17 +99,23 @@ class GaussianModel(BaseGaussianModel):
         )
 
         before_prune = len(self._xyz)
-        prune_mask = (self.get_opacity < min_opacity).reshape(-1)
+        low_opacity = (self.get_opacity < min_opacity).reshape(-1)
+        big_points_vs = torch.zeros_like(low_opacity)
+        big_points_ws = torch.zeros_like(low_opacity)
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * scene_extent
-            prune_mask = torch.logical_or(
-                torch.logical_or(prune_mask, big_points_vs), big_points_ws
-            )
+        prune_mask = low_opacity | big_points_vs | big_points_ws
+        reasons = dict(low_opacity=int(low_opacity.sum()),
+                       screen_size=int(big_points_vs.sum()),
+                       world_size=int(big_points_ws.sum()),
+                       multiple=int(((low_opacity.int() + big_points_vs.int() +
+                                      big_points_ws.int()) > 1).sum()))
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
         return dict(**split_stats, pruned=before_prune - len(self._xyz),
+                    prune_reasons=reasons,
                     peak_before_prune=before_prune)
 
     def adaptive_densify_and_clone(

@@ -42,6 +42,7 @@ class QuantizedResidualConfig:
     new_max_screen_size: Optional[float] = None
     densification_stats_steps: Optional[int] = None
     max_new_gaussians: Optional[int] = None
+    max_retained_gaussians: Optional[int] = None
     enable_learned_gates: bool = False
     tree_rebuild_interval: int = 0
     tree_rebuild_neighbors: int = 3
@@ -65,7 +66,7 @@ class QuantizedResidualConfig:
                  'gate_temperature_end', 'gate_refine_steps'}
         if self.gate_initial_logits is not None:
             self.gate_initial_logits = [float(value) for value in self.gate_initial_logits]
-        optional = {'densification_stats_steps', 'max_new_gaussians'} | (
+        optional = {'densification_stats_steps', 'max_new_gaussians', 'max_retained_gaussians'} | (
             set() if self.enable_learned_gates else gated)
         missing = [f.name for f in fields(self) if f.name not in optional and getattr(self, f.name) is None]
         if missing:
@@ -83,7 +84,7 @@ class QuantizedResidualConfig:
             raise ValueError('tree_rebuild_interval requires enable_learned_gates')
         if self.shared_warmup_steps >= self.motion_steps:
             raise ValueError('shared_warmup_steps must leave joint residual fitting steps')
-        for name in ('densification_stats_steps', 'max_new_gaussians'):
+        for name in ('densification_stats_steps', 'max_new_gaussians', 'max_retained_gaussians'):
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
                 raise ValueError(f'{name} must be a positive integer or None')
@@ -530,6 +531,29 @@ class QuantizedNewGaussianView:
 
     def raw_value(self, name):
         return self.predictor[name] + self.symbols[name] * self.steps[name]
+
+    @torch.no_grad()
+    def apply_retention_budget(self, limit):
+        """Final materialization only: retain highest quantized opacity, stable ties.
+
+        This is a retention heuristic, not an image-contribution measurement.
+        Candidate training and its differentiable support remain unrestricted.
+        """
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValueError('Retention limit must be a positive integer or None')
+        eligible = torch.where(self.keep)[0]
+        before = len(eligible)
+        if limit is not None and before > limit:
+            score = torch.sigmoid(self.raw_value('opacity')).flatten()[eligible]
+            chosen = eligible[torch.argsort(score, descending=True, stable=True)[:limit]]
+            self.keep = torch.zeros_like(self.keep)
+            self.keep[chosen] = True
+            self.keep_st = self.keep.to(self.keep_st)
+        return dict(eligible=before, pruned=before - int(self.keep.sum()),
+                    limit=limit, selection='highest_quantized_opacity_stable_ties',
+                    semantics='Applied only at final materialization, after opacity eligibility. '
+                              'Opacity ranking is a heuristic, not measured image contribution. '
+                              'No minimum retained count is enforced.')
 
     def __getattr__(self, name):
         return getattr(self.model, name)

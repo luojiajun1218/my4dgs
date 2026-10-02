@@ -162,12 +162,20 @@ class Trainer(BaseTrainer):
                 f'候选池峰值={birth.get("candidate_pool_peak", "?")} '
                 f'最终候选={birth.get("final_candidate_count", "?")} '
                 f'最终保留={birth.get("final_retained", "?")} '
-                f'上限={birth.get("max_new_gaussians", "?")} 触顶={birth.get("budget_touched", "?")}',
+                f'候选上限={birth.get("max_new_gaussians", "?")} 候选触顶={birth.get("budget_touched", "?")} '
+                f'最终保留上限={birth.get("max_retained_gaussians", "无限制")}',
                 f'候选prune={birth.get("candidate_pruned", "?")} '
                 f'opacity筛除={birth.get("opacity_pruned", "?")} '
+                f'最终预算筛除={birth.get("retention_budget_pruned", 0)} '
                 f'上帧补偿删除={birth.get("previous_compensation_deleted", "?")}',
             ]
             history = birth.get('motion_history')
+            if birth.get('candidate_prune_reasons') is not None:
+                reasons = birth['candidate_prune_reasons']
+                details.append(
+                    f'候选裁剪原因(可重叠)：低透明度={reasons["low_opacity"]} '
+                    f'屏幕过大={reasons["screen_size"]} 世界过大={reasons["world_size"]} '
+                    f'多原因={reasons["multiple"]}')
             if history:
                 details.append(
                     f'历史对应(非实际非零运动)：原有运动GS={history.get("old_motion_rows", "?")} '

@@ -925,8 +925,11 @@ class Module(BaseModule):
             stats_steps_observed=0, clone_eligible=0, clone_added=0,
             clone_blocked=0, split_added=0, split_blocked=0,
             split_eligible=0, candidate_pool_peak=0, candidate_pruned=0,
+            candidate_prune_reasons=dict(low_opacity=0, screen_size=0, world_size=0, multiple=0),
+            candidate_prune_events=[],
             final_candidate_count=0, opacity_pruned=0,
             final_retained=0, max_new_gaussians=cfg.max_new_gaussians,
+            max_retained_gaussians=cfg.max_retained_gaussians, retention_budget_pruned=0,
             motion_history=None,
             point_origins={},
             budget_touched=False, previous_compensation_deleted=int(self.quant_deleted_indices.numel()),
@@ -1012,6 +1015,13 @@ class Module(BaseModule):
                     birth['split_added'] += result['added']
                     birth['split_blocked'] += result['blocked']
                     birth['candidate_pruned'] += result['pruned']
+                    for reason, count in result['prune_reasons'].items():
+                        birth['candidate_prune_reasons'][reason] += count
+                    birth['candidate_prune_events'].append(dict(
+                        incremental_step=stage2_step, candidate_count=result['peak_before_prune'],
+                        pruned=result['pruned'], remaining=len(self.gaussians_incr.get_xyz),
+                        reasons=result['prune_reasons'],
+                        semantics='Reason counts overlap; multiple counts points matching at least two reasons.'))
                     birth['candidate_pool_peak'] = max(birth['candidate_pool_peak'], result['peak_before_prune'])
             self.gaussians_incr.optimizer.step()
             self.gaussians_incr.optimizer.zero_grad(set_to_none=True)
@@ -1027,6 +1037,12 @@ class Module(BaseModule):
         finalize_started = time.perf_counter()
         cfg = self.config.quantized_residual
         view = self.make_quantized_new_view() if cfg.enable_incremental else None
+        opacity_eligible = int(view.keep.sum()) if view is not None else 0
+        retention = (view.apply_retention_budget(cfg.max_retained_gaussians)
+                     if view is not None else dict(eligible=0, pruned=0,
+                         limit=cfg.max_retained_gaussians, selection='no_candidates'))
+        self.quant_birth_control['retention_budget'] = retention
+        self.quant_birth_control['retention_budget_pruned'] = retention['pruned']
         expected_storage, expected_parts = self.quantized_storage(view)
         hard_storage, hard_parts = self.quantized_storage(view, hard=True)
         reference_bytes = self.residual_motion.reference_storage_bytes(self.quant_first_frame_gs_count)
@@ -1046,7 +1062,7 @@ class Module(BaseModule):
 
         self.quant_birth_control['final_retained'] = retained_count
         self.quant_birth_control['opacity_pruned'] = (
-            self.quant_birth_control['final_candidate_count'] - retained_count)
+            self.quant_birth_control['final_candidate_count'] - opacity_eligible)
         limit = cfg.max_new_gaussians
         self.quant_birth_control['budget_touched'] = (limit is not None and
             (self.quant_birth_control['candidate_pool_peak'] >= limit or
@@ -1089,7 +1105,8 @@ class Module(BaseModule):
             birth_control=self.quant_birth_control,
             tree_setup=(self.residual_motion.tree_setup if cfg.enable_learned_gates else None),
             method_semantics=('Learned KEEP/SHARE/SPLIT hierarchy with optional periodic spatial rebuild. '
-                'Rebuild inherits same-level KNN motion/gate priors; otherwise region membership persists. '
+                'Rebuild inherits same-level KNN motion priors and gates by surviving member overlap; '
+                'otherwise region membership persists. '
                 'KEEP cancels all ancestor motion; '
                 'SHARE closes descendants; SPLIT retains shared rigid motion and opens children/local residuals. '
                 'Region rotations move centers around parent-advected pivots. Only reachable branches carry motion.'
