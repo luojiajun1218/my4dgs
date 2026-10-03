@@ -1,4 +1,6 @@
 import json
+import random
+from itertools import cycle
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +13,34 @@ from torch.utils.data import ConcatDataset, DataLoader, RandomSampler, Sequentia
 from libgs.data import Dataset, SceneInfo, load_scene
 from libgs.pipeline import DataConfig as BaseDataConfig
 from libgs.pipeline import DataModule as BaseDataModule
+from libgs.data.utils.fetch import Fetcher
+
+
+SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS = 30
+
+
+def _collate_single_view(batch):
+    return batch[0]
+
+
+class PairedFetcher(Fetcher):
+    """Same cache cycling as Fetcher, with a private camera-order RNG."""
+    def __init__(self, loader, cache, move_to_device, seed):
+        self.order_rng = random.Random(seed)
+        super().__init__(loader, cache, move_to_device)
+
+    def next(self):
+        item = next(self.loader_iter)
+        if self.move_to_device:
+            item = self.move_to_device(item)
+        if self.cache and len(self.cached_items) < self.num_items:
+            self.cached_items.append(item)
+            if len(self.cached_items) == self.num_items:
+                if isinstance(self.loader.sampler, RandomSampler):
+                    self.order_rng.shuffle(self.cached_items)
+                self.loader_iter = cycle(self.cached_items)
+                self.cached_items = []
+        return item
 
 
 @dataclass
@@ -20,6 +50,9 @@ class DataConfig(BaseDataConfig):
     white_background: bool = False
     split_train_test: bool = True
     shuffle: bool = True
+    training_view_seed: Optional[int] = None
+    training_camera_names: Optional[List[str]] = None
+    validation_camera_names: Optional[List[str]] = None
     eval_train: bool = True
     first_frame_eval_train: Optional[bool] = None
     eval_test: bool = True
@@ -108,6 +141,35 @@ class DataModule(BaseDataModule):
             test_dataset.resolution_scale = scale
         return test_dataset
 
+    @staticmethod
+    def _camera_indices(dataset, names: Optional[Sequence[str]]) -> Optional[List[int]]:
+        if names is None:
+            return None
+        requested = list(names)
+        if not requested or len(requested) != len(set(requested)):
+            raise ValueError('Camera-name split must be nonempty and contain no duplicates')
+        camera_to_index = {}
+        for index, item in enumerate(dataset.items):
+            name = item.path.name
+            if name in camera_to_index:
+                raise ValueError(f'Training camera filenames must be unique: {name}')
+            camera_to_index[name] = index
+        missing = [name for name in requested if name not in camera_to_index]
+        if missing:
+            raise ValueError(f'Camera-name split contains missing views: {missing}')
+        return [camera_to_index[name] for name in requested]
+
+    def _configured_camera_split(self):
+        training = getattr(self.config, 'training_camera_names', None)
+        validation = getattr(self.config, 'validation_camera_names', None)
+        if training is None and validation is None:
+            return
+        if training is None or validation is None:
+            raise ValueError('Training and validation camera names must be configured together')
+        overlap = set(training) & set(validation)
+        if overlap:
+            raise ValueError(f'Training and validation camera splits overlap: {sorted(overlap)}')
+
     def selective_training_pairs(self, names, device, camera_atol):
         """Explicit filename selection is stable across dataset shuffling/resume."""
         if self.current_frame <= 0:
@@ -139,8 +201,19 @@ class DataModule(BaseDataModule):
         # libgs full-resolution downsampling expects get_worker_info().id.
         # Keep reading inside workers, using the same worker settings as training.
         kwargs.update(batch_size=1, shuffle=False, drop_last=False,
-                      sampler=SequentialSampler(dataset), collate_fn=lambda batch: batch[0])
-        views = [view.to(device) for view in DataLoader(dataset, **kwargs)]
+                      sampler=SequentialSampler(dataset), collate_fn=_collate_single_view,
+                      timeout=SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS)
+        loader = DataLoader(dataset, **kwargs)
+        loader_iter = iter(loader)
+        views = []
+        try:
+            for _ in range(len(dataset)):
+                views.append(next(loader_iter).to(device))
+        finally:
+            # This one-shot loader must release its workers on success and error.
+            shutdown_workers = getattr(loader_iter, '_shutdown_workers', None)
+            if shutdown_workers is not None:
+                shutdown_workers()
         count = len(names)
         pairs = []
         for now, old in zip(views[:count], views[count:]):
@@ -158,15 +231,24 @@ class DataModule(BaseDataModule):
         indices: Optional[Sequence[int]] = None,
     ) -> DataLoader:
         dataset = self.get_train_dataset(scale)
+        self._configured_camera_split()
+        if indices is None:
+            indices = self._camera_indices(
+                dataset, getattr(self.config, 'training_camera_names', None))
         if indices:
             dataset = Subset(dataset, indices)
         collate_fn = lambda batch: batch[0]
         kwargs = dict(num_workers=8, pin_memory=True, collate_fn=collate_fn)
+        seed = self.config.training_view_seed
+        generator = (torch.Generator().manual_seed(seed + max(self.current_frame, 0))
+                     if seed is not None else None)
         if random:
-            kwargs["sampler"] = RandomSampler(dataset)
+            kwargs["sampler"] = RandomSampler(dataset, generator=generator)
         else:
             kwargs["sampler"] = SequentialSampler(dataset)
         kwargs = {**kwargs, **self.config.extra_dataloader_kwargs}
+        if generator is not None:
+            kwargs['generator'] = torch.Generator().manual_seed(seed + max(self.current_frame, 0))
         return DataLoader(dataset, **kwargs)
 
     def test_dataloader(self, scale: float = 1.0) -> Optional[DataLoader]:
@@ -176,12 +258,29 @@ class DataModule(BaseDataModule):
             kwargs = {**kwargs, **self.config.extra_dataloader_kwargs}
             return DataLoader(dataset, **kwargs)
 
+    def validation_dataloader(self, scale: float = 1.0) -> DataLoader:
+        dataset = self.get_train_dataset(scale)
+        self._configured_camera_split()
+        validation_names = getattr(self.config, 'validation_camera_names', None)
+        if validation_names is None:
+            raise ValueError('validation_camera_names must be set for a validation loader')
+        indices = self._camera_indices(dataset, validation_names)
+        dataset = Subset(dataset, indices)
+        kwargs = dict(num_workers=8, pin_memory=True, collate_fn=lambda batch: batch[0])
+        kwargs = {**kwargs, **self.config.extra_dataloader_kwargs}
+        kwargs.pop('shuffle', None)
+        kwargs['sampler'] = SequentialSampler(dataset)
+        return DataLoader(dataset, **kwargs)
+
     def val_dataloader(self, scale: float = 1.0) -> List[DataLoader]:
         datasets, eval_names = [], []
         eval_train = self.config.eval_train
         if self.current_frame == 0 and self.config.first_frame_eval_train is not None:
             eval_train = self.config.first_frame_eval_train
-        if eval_train:
+        if getattr(self.config, 'validation_camera_names', None) is not None:
+            datasets.append(self.validation_dataloader(scale))
+            eval_names.append('validation')
+        elif eval_train:
             datasets.append(self.train_dataloader(scale, random=False))
             eval_names.append("train")
         if self.config.eval_test and (dataset := self.test_dataloader(scale)):

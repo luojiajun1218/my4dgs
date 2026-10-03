@@ -44,6 +44,10 @@ class QuantizedResidualConfig:
     max_new_gaussians: Optional[int] = None
     max_retained_gaussians: Optional[int] = None
     enable_learned_gates: bool = False
+    gate_policy: str = 'learned'
+    fixed_gate_budget_path: Optional[str] = None
+    fixed_gate_seed: int = 0
+    reset_keep_gate_priors: bool = False
     tree_rebuild_interval: int = 0
     tree_rebuild_neighbors: int = 3
     gate_lr: Optional[float] = None
@@ -51,12 +55,53 @@ class QuantizedResidualConfig:
     gate_temperature_start: Optional[float] = None
     gate_temperature_end: Optional[float] = None
     gate_refine_steps: Optional[int] = None
+    motion_gradient_mode: str = 'all_split'
+    motion_gradient_warmup_steps: int = 0
+    keep_candidate_fit_interval: int = 10
+    keep_candidate_fit_weight: float = 1.0
+    fit_fine_split_candidates: bool = False
     storage_only: bool = True
     storage_loss_weight: Optional[float] = None
+    gs_activity_loss_weight: float = 0.0
     storage_warmup_steps: Optional[int] = None
     storage_ramp_steps: Optional[int] = None
 
     def validate(self):
+        if not isinstance(self.fit_fine_split_candidates, bool):
+            raise ValueError('fit_fine_split_candidates must be bool')
+        if self.fit_fine_split_candidates and self.motion_gradient_mode != 'keep_candidate_loss':
+            raise ValueError('fit_fine_split_candidates requires keep_candidate_loss')
+        if not isinstance(self.reset_keep_gate_priors, bool):
+            raise ValueError('reset_keep_gate_priors must be bool')
+        if self.motion_gradient_mode not in {'all_split', 'hard_path', 'keep_probe',
+                                             'keep_local_probe', 'keep_candidate_loss'}:
+            raise ValueError('Unsupported motion_gradient_mode')
+        if self.motion_gradient_mode in {'keep_probe', 'keep_local_probe', 'keep_candidate_loss'} and (
+                not self.enable_learned_gates or self.gate_policy != 'learned'):
+            raise ValueError(f'{self.motion_gradient_mode} requires learned gates')
+        if (isinstance(self.keep_candidate_fit_interval, bool) or
+                not isinstance(self.keep_candidate_fit_interval, int) or
+                self.keep_candidate_fit_interval < 1):
+            raise ValueError('keep_candidate_fit_interval must be a positive integer')
+        if (isinstance(self.keep_candidate_fit_weight, bool) or
+                not math.isfinite(self.keep_candidate_fit_weight) or self.keep_candidate_fit_weight <= 0):
+            raise ValueError('keep_candidate_fit_weight must be finite and positive')
+        if self.motion_gradient_mode == 'keep_candidate_loss' and self.motion_gradient_warmup_steps:
+            raise ValueError('keep_candidate_loss requires motion_gradient_warmup_steps: 0')
+        if self.gate_policy not in {'learned', 'fixed_coarse', 'fixed_budget_random'}:
+            raise ValueError('Unsupported gate_policy')
+        if (isinstance(self.fixed_gate_seed, bool) or not isinstance(self.fixed_gate_seed, int)
+                or self.fixed_gate_seed < 0):
+            raise ValueError('fixed_gate_seed must be a nonnegative integer')
+        if self.gate_policy == 'fixed_budget_random' and not self.fixed_gate_budget_path:
+            raise ValueError('fixed_budget_random requires fixed_gate_budget_path')
+        if self.gate_policy != 'fixed_budget_random' and self.fixed_gate_budget_path is not None:
+            raise ValueError('fixed_gate_budget_path requires fixed_budget_random')
+        if (isinstance(self.motion_gradient_warmup_steps, bool) or
+                not isinstance(self.motion_gradient_warmup_steps, int) or
+                self.motion_gradient_warmup_steps < 0 or
+                self.motion_gradient_warmup_steps >= self.motion_steps):
+            raise ValueError('motion_gradient_warmup_steps must be in [0, motion_steps)')
         # libgs structured configs may contain OmegaConf containers.
         if self.storage_only is not True:
             raise ValueError('quantized_residual now requires storage_only: true; rate/codec training is unsupported')
@@ -66,7 +111,8 @@ class QuantizedResidualConfig:
                  'gate_temperature_end', 'gate_refine_steps'}
         if self.gate_initial_logits is not None:
             self.gate_initial_logits = [float(value) for value in self.gate_initial_logits]
-        optional = {'densification_stats_steps', 'max_new_gaussians', 'max_retained_gaussians'} | (
+        optional = {'densification_stats_steps', 'max_new_gaussians', 'max_retained_gaussians',
+                    'fixed_gate_budget_path'} | (
             set() if self.enable_learned_gates else gated)
         missing = [f.name for f in fields(self) if f.name not in optional and getattr(self, f.name) is None]
         if missing:
@@ -107,10 +153,18 @@ class QuantizedResidualConfig:
             raise ValueError('opacity_keep_threshold must be in (0, 1)')
         if not math.isfinite(self.storage_loss_weight) or self.storage_loss_weight < 0:
             raise ValueError('storage_loss_weight must be finite and nonnegative')
+        if (isinstance(self.gs_activity_loss_weight, bool) or
+                not math.isfinite(self.gs_activity_loss_weight) or self.gs_activity_loss_weight < 0):
+            raise ValueError('gs_activity_loss_weight must be finite and nonnegative')
+        if self.gs_activity_loss_weight > 0 and (
+                not self.enable_learned_gates or self.gate_policy != 'learned'):
+            raise ValueError('GS activity loss requires learned gates')
         if not self.enable_learned_gates and self.storage_loss_weight != 0:
             raise ValueError('nongated motion has no differentiable storage selector; storage_loss_weight must be zero')
         if not isinstance(self.enable_learned_gates, bool):
             raise ValueError('enable_learned_gates must be bool')
+        if not self.enable_learned_gates and self.gate_policy != 'learned':
+            raise ValueError('gate_policy requires enable_learned_gates')
         if self.enable_learned_gates:
             if (len(self.gate_initial_logits) != 3 or
                     not all(math.isfinite(v) for v in self.gate_initial_logits)):
@@ -129,6 +183,11 @@ class QuantizedResidualConfig:
     @property
     def total_steps(self):
         return self.motion_steps + self.incremental_steps
+
+    def keep_candidate_fit_due(self, step: int) -> bool:
+        return (self.motion_gradient_mode == 'keep_candidate_loss' and
+                1 <= step <= self.motion_steps - self.gate_refine_steps and
+                (step - 1) % self.keep_candidate_fit_interval == 0)
 
     @property
     def densification_stats_start(self):
@@ -480,6 +539,11 @@ class QuantizedResidualMotion(nn.Module):
         saved_config.setdefault('densification_stats_steps', None)
         saved_config.setdefault('max_new_gaussians', None)
         saved_config.setdefault('enable_learned_gates', False)
+        saved_config.setdefault('motion_gradient_warmup_steps', 0)
+        saved_config.setdefault('gate_policy', 'learned')
+        saved_config.setdefault('fixed_gate_budget_path', None)
+        saved_config.setdefault('fixed_gate_seed', 0)
+        saved_config.setdefault('reset_keep_gate_priors', False)
         if not saved_config.get('storage_only', False):
             raise ValueError('Legacy rate/codec dynamic-frame checkpoints cannot resume with storage-only motion')
         removed = set(saved_config) - {field.name for field in fields(self.config)}

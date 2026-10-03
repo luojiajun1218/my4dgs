@@ -13,6 +13,7 @@ from tqdm import tqdm
 from libgs.data.utils.fetch import Fetcher
 from libgs.pipeline import Trainer as BaseTrainer
 from libgs.pipeline import TrainerConfig as BaseTrainerConfig
+from .data import PairedFetcher
 
 
 @dataclass
@@ -29,6 +30,18 @@ class TrainerConfig(BaseTrainerConfig):
 
 
 class Trainer(BaseTrainer):
+    def setup(self, module, ckpt_path=None):
+        """Restore portable CPU checkpoints onto the current training device."""
+        self.module, module.trainer = module, self
+        self.init_logger()
+        self.datamodule.setup(self.output_dir)
+        self.module.to(self.device).setup()
+        if ckpt_path is not None:
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+            self.global_step = ckpt['global_step']
+            self.datamodule.on_load_checkpoint(ckpt)
+            self.module.on_load_checkpoint(ckpt)
+
     @property
     def compact_console(self):
         return (self.config.selective_console_mode == 'compact'
@@ -351,6 +364,11 @@ class Trainer(BaseTrainer):
         cache = self.config.cache_data_on_device
         move_to_device = lambda ts: ts.to(self.device, True)
         fetcher = Fetcher(train_dataloader, cache, move_to_device)
+        view_seed = self.datamodule.config.training_view_seed
+        if view_seed is not None:
+            fetcher = PairedFetcher(train_dataloader, cache, move_to_device,
+                                    view_seed + self.current_frame)
+        self.frame_training_views = []
 
         metrics_ema = {"loss": 0.0, "psnr": 0.0}
 
@@ -385,11 +403,18 @@ class Trainer(BaseTrainer):
             self.module.pre_training_step()
 
             self.module.timer.clock("data").start()
-            args = (fetcher.next(), self.global_step)
+            train_view = fetcher.next()
+            if view_seed is not None:
+                self.frame_training_views.append(train_view.path.name)
+            args = (train_view, self.global_step)
             self.module.timer.clock("data").stop()
             loss, metrics, render_pkg = self.module.training_step(*args)
             self.module.timer.clock("backward").start()
             loss.backward()
+            if (self.module.config.motion_mode == 'quantized_residual'
+                    and self.module.config.quantized_diagnostics.gradient_steps is not None
+                    and self.global_step in self.module.config.quantized_diagnostics.gradient_steps):
+                self.module.record_quantized_gradients()
             self.module.timer.clock("backward").stop()
 
             self.module.timer.clock("progress updating").start()
@@ -486,6 +511,11 @@ class Trainer(BaseTrainer):
             progress_bar.close()
             self._progress_bar = None
         if self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual'}:
+            if view_seed is not None:
+                path = self.output_dir / 'frame_summary' / f'training_views_{self.current_frame:03d}.json'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(dict(frame=self.current_frame,
+                    seed=view_seed, views=self.frame_training_views), indent=2))
             self.finish_frame_summary(wall_started)
         self.global_step = 0  # !!!Important
 
@@ -503,6 +533,7 @@ class Trainer(BaseTrainer):
             loaders = [loaders]
 
         results_list = []
+        view_rows = []
         for loader_idx, loader in enumerate(loaders):
             self.routine_info(
                 f"Number of views in testing dataset {loader_idx}: {len(loader)}"
@@ -512,6 +543,9 @@ class Trainer(BaseTrainer):
                 viewpoint = viewpoint.to(self.device)
                 metrics = self.module.validation_step(viewpoint, idx, loader_idx)
                 results.append(metrics)
+                view_rows.append(dict(
+                    split=self.datamodule.eval_names[loader_idx], camera=viewpoint.path.name,
+                    **{key: float(value) for key, value in metrics.items()}))
             results_list.append(results)
 
         num_loaders = len(loaders)
@@ -524,7 +558,8 @@ class Trainer(BaseTrainer):
             path = self.output_dir / 'frame_summary' / f'evaluation_{self.current_frame:03d}_step{self.global_step}.json'
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(dict(frame=self.current_frame, step=self.global_step,
-                                            evaluation=self.frame_eval_metrics), indent=2))
+                                            evaluation=self.frame_eval_metrics,
+                                            views=view_rows), indent=2))
             self.record_io('saving', started)
 
         torch.cuda.empty_cache()

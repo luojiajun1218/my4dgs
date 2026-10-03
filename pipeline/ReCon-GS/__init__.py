@@ -28,6 +28,7 @@ class Config(BaseConfig):
     gui_port: int = 6009
     detect_anomaly: bool = False
     quiet: bool = False
+    random_seed: int = 0
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     module: ModuleConfig = field(default_factory=ModuleConfig)
@@ -39,7 +40,7 @@ class Pipeline(BasePipeline):
     trainer: Trainer
 
     def setup(self):
-        safe_state(self.config.quiet)
+        safe_state(self.config.quiet, seed=self.config.random_seed)
         network_gui.init(self.config.gui_ip, self.config.gui_port)
         torch.autograd.set_detect_anomaly(self.config.detect_anomaly)
         return super().setup()

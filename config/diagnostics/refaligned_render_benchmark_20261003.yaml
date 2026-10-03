@@ -1,0 +1,7 @@
+# 与REF既有批量计时严格使用相同范围；只在正式训练结束后运行。
+warmup_renders: 5
+timed_renders: 30
+checkpoint_frames: [5, 149, 299]
+# 恢复后先核对本轮原始测试指标，避免测错状态；不用于模型选择。
+metric_absolute_tolerance: 0.001
+reference_metrics: output/recongs_native_stream_20261002/recongs_flame_steak_native_delta_index_seed0_20261002_rerun01/20261002T231157_base02/stream_metrics/frames.jsonl

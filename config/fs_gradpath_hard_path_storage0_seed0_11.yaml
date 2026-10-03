@@ -1,0 +1,134 @@
+# 四组受控实验：共享首帧0，连续训练1–10；用户已授权运行。
+# 仅运动反向路径及storage权重变化。hard_path是实际硬路径，不是soft概率加权。
+# motion_gradient_mode生产默认all_split；gate代理与硬门前向均保持不变。
+# seed0与独立视角RNG使各帧300步相机顺序相同，逐步序列写入training_views_*.json。
+# 沿用200联合+100补点、refine0、温度1.5→0.5、每5帧重建、最终200点预算。
+# control_quality记录全部20训练/1测试视角阶段目标；gradient_steps仅采样诊断。
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+data:
+  eval_test: true
+  eval_train: false
+  extra_dataloader_kwargs:
+    num_workers: 8
+    pin_memory: true
+  extra_dataset_kwargs:
+    num_frames: 11
+  first_frame_eval_train: true
+  resolution: -1
+  root: data/colmap4d/flame_steak
+  shuffle: true
+  split_train_test: true
+  white_background: false
+  training_view_seed: 0
+detect_anomaly: false
+experiment_name: fs_gradpath_hard_path_storage0_seed0_11
+gui_ip: 127.0.0.1
+gui_port: 6009
+mode: train
+module:
+  deformation:
+    densify_grad_threshold: 0.00015
+    densify_interval: 40
+    num_stage1_steps: 200
+    opacity_threshold: 0.01
+  full_eval: true
+  gaussian_stage2:
+    feature_lr: 0.0375
+    opacity_lr: 0.75
+    percent_dense: 0.01
+    position_lr_delay_mult: 0.01
+    position_lr_final: 2.4e-05
+    position_lr_init: 0.0024
+    position_lr_max_steps: 15000
+    rotation_lr: 0.015
+    scaling_lr: 0.075
+  lambda_deform: 0.0
+  lambda_dssim: 0.2
+  lpips_required: false
+  motion_mode: quantized_residual
+  num_saving_images: 5
+  quantized_diagnostics:
+    deletion_damage_enabled: true
+    deletion_damage_every_n_frames: 1
+    deletion_damage_view_name: cam00.png
+    control_quality_enabled: true
+    gradient_steps:
+    - 1
+    - 30
+    - 80
+    - 150
+    - 200
+  quantized_residual:
+    adam_betas:
+    - 0.9
+    - 0.999
+    adam_eps: 1.0e-08
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    enable_incremental: true
+    enable_learned_gates: true
+    fine_region_gs: 24
+    gate_initial_logits:
+    - -1.0
+    - 0.0
+    - -0.5
+    gate_lr: 0.02
+    gate_refine_steps: 0
+    gate_temperature_end: 0.5
+    gate_temperature_start: 1.5
+    gs_rotation_lr: 0.0001
+    gs_translation_lr: 0.0001
+    incremental_steps: 100
+    max_new_gaussians: null
+    max_retained_gaussians: 200
+    motion_init_decay: 0.6
+    motion_rotation_step_rad: 0.001
+    motion_steps: 200
+    motion_xyz_step_extent: 1.0e-05
+    new_logscale_step: 0.001
+    new_max_screen_size: 20.0
+    new_opacity_step: 0.01
+    new_rotation_step: 0.001
+    new_sh_step: 0.001
+    new_xyz_step_extent: 1.0e-05
+    opacity_keep_threshold: 0.01
+    opacity_support_temperature: 0.05
+    region_rotation_lr: 0.0005
+    region_translation_lr: 0.0005
+    shared_warmup_steps: 0
+    storage_loss_weight: 0.0
+    storage_only: true
+    storage_ramp_steps: 50
+    storage_warmup_steps: 30
+    tree_rebuild_interval: 5
+    tree_rebuild_neighbors: 3
+    motion_gradient_mode: hard_path
+  random_background: false
+  renderer:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug: false
+    debug_from: -1
+  saving_gs_frames:
+  - 5
+  - 10
+  saving_gs_steps: []
+  selective_diagnostics_config: null
+  sh_degree: 1
+output_dir: output
+quiet: false
+trainer:
+  cache_data_on_device: true
+  first_frame_testing_steps: []
+  num_incr_steps: 300
+  num_init_steps: 15000
+  saving_ckpt_frames:
+  - 5
+  - 10
+  saving_ckpt_steps: []
+  selective_console_mode: compact
+  testing_steps:
+  - 30
+  - 150
+  - 200
+random_seed: 0

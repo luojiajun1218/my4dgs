@@ -1,6 +1,8 @@
 """Persistent three-level rigid tree with learned KEEP/SHARE/SPLIT gates."""
 
 from dataclasses import asdict
+import json
+from pathlib import Path
 import time
 
 import numpy as np
@@ -13,6 +15,9 @@ from .region_rigid import apply_region_rigid, rotation_vector_quaternion
 from .residual_motion import (QuantizedResidualMotion, QuantizedResidualConfig,
                               integer_symbols, quantized_symbols,
                               inverse_unit_quaternion, stable_layout)
+
+
+from .gs_activity_cost import candidate_activity_support, expected_activity_fraction
 
 
 LAYOUT_VERSION = 'persistent_gated_rigid_storage_v2'
@@ -139,8 +144,80 @@ def _selection(layout, states):
     return visited, active, terminal
 
 
-def _motion(base_xyz, base_rotation, layout, regions, local, states, *, soft_probs=None):
+def fixed_budget_states(layout, level_counts, seed):
+    """Content-blind cut with exact reachable KEEP/SHARE/SPLIT counts.
+
+    Uses a private CPU RNG; never consumes training RNG or examines images,
+    coordinates, losses or learned node identities. Counts are [3 levels, 3
+    actions]. An infeasible budget raises instead of silently changing rate.
+    """
+    if len(level_counts) != 3:
+        raise ValueError('Fixed budget needs three levels')
+    generator = torch.Generator(device='cpu').manual_seed(seed)
+    occupancy = _occupancy(layout)
+    states = []
+    visited = occupancy[0]
+    for level, counts in enumerate(level_counts):
+        if (len(counts) != 3 or any(isinstance(n, bool) or not isinstance(n, int)
+                                    or n < 0 for n in counts)):
+            raise ValueError('Fixed budget counts must be three nonnegative integers')
+        rows = torch.where(visited)[0]
+        if sum(counts) != len(rows):
+            raise ValueError(f'Infeasible fixed budget at level {level}: '
+                             f'{sum(counts)} requested, {len(rows)} reachable')
+        order = torch.randperm(len(rows), generator=generator).to(rows.device)
+        labels = torch.repeat_interleave(torch.arange(3, device=rows.device),
+                                        torch.tensor(counts, device=rows.device))
+        state = torch.full_like(occupancy[level], KEEP, dtype=torch.long)
+        state[rows[order]] = labels
+        states.append(state)
+        if level < 2:
+            parent = layout['parents'][level]
+            visited = occupancy[level + 1] & visited[parent] & (state[parent] == SPLIT)
+    return states
+
+
+@torch.no_grad()
+def actual_motion_statistics(base_xyz, base_rotation, xyz, rotation, extent,
+                             translation_thresholds, rotation_thresholds, terminal):
+    """Old surviving GS pose changes, with sign-invariant rotation angles."""
+    translation = (xyz - base_xyz).norm(dim=-1) / extent
+    old = F.normalize(base_rotation, dim=-1)
+    new = F.normalize(rotation, dim=-1)
+    new = torch.where((old * new).sum(-1, keepdim=True) < 0, -new, new)
+    # Chord atan2 avoids acos rounding tiny rotations to zero.
+    angle = 4 * torch.atan2((new - old).norm(dim=-1), (new + old).norm(dim=-1))
+    keep = terminal == KEEP
+    xyz_changed = (xyz != base_xyz).any(-1)
+    rotation_changed = (new != old).any(-1)
+
+    def distribution(values, thresholds):
+        quantiles = torch.quantile(values.float(), values.new_tensor([0., .5, .9, .99, 1.]))
+        return dict(quantiles=dict(zip(('min', 'p50', 'p90', 'p99', 'max'),
+                                      quantiles.cpu().tolist())),
+                    above_threshold=[dict(threshold=float(t), count=int((values > t).sum()),
+                                          fraction=float((values > t).float().mean()))
+                                     for t in thresholds])
+
+    return dict(old_surviving_count=len(xyz), keep_count=int(keep.sum()),
+                position_changed_count=int(xyz_changed.sum()),
+                rotation_changed_count=int(rotation_changed.sum()),
+                any_pose_changed_count=int((xyz_changed | rotation_changed).sum()),
+                keep_position_changed_count=int((keep & xyz_changed).sum()),
+                keep_rotation_changed_count=int((keep & rotation_changed).sum()),
+                translation_extent=distribution(translation, translation_thresholds),
+                rotation_radians=distribution(angle, rotation_thresholds),
+                semantics='Previous surviving GS only; excludes births/deletions. '
+                          'KEEP is a pose decision, not a background label. '
+                          'Exact change counts compare stored positions and normalized '
+                          'sign-aligned orientations; thresholds measure motion magnitude.')
+
+
+def _motion(base_xyz, base_rotation, layout, regions, local, states, *, soft_probs=None,
+            probe_keep_states=None):
     """Rigid centers and pivots travel together down each SPLIT path."""
+    if probe_keep_states is not None and soft_probs is not None:
+        raise ValueError('KEEP probe isolation must not alter the gate proxy')
     index, pivots = layout['index'], layout['pivots']
     n = len(base_xyz)
     identity = base_xyz.new_zeros(n, 4)
@@ -152,6 +229,16 @@ def _motion(base_xyz, base_rotation, layout, regions, local, states, *, soft_pro
             moved = xyz + local[:, :3]
             rotated = quaternion_multiply(rotation_vector_quaternion(local[:, 3:]), orientation)
             return moved, rotated
+        if probe_keep_states is not None and level > 0:
+            # Only this KEEP terminal's SHARE candidate is isolated. Its own
+            # motion stays differentiable; ancestor inputs keep their values
+            # but receive no gradient from this candidate. The mask comes from
+            # hard gate choices, not scene labels or a foreground oracle.
+            kept_here = (probe_keep_states[level][index[level]] == KEEP)[:, None]
+            xyz = torch.where(kept_here, xyz.detach(), xyz)
+            orientation = torch.where(kept_here, orientation.detach(), orientation)
+            current_pivots = [torch.where(kept_here, value.detach(), value)
+                              for value in current_pivots]
         selected = regions[level][index[level]]
         moved, rotated = apply_region_rigid(
             xyz, orientation, current_pivots[level], selected[:, :3], selected[:, 3:])
@@ -340,6 +427,28 @@ class GatedResidualMotion(QuantizedResidualMotion):
                 surviving_indices = torch.where(old_local_rows)[0]
                 self.gs_translation[surviving_indices[selected]] = local[selected, :3] * decay
                 self.gs_rotation[surviving_indices[selected]] = local[selected, 3:] * decay
+        reset_counts = [0, 0, 0]
+        self.reset_keep_masks = None
+        if self.config.reset_keep_gate_priors:
+            # An inherited KEEP + zero candidate + hard-path Jacobian cannot
+            # relearn motion from image gradients. Reset only this gate prior;
+            # motion warm starts, layout, optimizer and step budget stay intact.
+            with torch.no_grad():
+                self.reset_keep_masks = []
+                for level, logits in enumerate(self.gate_logits):
+                    keep = logits.argmax(-1) == KEEP
+                    self.reset_keep_masks.append(keep.clone())
+                    reset_counts[level] = int(keep.sum())
+                    logits[keep] = xyz.new_tensor(self.config.gate_initial_logits)
+        if self.config.gate_policy == 'fixed_budget_random':
+            if not isinstance(frame_index, int) or frame_index < 1:
+                raise ValueError('Fixed budget policy requires positive frame_index')
+            manifest = json.loads(Path(self.config.fixed_gate_budget_path).read_text())
+            counts = manifest['frames'][str(frame_index)]['level_counts']
+            self.frozen_states = fixed_budget_states(
+                layout, counts, self.config.fixed_gate_seed + frame_index)
+            for parameter in self.gate_logits:
+                parameter.requires_grad_(False)
         self.committed = False
         self.last_step = 0
         self.last_metrics = {}
@@ -354,6 +463,8 @@ class GatedResidualMotion(QuantizedResidualMotion):
                             if old_symbols is not None else 'reset'),
             neighbors=self.config.tree_rebuild_neighbors,
             initialization_decay=self.config.motion_init_decay if old_symbols is not None else 0.,
+            reset_keep_gate_priors=self.config.reset_keep_gate_priors,
+            reset_keep_gate_nodes=reset_counts,
             old_region_counts=list(old_layout['counts']) if old_layout is not None else None,
             region_counts=list(self.counts),
             topology_seconds=tree_seconds, initialization_seconds=initialization_seconds,
@@ -371,6 +482,7 @@ class GatedResidualMotion(QuantizedResidualMotion):
         self.stage_seconds['tree_topology'] = tree_seconds
         self.stage_seconds['tree_initialization'] = initialization_seconds
         self.stage_seconds['tree_rebuild'] = (tree_seconds + initialization_seconds if rebuild else 0.)
+        self.initial_gate_states = [value.clone() for value in self.gate_state_arrays()['states']]
 
     def install_materialized_layout(self, layout):
         self.materialized_layout = _layout_cpu(layout)
@@ -405,8 +517,12 @@ class GatedResidualMotion(QuantizedResidualMotion):
         return result
 
     def gate_state_arrays(self):
-        states = (self.frozen_states if self.frozen_states is not None else
-                  [value.detach().argmax(-1) for value in self.gate_logits])
+        if self.config.gate_policy == 'fixed_coarse':
+            states = [torch.full((count,), SHARE, device=self.base_xyz.device, dtype=torch.long)
+                      for count in self.counts]
+        else:
+            states = (self.frozen_states if self.frozen_states is not None else
+                      [value.detach().argmax(-1) for value in self.gate_logits])
         visited, leaf_open, terminal = _selection(self.active_layout, states)
         return dict(states=states, visited=visited,
                     gs_leaf_open=leaf_open, gs_terminal=terminal)
@@ -448,6 +564,9 @@ class GatedResidualMotion(QuantizedResidualMotion):
                 self.config.gate_temperature_end * fraction)
 
     def _probabilities(self, step):
+        if self.config.gate_policy == 'fixed_coarse':
+            states = self.gate_state_arrays()['states']
+            return [F.one_hot(state, 3).to(self.base_xyz) for state in states]
         if self.frozen_states is not None:
             return [F.one_hot(state, 3).to(self.base_xyz) for state in self.frozen_states]
         return [F.softmax(value / self._temperature(step), dim=-1)
@@ -457,7 +576,8 @@ class GatedResidualMotion(QuantizedResidualMotion):
     def forward(self, step, training=False):
         if training:
             self.last_step = step
-        if self.frozen_states is None and step > self.config.motion_steps - self.config.gate_refine_steps:
+        if (self.config.gate_policy == 'learned' and self.frozen_states is None and
+                step > self.config.motion_steps - self.config.gate_refine_steps):
             self.frozen_states = [value.detach().argmax(-1) for value in self.gate_logits]
             for value in self.gate_logits:
                 value.requires_grad_(False)
@@ -466,7 +586,8 @@ class GatedResidualMotion(QuantizedResidualMotion):
         steps = self.motion_steps_vector
         regions = [dense[f'region_{level}'] * steps for level in range(3)]
         local = dense['gs_local'] * steps
-        if self.frozen_states is not None or not torch.is_grad_enabled():
+        if (self.config.gate_policy == 'fixed_coarse' or self.frozen_states is not None or
+                not torch.is_grad_enabled()):
             return _motion(self.base_xyz, self.base_rotation, self.active_layout,
                            regions, local, selection['states'])
         with torch.no_grad():
@@ -479,18 +600,70 @@ class GatedResidualMotion(QuantizedResidualMotion):
             self.base_xyz, self.base_rotation, self.active_layout,
             [value.detach() for value in regions], local.detach(), selection['states'],
             soft_probs=self._probabilities(step))
-        # Motion candidates get the full rigid-chain Jacobian, with no soft gate
-        # or ancestor reach multiplier. This is a straight-through training
-        # surrogate; the rendered forward remains the exact selected hard pose.
-        # Shared-region gradients naturally sum their member-GS contributions.
-        open_states = [torch.full_like(state, SPLIT) for state in selection['states']]
+        # All modes keep the hard rendered pose and the same gate proxy above.
+        # all_split uses the full candidate-chain Jacobian, including closed paths.
+        # hard_path differentiates only the selected hard path; it never multiplies
+        # motion gradients by soft reach probabilities. Shared gradients sum GS.
+        gradient_mode = self.config.motion_gradient_mode
+        if (self.config.motion_gradient_warmup_steps > 0 and
+                step <= self.config.motion_gradient_warmup_steps):
+            gradient_mode = 'all_split'
+        if gradient_mode in {'keep_probe', 'keep_local_probe'}:
+            # Fit a shared candidate at a reachable KEEP terminal without
+            # forgetting its learned gate prior or changing the rendered pose.
+            # KEEP and SHARE both stop descent, so deeper unvisited paths stay
+            # closed. The next gate proxy can compare this fitted candidate.
+            motion_states = [torch.where(state == KEEP, SHARE, state)
+                             for state in selection['states']]
+        elif gradient_mode in {'hard_path', 'keep_candidate_loss'}:
+            motion_states = selection['states']
+        else:
+            motion_states = [torch.full_like(state, SPLIT) for state in selection['states']]
         candidate_xyz, candidate_rotation = _motion(
             self.base_xyz, self.base_rotation, self.active_layout,
-            regions, local, open_states)
+            regions, local, motion_states,
+            probe_keep_states=(selection['states']
+                               if gradient_mode == 'keep_local_probe' else None))
         return (hard_xyz.detach() + (gate_xyz - gate_xyz.detach()) +
                 (candidate_xyz - candidate_xyz.detach()),
                 hard_rotation.detach() + (gate_rotation - gate_rotation.detach()) +
                 (candidate_rotation - candidate_rotation.detach()))
+
+    def keep_share_candidate_pose(self):
+        """Fit disjoint closed candidates in one auxiliary pose/render.
+
+        All reachable KEEP terminals are disjoint by tree construction. Their
+        SHARE candidates are rendered together; already active motion, local
+        residuals, SPLIT ancestors and gate probabilities remain detached.
+        Optionally fit local SPLIT alternatives at reachable fine SHARE nodes;
+        they are disjoint from all KEEP terminals. The hard pose is untouched.
+        """
+        selection = self.gate_state_arrays()
+        masks = [visited & (state == KEEP) for visited, state in
+                 zip(selection['visited'], selection['states'])]
+        fine_mask = selection['visited'][2] & (selection['states'][2] == SHARE)
+        if not self.config.fit_fine_split_candidates:
+            fine_mask = torch.zeros_like(fine_mask)
+        count = sum(int(mask.sum()) for mask in masks) + int(fine_mask.sum())
+        if not count:
+            return None
+        dense = self._dense_symbols()
+        steps = self.motion_steps_vector
+        regions = []
+        for level, mask in enumerate(masks):
+            value = dense[f'region_{level}'] * steps
+            regions.append(torch.where(mask[:, None], value, value.detach()))
+        states = [torch.where(state == KEEP, SHARE, state) for state in selection['states']]
+        states[2] = torch.where(fine_mask, SPLIT, states[2])
+        local = dense['gs_local'] * steps
+        if bool(fine_mask.any()):
+            local_mask = fine_mask[self.active_layout['index'][2]]
+            local = torch.where(local_mask[:, None], local, local.detach())
+        else:
+            local = local.detach()
+        xyz, rotation = _motion(self.base_xyz, self.base_rotation, self.active_layout,
+                                regions, local, states)
+        return xyz, rotation, count
 
     @torch.no_grad()
     def final_quantized_total_motion(self):
@@ -517,6 +690,20 @@ class GatedResidualMotion(QuantizedResidualMotion):
             reach.append(occupancy[level].to(self.base_xyz) * reach[level - 1][parent] *
                          probabilities[level - 1][parent, SPLIT])
         return probabilities, reach
+
+    def gs_activity_fraction(self, step, hard=False):
+        dense = self._dense_symbols()
+        steps = self.motion_steps_vector
+        support = candidate_activity_support(
+            self.base_xyz, self.base_rotation, self.active_layout,
+            [dense[f'region_{level}'] * steps for level in range(3)],
+            dense['gs_local'] * steps,
+            self.extent * self.config.motion_xyz_step_extent / 2,
+            self.config.motion_rotation_step_rad / 2)
+        probabilities = ([F.one_hot(state, 3).to(self.base_xyz)
+                          for state in self.gate_state_arrays()['states']]
+                         if hard else self._probabilities(step))
+        return expected_activity_fraction(probabilities, self.index, support)
 
     def storage_parts(self, step, hard=False):
         """Bytes for reachable gate decisions and selected motion tensors."""
@@ -547,6 +734,9 @@ class GatedResidualMotion(QuantizedResidualMotion):
             leaf_probability = (reach[2][self.index[2]] *
                                 probabilities[2][self.index[2], SPLIT])
             gs_bytes = leaf_probability.sum() * gs_width
+        if self.config.gate_policy == 'fixed_coarse':
+            # The fixed cut is a constant policy, so no per-node gate state is stored.
+            gate_bytes = zero
         return dict(gate_bytes=gate_bytes, region_motion_bytes=region_bytes,
                     gs_motion_bytes=gs_bytes)
 
@@ -574,7 +764,16 @@ class GatedResidualMotion(QuantizedResidualMotion):
             counts = {name: int(((states == number) & visited).sum())
                       for number, name in enumerate(('KEEP', 'SHARED', 'SPLIT'))}
             denominator = int(visited.sum())
+            initial = getattr(self, 'initial_gate_states', None)
+            transitions = (torch.bincount(
+                initial[level][visited] * 3 + states[visited], minlength=9).reshape(3, 3)
+                .cpu().tolist() if initial is not None else None)
+            refreshed = getattr(self, 'reset_keep_masks', None)
+            refreshed_counts = ([int(((states == action) & visited & refreshed[level]).sum())
+                                 for action in range(3)] if refreshed is not None else None)
             levels.append(dict(level=level, denominator=denominator, counts=counts,
+                               initial_to_final_actions=transitions,
+                               refreshed_keep_final_counts=refreshed_counts,
                                fractions={key: value / denominator if denominator else 0.
                                           for key, value in counts.items()},
                                visited_count=denominator))
@@ -612,6 +811,7 @@ class GatedResidualMotion(QuantizedResidualMotion):
         saved_config.setdefault('motion_init_decay', 0.0)
         saved_config.setdefault('densification_stats_steps', None)
         saved_config.setdefault('max_new_gaussians', None)
+        saved_config.setdefault('motion_gradient_warmup_steps', 0)
         try:
             saved = QuantizedResidualConfig(**saved_config)
         except TypeError as exc:

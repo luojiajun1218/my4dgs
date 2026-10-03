@@ -12,6 +12,14 @@ from .deformation import Adaptive_Grid, DeformConfig
 from .nested import NestedFineGrid, weighted_gradient_diagnostics
 
 
+def _factor_child_index_rows(indices: np.ndarray):
+    """Factor repeated [child_0, child_1, ...] rows into a table and row ids."""
+    if indices.ndim != 2:
+        raise ValueError("Blend indices must have shape [rows, slots]")
+    table, groups = np.unique(indices, axis=0, return_inverse=True)
+    return table, groups.astype(np.int32, copy=False)
+
+
 class GatedFourDeformation(nn.Module):
     """Keep L1 active and open L2, L3, L4 at configured training steps."""
 
@@ -238,8 +246,14 @@ class GatedFourDeformation(nn.Module):
         self.optimizer.load_state_dict(ckpt["optimizer"])
 
     @torch.no_grad()
-    def export(self, path: Path) -> Dict[str, int]:
-        """Save active anchors and the per-GS blend needed to reconstruct motion."""
+    def export(self, path: Path, index_encoding: str = "per_row") -> Dict[str, int]:
+        """Save active anchors and sparse per-GS blends needed to reconstruct motion.
+
+        ``shared_table`` factors identical child-index tuples within each frame;
+        the default ``per_row`` keeps the existing v2 representation.
+        """
+        if index_encoding not in ("per_row", "shared_table"):
+            raise ValueError("index_encoding must be 'per_row' or 'shared_table'")
         path.parent.mkdir(parents=True, exist_ok=True)
         active = [torch.ones(self.grids[0].vertex_num, device=self.delta.device, dtype=torch.bool)]
         for stage in range(3):
@@ -249,21 +263,80 @@ class GatedFourDeformation(nn.Module):
         remap[active] = torch.arange(int(active.sum()), device=self.delta.device)
         residual = self.delta.detach().clone()
         residual[self.grids[0].vertex_num:, 3] -= 1
-        arrays = dict(representation=np.array("nested_gated_four_v1"),
+        representation = ("nested_gated_four_sparse_v2" if index_encoding == "per_row"
+                          else "nested_gated_four_sparse_v3_shared_index")
+        arrays = dict(representation=np.array(representation),
                       delta=residual[active].cpu().numpy(),
                       base_index=remap[self.index[0]].int().cpu().numpy(),
                       active_gate_count=np.array(self.active_gate_count, dtype=np.int32))
         for stage in range(3):
             child = self.grids[stage + 1]
             level = stage + 2
-            arrays[f"blend_indices_l{level}"] = remap[
-                child.blend_indices + self.offsets[stage + 1]].int().cpu().numpy()
-            arrays[f"blend_weights_l{level}"] = child.blend_weights.cpu().numpy()
-            arrays[f"gate_l{level}"] = self._gate_mask(level)[
-                self.grids[stage].p2v.flatten()].cpu().numpy()
+            gate_rows = torch.where(self._gate_mask(level)[
+                self.grids[stage].p2v.flatten()])[0]
+            arrays[f"blend_rows_l{level}"] = gate_rows.int().cpu().numpy()
+            index_rows = remap[
+                child.blend_indices[gate_rows] + self.offsets[stage + 1]].int().cpu().numpy()
+            if index_encoding == "per_row":
+                arrays[f"blend_indices_l{level}"] = index_rows
+            else:
+                table, groups = _factor_child_index_rows(index_rows)
+                if not np.array_equal(table[groups], index_rows):
+                    raise RuntimeError(f"Shared index table failed reconstruction at level {level}")
+                arrays[f"blend_index_table_l{level}"] = table
+                arrays[f"blend_index_group_l{level}"] = groups
+            arrays[f"blend_weights_l{level}"] = child.blend_weights[gate_rows].cpu().numpy()
         np.savez_compressed(path, **arrays)
         return dict(motion_bytes=path.stat().st_size, active_anchors=int(active.sum()),
                     candidate_anchors=self.grids_num,
                     active_l2_parents=int(self.gate_mask_l2.sum()),
                     active_l3_parents=int(self.gate_mask_l3.sum()),
                     active_l4_parents=int(self.gate_mask_l4.sum()))
+
+    @staticmethod
+    def decode_export_motion(path: Path) -> np.ndarray:
+        """Reconstruct per-GS 7D motion from a sparse-v2/v3 exported archive."""
+        with np.load(path, allow_pickle=False) as packet:
+            representation = str(packet["representation"].item())
+            if representation not in ("nested_gated_four_sparse_v2",
+                                      "nested_gated_four_sparse_v3_shared_index"):
+                raise ValueError(f"Unsupported gated-four export: {representation}")
+            shared_index = representation == "nested_gated_four_sparse_v3_shared_index"
+            delta = packet["delta"]
+            base_index = packet["base_index"]
+            if delta.ndim != 2 or delta.shape[1] != 7:
+                raise ValueError("Exported delta must have shape [anchors, 7]")
+            if base_index.ndim != 1 or (base_index.size and
+                                        (base_index.min() < 0 or base_index.max() >= len(delta))):
+                raise ValueError("Exported base indices are out of range")
+            field = delta[base_index].copy()
+            active_gate_count = int(packet["active_gate_count"].item())
+            if not 0 <= active_gate_count <= 3:
+                raise ValueError("Exported active gate count must be in [0, 3]")
+            for level in range(2, 2 + active_gate_count):
+                rows = packet[f"blend_rows_l{level}"]
+                if shared_index:
+                    table = packet[f"blend_index_table_l{level}"]
+                    groups = packet[f"blend_index_group_l{level}"]
+                    if (table.ndim != 2 or groups.ndim != 1 or
+                            len(groups) != len(rows) or
+                            (groups.size and (groups.min() < 0 or groups.max() >= len(table)))):
+                        raise ValueError(f"Invalid shared blend-index table for level {level}")
+                    indices = table[groups]
+                else:
+                    indices = packet[f"blend_indices_l{level}"]
+                weights = packet[f"blend_weights_l{level}"]
+                if (rows.ndim != 1 or indices.ndim != 2 or indices.shape[0] != len(rows) or
+                        indices.shape[1] < 1 or weights.shape != indices.shape):
+                    raise ValueError(f"Invalid sparse blend arrays for level {level}")
+                if rows.size and (rows.min() < 0 or rows.max() >= len(field) or
+                                  np.any(rows[1:] <= rows[:-1])):
+                    raise ValueError(f"Exported blend rows for level {level} must be sorted and unique")
+                if indices.size and (indices.min() < -1 or indices.max() >= len(delta)):
+                    raise ValueError(f"Exported blend indices for level {level} are out of range")
+                valid = indices >= 0
+                residual = delta[np.maximum(indices, 0)]
+                np.copyto(residual, 0, where=~valid[..., None])
+                blend = np.einsum("rkg,rk->rg", residual, weights, optimize=True)
+                field[rows] += blend
+        return field

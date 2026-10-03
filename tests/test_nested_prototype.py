@@ -3,6 +3,7 @@ import importlib
 import ast
 import copy
 import json
+import multiprocessing
 import sys
 import tempfile
 import time
@@ -11,6 +12,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
@@ -31,6 +33,7 @@ S = importlib.import_module('pipeline.ReCon-GS.model.selective_motion')
 DATA = importlib.import_module('pipeline.ReCon-GS.data')
 Q = importlib.import_module('pipeline.ReCon-GS.model.residual_motion')
 GR = importlib.import_module('pipeline.ReCon-GS.model.gated_residual')
+GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
 GAUSS = importlib.import_module('pipeline.ReCon-GS.model.gaussian')
 
 
@@ -60,7 +63,17 @@ class WorkerOnlyPairDataset(torch.utils.data.Dataset):
         return WorkerOnlyPairDataset(frame)
 
 
+class SlowWorkerOnlyPairDataset(WorkerOnlyPairDataset):
+    def __getitem__(self, index):
+        time.sleep(.5)
+        return super().__getitem__(index)
+
+    def get_frame_dataset(self, frame):
+        return SlowWorkerOnlyPairDataset(frame)
+
+
 def test_selective_pairs_use_workers_and_frame_cache():
+    before_workers = {worker.pid for worker in multiprocessing.active_children()}
     data = DATA.DataModule.__new__(DATA.DataModule)
     data.config = SimpleNamespace(extra_dataloader_kwargs=dict(num_workers=1, pin_memory=False))
     data.scene = SimpleNamespace(train_dataset=WorkerOnlyPairDataset(0))
@@ -75,6 +88,37 @@ def test_selective_pairs_use_workers_and_frame_cache():
     next_pairs = data.selective_training_pairs(names, 'cpu', 0.0)
     assert next_pairs is not pairs
     assert all(now.image[0, 0, 0] == 2 and old.image[0, 0, 0] == 1 for now, old in next_pairs)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        new_workers = {worker.pid for worker in multiprocessing.active_children()} - before_workers
+        if not new_workers:
+            break
+        time.sleep(.05)
+    assert not new_workers
+
+
+def test_selective_pair_loader_timeout_is_bounded_and_cleans_worker():
+    before_workers = {worker.pid for worker in multiprocessing.active_children()}
+    data = DATA.DataModule.__new__(DATA.DataModule)
+    data.config = SimpleNamespace(extra_dataloader_kwargs=dict(num_workers=1, pin_memory=False))
+    data.scene = SimpleNamespace(train_dataset=SlowWorkerOnlyPairDataset(0))
+    data.current_frame = 1
+    started = time.monotonic()
+    with patch.object(DATA, 'SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS', .05):
+        try:
+            data.selective_training_pairs(['a.png', 'b.png'], 'cpu', 0.0)
+        except RuntimeError as error:
+            assert 'timed out' in str(error).lower()
+        else:
+            raise AssertionError('A delayed paired-view worker did not time out')
+    assert time.monotonic() - started < 3
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        new_workers = {worker.pid for worker in multiprocessing.active_children()} - before_workers
+        if not new_workers:
+            break
+        time.sleep(.05)
+    assert not new_workers
 
 
 def selective_test_config(**overrides):
@@ -452,20 +496,331 @@ def test_four_level_export_reconstructs_motion():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / 'motion.npz'
         stats = deform.export(path)
+        shared_path = Path(directory) / 'motion_shared.npz'
+        deform.export(shared_path, index_encoding='shared_table')
         assert stats['active_anchors'] < stats['candidate_anchors']
         with np.load(path) as packet:
-            dense = packet['delta'][packet['base_index']].copy()
+            assert packet['representation'].item() == 'nested_gated_four_sparse_v2'
+            assert 'gate_l2' not in packet.files
             for level in (2, 3, 4):
+                rows = packet[f'blend_rows_l{level}']
                 indices = packet[f'blend_indices_l{level}']
                 weights = packet[f'blend_weights_l{level}']
-                gate = packet[f'gate_l{level}']
-                blended = (packet['delta'][indices.clip(min=0)] * weights[:, :, None]).sum(1)
-                dense += blended * gate[:, None]
+                assert indices.ndim == 2 and indices.shape[0] == len(rows)
+                assert indices.shape[1] > 0 and weights.shape == indices.shape
+                assert np.all(rows[1:] > rows[:-1])
+                assert np.all(indices[weights > 0] >= 0)
+        decoded = G.GatedFourDeformation.decode_export_motion(path)
+        with np.load(path) as v2, np.load(shared_path) as v3:
+            assert v3['representation'].item() == 'nested_gated_four_sparse_v3_shared_index'
+            for level in (2, 3, 4):
+                table = v3[f'blend_index_table_l{level}']
+                groups = v3[f'blend_index_group_l{level}']
+                np.testing.assert_array_equal(table[groups], v2[f'blend_indices_l{level}'])
+                np.testing.assert_array_equal(v3[f'blend_weights_l{level}'],
+                                              v2[f'blend_weights_l{level}'])
+                assert f'blend_indices_l{level}' not in v3.files
+        shared_decoded = G.GatedFourDeformation.decode_export_motion(shared_path)
+        np.testing.assert_array_equal(shared_decoded, decoded)
         expected_xyz, expected_rot = deform(xyz)
-        torch.testing.assert_close(torch.from_numpy(dense[:, :3]), expected_xyz,
+        torch.testing.assert_close(torch.from_numpy(decoded[:, :3]), expected_xyz,
                                    rtol=0, atol=1e-6)
-        decoded_rot = torch.nn.functional.normalize(torch.from_numpy(dense[:, 3:]), dim=-1)
+        decoded_rot = torch.nn.functional.normalize(torch.from_numpy(decoded[:, 3:]), dim=-1)
         torch.testing.assert_close(decoded_rot, expected_rot, rtol=0, atol=1e-6)
+
+        # Closed future levels must produce valid empty sparse rows and decode
+        # exactly like forward at every partially opened gate depth.
+        saved_gate_count = deform.active_gate_count
+        saved_masks = {level: deform._gate_mask(level).clone() for level in (2, 3, 4)}
+        try:
+            for gate_count in (0, 1, 2):
+                with torch.no_grad():
+                    for level, mask in saved_masks.items():
+                        deform._gate_mask(level).copy_(mask)
+                    deform.active_gate_count = gate_count
+                    for level in range(gate_count + 2, 5):
+                        deform._gate_mask(level).zero_()
+                partial_path = Path(directory) / f'motion_{gate_count}.npz'
+                deform.export(partial_path)
+                shared_partial_path = Path(directory) / f'motion_shared_{gate_count}.npz'
+                deform.export(shared_partial_path, index_encoding='shared_table')
+                with np.load(partial_path) as packet:
+                    assert int(packet['active_gate_count']) == gate_count
+                    for level in range(gate_count + 2, 5):
+                        assert packet[f'blend_rows_l{level}'].size == 0
+                    for level in range(2, gate_count + 2):
+                        assert packet[f'blend_rows_l{level}'].size > 0
+                partial = G.GatedFourDeformation.decode_export_motion(partial_path)
+                shared_partial = G.GatedFourDeformation.decode_export_motion(
+                    shared_partial_path)
+                np.testing.assert_array_equal(shared_partial, partial)
+                partial_xyz, partial_rot = deform(xyz)
+                torch.testing.assert_close(torch.from_numpy(partial[:, :3]), partial_xyz,
+                                           rtol=0, atol=1e-6)
+                torch.testing.assert_close(
+                    torch.nn.functional.normalize(torch.from_numpy(partial[:, 3:]), dim=-1),
+                    partial_rot, rtol=0, atol=1e-6)
+        finally:
+            with torch.no_grad():
+                deform.active_gate_count = saved_gate_count
+                for level, mask in saved_masks.items():
+                    deform._gate_mask(level).copy_(mask)
+
+        # A remapped inactive child is encoded as -1 and contributes zero,
+        # rather than accidentally indexing the last residual anchor.
+        with np.load(path) as packet:
+            sparse = {key: packet[key] for key in packet.files}
+        positive_slots = ((sparse['blend_indices_l2'] >= 0) &
+                          (sparse['blend_weights_l2'] > 0))
+        row, slot = np.argwhere(positive_slots)[0]
+        output_row = int(sparse['blend_rows_l2'][row])
+        removed_index = int(sparse['blend_indices_l2'][row, slot])
+        removed_value = (sparse['delta'][removed_index] *
+                         sparse['blend_weights_l2'][row, slot])
+        sparse['blend_indices_l2'][row, slot] = -1
+        sentinel_path = Path(directory) / 'motion_sentinel.npz'
+        np.savez_compressed(sentinel_path, **sparse)
+        sentinel = G.GatedFourDeformation.decode_export_motion(sentinel_path)
+        assert np.isfinite(sentinel).all()
+        np.testing.assert_allclose(decoded[output_row] - sentinel[output_row], removed_value,
+                                   rtol=0, atol=1e-7)
+
+        # The supported ratio=2 configuration has two blend slots, not three.
+        ratio2_config = D.DeformConfig(hierarchy_mode='nested', num_grid_levels=4,
+                                       max_gs_per_grid=5, grid_level_ratio=2, momentum=None)
+        ratio2_deform = G.GatedFourDeformation(ratio2_config)
+        ratio2_deform.setup(xyz)
+        with torch.no_grad():
+            ratio2_deform.active_gate_count = 3
+            for level in (2, 3, 4):
+                ratio2_deform._gate_mask(level).fill_(True)
+            ratio2_deform.delta[:, :3].normal_(0, .01)
+            ratio2_deform.delta[:, 4:].normal_(0, .01)
+        ratio2_path = Path(directory) / 'motion_ratio2.npz'
+        ratio2_deform.export(ratio2_path)
+        ratio2_shared_path = Path(directory) / 'motion_ratio2_shared.npz'
+        ratio2_deform.export(ratio2_shared_path, index_encoding='shared_table')
+        with np.load(ratio2_path) as packet:
+            for level in (2, 3, 4):
+                assert packet[f'blend_indices_l{level}'].shape[1] == 2
+        ratio2_decoded = G.GatedFourDeformation.decode_export_motion(ratio2_path)
+        ratio2_shared_decoded = G.GatedFourDeformation.decode_export_motion(
+            ratio2_shared_path)
+        np.testing.assert_array_equal(ratio2_shared_decoded, ratio2_decoded)
+        ratio2_xyz, ratio2_rot = ratio2_deform(xyz)
+        torch.testing.assert_close(torch.from_numpy(ratio2_decoded[:, :3]), ratio2_xyz,
+                                   rtol=0, atol=1e-6)
+        torch.testing.assert_close(
+            torch.nn.functional.normalize(torch.from_numpy(ratio2_decoded[:, 3:]), dim=-1),
+            ratio2_rot, rtol=0, atol=1e-6)
+
+
+def test_sparse_decoder_masks_nonfinite_sentinel_placeholder():
+    packet = dict(
+        representation=np.array('nested_gated_four_sparse_v2'),
+        delta=np.array([[np.nan, np.inf, -np.inf, 0., 0., 0., 0.],
+                        [.25, -.5, .75, 1., 0., 0., 0.]], dtype=np.float32),
+        base_index=np.array([1], dtype=np.int32),
+        active_gate_count=np.array(1, dtype=np.int32),
+        blend_rows_l2=np.array([0], dtype=np.int32),
+        blend_indices_l2=np.array([[-1]], dtype=np.int32),
+        blend_weights_l2=np.array([[1.]], dtype=np.float32),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'nonfinite_sentinel.npz'
+        np.savez_compressed(path, **packet)
+        decoded = G.GatedFourDeformation.decode_export_motion(path)
+    np.testing.assert_array_equal(decoded, packet['delta'][packet['base_index']])
+    assert np.isfinite(decoded).all()
+
+    shared_packet = dict(
+        representation=np.array('nested_gated_four_sparse_v3_shared_index'),
+        delta=packet['delta'],
+        base_index=packet['base_index'],
+        active_gate_count=np.array(1, dtype=np.int32),
+        blend_rows_l2=np.array([0], dtype=np.int32),
+        blend_index_table_l2=np.array([[-1]], dtype=np.int32),
+        blend_index_group_l2=np.array([0], dtype=np.int32),
+        blend_weights_l2=np.array([[1.]], dtype=np.float32),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'nonfinite_shared_sentinel.npz'
+        np.savez_compressed(path, **shared_packet)
+        shared_decoded = G.GatedFourDeformation.decode_export_motion(path)
+    np.testing.assert_array_equal(shared_decoded, packet['delta'][packet['base_index']])
+    assert np.isfinite(shared_decoded).all()
+
+
+def test_sparse_motion_export_is_connected_to_renderer():
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    tree = ast.parse(source_path.read_text())
+    module_class = next(node for node in tree.body
+                        if isinstance(node, ast.ClassDef) and node.name == 'Module')
+    method_names = {'load_sparse_motion_export', 'forward_sparse_motion_export',
+                    'clear_sparse_motion_export', 'advance_sparse_motion_export'}
+    methods = [node for node in module_class.body
+               if isinstance(node, ast.FunctionDef) and node.name in method_names]
+    scope = dict(torch=torch, TensorSpace=object,
+                 GatedFourDeformation=G.GatedFourDeformation)
+
+    class PlaybackGaussian:
+        def __init__(self, sh_degree=1):
+            self._xyz = torch.empty(0, 3)
+            self._rotation = torch.empty(0, 4)
+            self.delta_xyz = None
+            self.delta_rot = None
+            self._opacity = torch.empty(0)
+
+        @property
+        def get_xyz_ori(self):
+            return self._xyz
+
+        @property
+        def get_xyz(self):
+            return self._xyz if self.delta_xyz is None else self._xyz + self.delta_xyz
+
+        @property
+        def get_rotation(self):
+            if self.delta_rot is None:
+                return self._rotation
+            return GAUSS.quaternion_multiply(self._rotation, self.delta_rot)
+
+        @property
+        def get_opacity(self):
+            return self._opacity
+
+        def load_ply(self, path):
+            assert path == 'incremental.ply'
+            self._xyz = torch.tensor([[2., 0., 0.]])
+            self._rotation = torch.tensor([[1., 0., 0., 0.]])
+            self._opacity = torch.tensor([.9])
+            self._features_dc = torch.zeros(1, 1, 3)
+            self._features_rest = torch.zeros(1, 3, 3)
+            self._scaling = torch.zeros(1, 3)
+            self.max_radii2D = torch.zeros(1)
+            self.xyz_gradient_accum = torch.zeros(1, 1)
+            self.denom = torch.ones(1, 1, dtype=torch.int64)
+
+        def apply_deformation(self, delta_xyz, delta_rotation):
+            self._xyz = self.get_xyz + delta_xyz
+            self._rotation = GAUSS.quaternion_multiply(self.get_rotation, delta_rotation)
+
+        def extend(self, model):
+            self._xyz = torch.cat([self._xyz, model._xyz])
+            self._rotation = torch.cat([self._rotation, model._rotation])
+            self._opacity = torch.cat([self._opacity, model._opacity])
+
+        def prune_points(self, indices):
+            keep = torch.ones(len(self._xyz), dtype=torch.bool, device=self._xyz.device)
+            keep[indices] = False
+            self._xyz = self._xyz[keep]
+            self._rotation = self._rotation[keep]
+            self._opacity = self._opacity[keep]
+
+    class PlaybackMerged:
+        def __init__(self, models):
+            self.models = models
+
+        @property
+        def get_xyz(self):
+            return torch.cat([model.get_xyz for model in self.models])
+
+        @property
+        def get_rotation(self):
+            return torch.cat([model.get_rotation for model in self.models])
+
+    class PlaybackRenderer:
+        def __init__(self, gaussians):
+            self.gaussians = gaussians
+            self.fail = False
+
+        def __call__(self, viewpoint, background):
+            assert viewpoint == 'camera'
+            assert background.shape == (3,)
+            if self.fail:
+                raise RuntimeError('fixture renderer failure')
+            return dict(render=self.gaussians.get_xyz.clone(),
+                        rotation=self.gaussians.get_rotation.clone())
+
+    scope.update(GaussianModel=PlaybackGaussian, MergedGaussianModel=PlaybackMerged)
+    exec(compile(ast.Module(body=methods, type_ignores=[]), str(source_path), 'exec'), scope)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'sparse.npz'
+        delta = np.zeros((2, 7), dtype=np.float32)
+        delta[0, 3] = 1.
+        delta[1, 0] = .4
+        delta[1, 3] = 1.
+        np.savez_compressed(path,
+            representation=np.array('nested_gated_four_sparse_v2'), delta=delta,
+            base_index=np.array([0, 0], dtype=np.int32),
+            active_gate_count=np.array(1, dtype=np.int32),
+            blend_rows_l2=np.array([1], dtype=np.int32),
+            blend_indices_l2=np.array([[1, -1]], dtype=np.int32),
+            blend_weights_l2=np.array([[.25, .75]], dtype=np.float32))
+        base = PlaybackGaussian()
+        base._xyz = torch.zeros(2, 3, dtype=torch.float64)
+        base._rotation = torch.tensor([[1., 0., 0., 0.], [1., 0., 0., 0.]],
+                                      dtype=torch.float64)
+        base._opacity = torch.tensor([.2, .3], dtype=torch.float64)
+        previous_delta_xyz = torch.full((2, 3), .03, dtype=torch.float64)
+        previous_delta_rot = torch.tensor([[1., 0., 0., 0.], [1., 0., 0., 0.]],
+                                          dtype=torch.float64)
+        base.delta_xyz = previous_delta_xyz
+        base.delta_rot = previous_delta_rot
+        renderer = PlaybackRenderer(base)
+        playback = SimpleNamespace(
+            deform=G.GatedFourDeformation(D.DeformConfig(
+                hierarchy_mode='nested', refinement_mode='gradhet', num_grid_levels=4)),
+            gaussians=base, renderer=renderer,
+            config=SimpleNamespace(sh_degree=1, merge_to_base=True),
+            background=torch.zeros(3), _sparse_motion_export=None)
+        playback.clear_sparse_motion_export = lambda: scope[
+            'clear_sparse_motion_export'](playback)
+        loaded = scope['load_sparse_motion_export'](playback, path, 'incremental.ply')
+        assert loaded == dict(motion_rows=2, incremental_rows=1)
+        incremental = playback._sparse_motion_export[2]
+        for name in ('_xyz', '_features_dc', '_features_rest', '_opacity',
+                     '_scaling', '_rotation', 'max_radii2D', 'xyz_gradient_accum'):
+            value = getattr(incremental, name)
+            assert value.device == base.get_xyz_ori.device
+            assert value.dtype == base.get_xyz_ori.dtype
+        assert incremental.denom.dtype == torch.int64
+        result = scope['forward_sparse_motion_export'](playback, 'camera')['render']
+        torch.testing.assert_close(result, torch.tensor([[0., 0., 0.],
+                                                          [.1, 0., 0.],
+                                                          [2., 0., 0.]], dtype=torch.float64),
+                                   rtol=0, atol=1e-7)
+        expected_rotation = GAUSS.quaternion_multiply(
+            base._rotation, torch.tensor([[1., 0., 0., 0.],
+                                          [1., 0., 0., 0.]], dtype=torch.float64))
+        torch.testing.assert_close(
+            scope['forward_sparse_motion_export'](playback, 'camera')['rotation'][:2],
+            expected_rotation, rtol=0, atol=1e-7)
+        assert renderer.gaussians is base
+        assert base.delta_xyz is previous_delta_xyz
+        assert base.delta_rot is previous_delta_rot
+        renderer.fail = True
+        try:
+            scope['forward_sparse_motion_export'](playback, 'camera')
+        except RuntimeError as error:
+            assert str(error) == 'fixture renderer failure'
+        else:
+            raise AssertionError('renderer failure did not propagate')
+        assert renderer.gaussians is base
+        assert base.delta_xyz is previous_delta_xyz
+        assert base.delta_rot is previous_delta_rot
+        renderer.fail = False
+        base.delta_xyz = None
+        base.delta_rot = None
+        advanced = scope['advance_sparse_motion_export'](playback)
+        assert advanced == dict(base_rows=2, merged_incremental_rows=1)
+        torch.testing.assert_close(
+            base.get_xyz, torch.tensor([[.1, 0., 0.], [2., 0., 0.]], dtype=torch.float64),
+            rtol=0, atol=1e-7)
+        assert renderer.gaussians is base
+        assert playback._sparse_motion_export is None
+        scope['clear_sparse_motion_export'](playback)
+        assert playback._sparse_motion_export is None
 
 
 def residual_test_config(**overrides):
@@ -909,6 +1264,73 @@ def test_gated_share_rigid_rotation_about_advected_pivot():
     assert motion.storage_parts(2, hard=True)['gs_motion_bytes'] == 0
 
 
+def test_gated_fixed_coarse_cut_keeps_model_capacity_but_ignores_gate_logits():
+    raw, fixed = gated_fixture(gate_policy='fixed_coarse')
+    _, learned = gated_fixture(gate_policy='learned')
+    fixed_capacity = sum(parameter.numel() for parameter in fixed.parameters())
+    learned_capacity = sum(parameter.numel() for parameter in learned.parameters())
+    assert fixed_capacity == learned_capacity
+    initial = fixed.gate_state_arrays()
+    assert bool((initial['states'][0] == GR.SHARE).all())
+    assert not initial['visited'][1].any() and not initial['visited'][2].any()
+
+    set_gates(fixed, {0: GR.SPLIT, 1: GR.SPLIT, 2: GR.SPLIT})
+    fixed.gate_logits[0].grad = None
+    with torch.no_grad():
+        fixed.region_translation[0][:, 0] = 0.2
+        fixed.region_translation[1][:, 0] = 50.
+        fixed.gs_translation[:, 0] = 50.
+    xyz, _ = fixed(fixed.config.motion_steps, training=True)
+    assert bool((fixed.gate_state_arrays()['states'][0] == GR.SHARE).all())
+    assert not fixed.gate_state_arrays()['visited'][1].any()
+    assert fixed.frozen_states is None
+    assert fixed.storage_parts(fixed.config.motion_steps, hard=True)['gate_bytes'] == 0
+    xyz.sum().backward()
+    assert fixed.gate_logits[0].grad is None
+    assert bool((xyz[:, 0] < 50.).all())
+
+
+def test_camera_name_split_is_ordered_unique_and_disjoint():
+    dataset = SimpleNamespace(items=[
+        SimpleNamespace(path=Path('cam02.png')),
+        SimpleNamespace(path=Path('cam01.png')),
+        SimpleNamespace(path=Path('cam03.png')),
+    ])
+    assert DATA.DataModule._camera_indices(dataset, ['cam03.png', 'cam02.png']) == [2, 0]
+    try:
+        DATA.DataModule._camera_indices(dataset, ['cam99.png'])
+    except ValueError as error:
+        assert 'missing views' in str(error)
+    else:
+        raise AssertionError('Unknown camera names must be rejected')
+    data = DATA.DataModule.__new__(DATA.DataModule)
+    data.config = SimpleNamespace(training_camera_names=['cam01.png', 'cam02.png'],
+                                  validation_camera_names=['cam02.png'])
+    try:
+        data._configured_camera_split()
+    except ValueError as error:
+        assert 'overlap' in str(error)
+    else:
+        raise AssertionError('Overlapping train/validation camera names must be rejected')
+
+
+def test_camera_name_split_builds_disjoint_train_and_validation_loaders():
+    data = DATA.DataModule.__new__(DATA.DataModule)
+    data.config = SimpleNamespace(
+        training_camera_names=['a.png'], validation_camera_names=['b.png'],
+        extra_dataloader_kwargs=dict(num_workers=0, pin_memory=False),
+        training_view_seed=0, eval_train=True, eval_test=False,
+        first_frame_eval_train=None)
+    data.scene = SimpleNamespace(train_dataset=WorkerOnlyPairDataset(0), test_dataset=None)
+    data.current_frame = 0
+    train_loader = data.train_dataloader()
+    validation_loaders = data.val_dataloader()
+    assert train_loader.dataset.indices == [1]
+    assert len(validation_loaders) == 1
+    assert validation_loaders[0].dataset.indices == [0]
+    assert data.eval_names == ['validation']
+
+
 def test_gated_split_inherits_rigid_motion_then_adds_local_correction():
     raw, motion = gated_fixture()
     set_gates(motion, {0: GR.SPLIT, 1: GR.SHARE, 2: GR.SHARE})
@@ -1333,7 +1755,7 @@ def test_frame_preparation_uses_keep_protection_and_reports_history():
         datamodule=SimpleNamespace(cameras_extent=1.), renderer=SimpleNamespace(),
         trainer=SimpleNamespace(synchronize=lambda: None),
         deletion_diagnostic_view=lambda count: None, freeze_quantized_base=lambda: None,
-        new_quant_birth_control=lambda: {})
+        new_quant_birth_control=lambda: {}, quantized_quality_snapshot=lambda *args: None)
     namespace['prepare_quantized_frame'](subject)
     deleted = subject.quant_deleted_indices.long()
     expected = torch.where(~protected)[0][:2]
@@ -1490,6 +1912,7 @@ def test_finalization_budget_updates_storage_tree_and_next_frame_count():
             quant_point_birth_frame=torch.zeros(5, dtype=torch.long), quant_first_frame_gs_count=5,
             trainer=SimpleNamespace(synchronize=lambda: None, record_io=lambda *args: None),
             make_quantized_new_view=lambda: view,
+            quantized_quality_snapshot=lambda *args: None,
             quant_stats_window_start=lambda: cfg.densification_stats_start)
         fake.install_quantized_raw = lambda value: setattr(fake, 'installed_raw', value)
         fake.quantized_storage = lambda *args, **kwargs: scope['quantized_storage'](fake, *args, **kwargs)
@@ -1598,6 +2021,838 @@ def test_rebuild_does_not_inherit_closed_candidate_motion():
     xyz, rotation = motion(2)
     torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
     torch.testing.assert_close(rotation, raw['rotation'], rtol=0, atol=0)
+
+
+def test_motion_gradient_modes_preserve_forward_and_gate_gradient():
+    for cut in ({0: GR.KEEP, 1: GR.SPLIT, 2: GR.SPLIT},
+                {0: GR.SPLIT, 1: GR.SHARE, 2: GR.SPLIT},
+                {0: GR.SPLIT, 1: GR.SPLIT, 2: GR.SPLIT}):
+        results = []
+        for mode in ('all_split', 'hard_path', 'keep_probe'):
+            raw, motion = gated_fixture(motion_gradient_mode=mode)
+            set_gates(motion, cut)
+            with torch.no_grad():
+                for i in range(3):
+                    motion.region_translation[i][:, i] = .2
+                    motion.region_rotation[i][:, (i + 1) % 3] = .1
+                motion.gs_translation[:, 0] = .3
+                motion.gs_rotation[:, 1] = .2
+            xyz, rotation = motion(2, training=True)
+            loss = xyz.sum() + (rotation * torch.tensor([.1, .2, .3, .4])).sum()
+            loss.backward()
+            grads = [p.grad.clone() for p in [*motion.region_translation,
+                     *motion.region_rotation, motion.gs_translation, motion.gs_rotation]]
+            results.append((xyz, rotation, [p.grad.clone() for p in motion.gate_logits], grads))
+        for result in results[1:]:
+            for index in (0, 1):
+                torch.testing.assert_close(results[0][index], result[index], rtol=0, atol=0)
+            for a, b in zip(results[0][2], result[2]):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+        if cut[0] == GR.KEEP:
+            assert all(g.count_nonzero() == 0 for g in results[1][3])
+            assert any(g.count_nonzero() > 0 for g in results[0][3])
+            assert results[2][3][0].count_nonzero() > 0
+            for index in (1, 2, 4, 5, 6, 7):
+                assert results[2][3][index].count_nonzero() == 0
+        elif cut[1] == GR.SHARE:
+            # The third-level and local motion are closed, with no soft scaling.
+            for index in (2, 5, 6, 7):
+                assert results[1][3][index].count_nonzero() == 0
+                assert results[0][3][index].count_nonzero() > 0
+        else:
+            for result in results[1:]:
+                for a, b in zip(results[0][3], result[3]):
+                    torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_keep_probe_learns_closed_candidate_without_changing_pose_or_gate_prior():
+    raw, motion = gated_fixture(motion_gradient_mode='keep_probe', gate_refine_steps=0,
+                                motion_xyz_step_extent=.001)
+    set_gates(motion, {0: GR.KEEP, 1: GR.SHARE, 2: GR.SHARE})
+    logits = [value.detach().clone() for value in motion.gate_logits]
+    xyz, rotation = motion(1, training=True)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    torch.testing.assert_close(rotation, raw['rotation'], rtol=0, atol=0)
+    (xyz - (raw['xyz'] + .1)).square().mean().backward()
+    assert motion.region_translation[0].grad.abs().sum() > 0
+    for parameter in list(motion.region_translation)[1:] + [motion.gs_translation]:
+        torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter.grad), rtol=0, atol=0)
+    motion.optimizer_step()
+    for before, after in zip(logits, motion.gate_logits):
+        torch.testing.assert_close(before, after, rtol=0, atol=0)
+    xyz, _ = motion(2, training=True)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    (xyz - (raw['xyz'] + .1)).square().mean().backward()
+    assert motion.gate_logits[0].grad.count_nonzero() > 0
+    restored = GR.GatedResidualMotion(motion.config)
+    restored.restore(copy.deepcopy(motion.capture()))
+    for before, after in zip(motion(2), restored(2)):
+        torch.testing.assert_close(before, after, rtol=0, atol=0)
+
+
+def test_gs_activity_support_ignores_identity_and_quaternion_hemisphere():
+    raw, motion = gated_fixture()
+    regions = [torch.zeros(count, 6, requires_grad=True) for count in motion.counts]
+    local = torch.zeros(len(raw['xyz']), 6, requires_grad=True)
+    for rotation in (raw['rotation'], -raw['rotation']):
+        support = GS_ACTIVITY.candidate_activity_support(
+            raw['xyz'], rotation, motion.active_layout, regions, local, .0005, .0005)
+        assert support.shape == (len(raw['xyz']), 4)
+        assert support.dtype == torch.bool and not support.any()
+        assert not support.requires_grad
+
+
+def test_gs_activity_cost_counts_terminal_pose_after_ancestor_cancellation():
+    raw, motion = gated_fixture()
+    regions = [torch.zeros(count, 6) for count in motion.counts]
+    regions[0][:, 0] = .01
+    regions[1][:, 0] = -.01
+    local = torch.zeros(len(raw['xyz']), 6)
+    support = GS_ACTIVITY.candidate_activity_support(
+        raw['xyz'], raw['rotation'], motion.active_layout, regions, local, .0005, .0005)
+    assert support[:, 0].all() and not support[:, 1:].any()
+
+    def probabilities(choices):
+        return [F.one_hot(torch.full((count,), choices[level]), 3).float()
+                for level, count in enumerate(motion.counts)]
+
+    # A parent SPLIT does not itself count changed GS if the terminal cancels it.
+    for choices, expected in (([GR.SHARE] * 3, 1.),
+                              ([GR.SPLIT, GR.SHARE, GR.SHARE], 0.),
+                              ([GR.SPLIT, GR.KEEP, GR.SPLIT], 0.)):
+        value = GS_ACTIVITY.expected_activity_fraction(probabilities(choices), motion.index, support)
+        torch.testing.assert_close(value, torch.tensor(expected), rtol=0, atol=0)
+
+
+def test_gs_activity_probability_expectation_and_gate_only_gradient():
+    raw, motion = gated_fixture(gate_refine_steps=0)
+    logits = [torch.tensor([.2, .5, .3]).log().expand(count, 3).clone().requires_grad_()
+              for count in motion.counts]
+    probabilities = [value.softmax(-1) for value in logits]
+    support = torch.ones(len(raw['xyz']), 4, requires_grad=True)
+    value = GS_ACTIVITY.expected_activity_fraction(probabilities, motion.index, support)
+    expected = .5 + .3 * .5 + .3 ** 2 * .5 + .3 ** 3
+    torch.testing.assert_close(value, torch.tensor(expected), rtol=1e-6, atol=1e-7)
+    value.backward()
+    assert all(parameter.grad is not None for parameter in logits)
+    assert bool((logits[0].grad[:, GR.KEEP] < 0).all())
+    assert support.grad is None
+    assert all(parameter.grad is None for parameter in motion.parameters())
+
+
+def test_gs_activity_cost_counts_affected_gs_instead_of_parameter_tuples():
+    raw, motion = gated_fixture()
+    n = len(raw['xyz'])
+    split = [F.one_hot(torch.full((count,), GR.SPLIT), 3).float()
+             for count in motion.counts]
+    support = torch.zeros(n, 4, dtype=torch.bool)
+    support[0, 3] = True
+    value = GS_ACTIVITY.expected_activity_fraction(split, motion.index, support)
+    torch.testing.assert_close(value, torch.tensor(1 / n), rtol=1e-6, atol=1e-7)
+    share = [F.one_hot(torch.full((count,), GR.SHARE), 3).float()
+             for count in motion.counts]
+    support[:, 0] = True
+    torch.testing.assert_close(GS_ACTIVITY.expected_activity_fraction(share, motion.index, support),
+                               torch.tensor(1.), rtol=0, atol=0)
+
+
+def test_gs_activity_support_matches_hard_rigid_endpoints_and_local_cancellation():
+    raw, motion = gated_fixture()
+    regions = [torch.zeros(count, 6) for count in motion.counts]
+    regions[0][:, 0] = .01
+    regions[1][:, 1] = .003
+    regions[2][:, 5] = .01
+    local = torch.zeros(len(raw['xyz']), 6)
+    states = [torch.full((count,), GR.SPLIT) for count in motion.counts]
+    prefix_xyz, prefix_rotation = GR._motion(raw['xyz'], raw['rotation'], motion.active_layout,
+                                            regions, local, states)
+    canceled = torch.arange(len(local)) % 2 == 0
+    local[canceled, :3] = raw['xyz'][canceled] - prefix_xyz[canceled]
+    inverse_motion = R.quaternion_multiply(
+        raw['rotation'][canceled], Q.inverse_unit_quaternion(prefix_rotation[canceled]))
+    local[canceled, 3:] = Q.shortest_rotation_vector(inverse_motion)
+    support = GS_ACTIVITY.candidate_activity_support(
+        raw['xyz'], raw['rotation'], motion.active_layout, regions, local, .0005, .0005)
+    assert not support[canceled, 3].any() and support[~canceled, 3].all()
+    for endpoint in range(4):
+        choices = [torch.full((count,), GR.SPLIT) for count in motion.counts]
+        if endpoint < 3:
+            choices[endpoint].fill_(GR.SHARE)
+        xyz, rotation = GR._motion(raw['xyz'], raw['rotation'], motion.active_layout,
+                                   regions, local, choices)
+        relative = R.quaternion_multiply(F.normalize(rotation, dim=-1),
+                                        Q.inverse_unit_quaternion(F.normalize(raw['rotation'], dim=-1)))
+        expected = ((xyz - raw['xyz']).norm(dim=-1) > .0005) | (
+            Q.shortest_rotation_vector(relative).norm(dim=-1) > .0005)
+        assert torch.equal(support[:, endpoint], expected)
+
+
+def test_hard_path_motion_gradient_warmup_changes_only_candidate_jacobian():
+    results = {}
+    for warmup, step in ((0, 1), (2, 1), (0, 2), (2, 2), (0, 3), (2, 3)):
+        raw, motion = gated_fixture(motion_gradient_mode='hard_path',
+                                    motion_gradient_warmup_steps=warmup)
+        set_gates(motion, {0: GR.KEEP, 1: GR.SPLIT, 2: GR.SPLIT})
+        with torch.no_grad():
+            for level in range(3):
+                motion.region_translation[level][:, 0] = .2
+            motion.gs_translation[:, 0] = .3
+        xyz, rotation = motion(step, training=True)
+        loss = xyz.sum() + rotation.sum()
+        loss.backward()
+        motion_grads = [p.grad.clone() for p in
+                        [*motion.region_translation, *motion.region_rotation,
+                         motion.gs_translation, motion.gs_rotation]]
+        gate_grads = [parameter.grad.clone() for parameter in motion.gate_logits]
+        results[warmup, step] = (xyz, rotation, gate_grads, motion_grads)
+
+    # Both the first and final warmup steps use all_split candidate Jacobians,
+    # while preserving the same hard pose and gate proxy at that exact step.
+    for step in (1, 2):
+        hard, warmed = results[0, step], results[2, step]
+        for index in (0, 1):
+            torch.testing.assert_close(hard[index], warmed[index], rtol=0, atol=0)
+        for expected, actual in zip(hard[2], warmed[2]):
+            torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+        assert all(grad.count_nonzero() == 0 for grad in hard[3])
+        assert any(grad.count_nonzero() > 0 for grad in warmed[3])
+
+    # After the schedule, both candidate motion and gate gradients match hard_path.
+    hard, warmed = results[0, 3], results[2, 3]
+    for index in (0, 1):
+        torch.testing.assert_close(hard[index], warmed[index], rtol=0, atol=0)
+    for expected, actual in zip(hard[2], warmed[2]):
+        torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+    for expected, actual in zip(hard[3], warmed[3]):
+        torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+
+
+def test_soft_motion_ancestor_product_vs_hard_path_gradient():
+    raw, motion = gated_fixture(motion_gradient_mode='hard_path')
+    set_gates(motion, {0: GR.SPLIT, 1: GR.SPLIT, 2: GR.SPLIT})
+    regions = [torch.zeros(count, 6) for count in motion.counts]
+    local = torch.zeros(len(raw['xyz']), 6, requires_grad=True)
+    probabilities = [torch.tensor([.2, .6, .2]).expand(count, 3) for count in motion.counts]
+    states = motion.gate_state_arrays()['states']
+    soft_xyz, _ = GR._motion(raw['xyz'], raw['rotation'], motion.active_layout,
+                             regions, local, states, soft_probs=probabilities)
+    soft_grad = torch.autograd.grad(soft_xyz.sum(), local)[0][:, :3]
+    hard_xyz, _ = GR._motion(raw['xyz'], raw['rotation'], motion.active_layout,
+                             regions, local, states)
+    hard_grad = torch.autograd.grad(hard_xyz.sum(), local)[0][:, :3]
+    torch.testing.assert_close(soft_grad, torch.full_like(soft_grad, .2 ** 3), rtol=1e-6, atol=1e-8)
+    torch.testing.assert_close(hard_grad, torch.ones_like(hard_grad), rtol=0, atol=0)
+    for value in ('soft', '', None):
+        try:
+            gated_residual_test_config(motion_gradient_mode=value).validate()
+        except ValueError as error:
+            assert 'motion_gradient_mode' in str(error)
+        else:
+            raise AssertionError('Unknown gradient mode accepted')
+    for value in (-1, 4, True, 1.5):
+        try:
+            gated_residual_test_config(motion_gradient_warmup_steps=value).validate()
+        except ValueError as error:
+            assert 'motion_gradient_warmup_steps' in str(error)
+        else:
+            raise AssertionError(f'Invalid gradient warmup accepted: {value!r}')
+
+
+def test_quality_snapshot_restores_rng_renderer_and_rigid_overrides():
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    method = next(node for node in ast.walk(ast.parse(source_path.read_text()))
+                  if isinstance(node, ast.FunctionDef) and node.name == 'quantized_quality_snapshot')
+    scope = dict(torch=torch, np=np, l1_loss=torch.nn.functional.l1_loss,
+                 psnr=lambda image, gt: -10 * (image - gt).square().mean().log10(),
+                 ssim=lambda image, gt: 1 - (image - gt).abs().mean(),
+                 MergedGaussianModel=lambda models: tuple(models))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), 'exec'), scope)
+    def loader():
+        torch.rand(5)  # Emulate DataLoader's global worker-seed consumption.
+        return [SimpleNamespace(path=Path('cam01.png'), image=torch.zeros(3, 4, 4),
+                                to=lambda device: camera)]
+    camera = SimpleNamespace(path=Path('cam01.png'), image=torch.zeros(3, 4, 4))
+    camera.to = lambda device: camera
+    seen = []
+    seen_overrides = []
+    class SnapshotRenderer:
+        gaussians = 'original'
+        def __call__(self, viewpoint, background):
+            assert not torch.is_grad_enabled()
+            seen.append(self.gaussians)
+            seen_overrides.append(base.rigid_xyz)
+            return dict(render=torch.full_like(viewpoint.image, .1))
+    override = torch.ones(1, 3)
+    base = SimpleNamespace(rigid_xyz=override, rigid_rotation=None)
+    subject = SimpleNamespace(config=SimpleNamespace(lambda_dssim=.2,
+        quantized_diagnostics=SimpleNamespace(control_quality_enabled=True)),
+        renderer=SnapshotRenderer(), gaussians=base, background=None, device='cpu',
+        datamodule=SimpleNamespace(train_dataloader=lambda **kwargs: loader(),
+                                   test_dataloader=loader),
+        quant_control_diagnostics={}, save_quantized_control_diagnostics=lambda: None)
+    torch.manual_seed(7)
+    before = torch.random.get_rng_state().clone()
+    scope['quantized_quality_snapshot'](subject, 'before_retention', 'new_view')
+    torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
+    assert subject.renderer.gaussians == 'original'
+    assert base.rigid_xyz is override and base.rigid_rotation is None
+    assert seen == [(base, 'new_view'), (base, 'new_view')]
+    assert seen_overrides == [None, None]
+    scope['quantized_quality_snapshot'](subject, 'prediction', preserve_motion=True)
+    assert seen_overrides[-2:] == [override, override]
+    assert base.rigid_xyz is override
+    quality = subject.quant_control_diagnostics['before_retention']
+    torch.testing.assert_close(torch.tensor(quality['train']['mean']['image_objective']),
+                               torch.tensor(.1), rtol=1e-6, atol=1e-7)
+    # First-frame-derived models may not have rigid overrides yet.
+    del base.rigid_xyz, base.rigid_rotation
+    scope['quantized_quality_snapshot'](subject, 'before_deletion')
+    assert base.rigid_xyz is None and base.rigid_rotation is None
+
+
+def test_paired_camera_rng_ignores_model_random_consumption():
+    data = DATA.DataModule.__new__(DATA.DataModule)
+    data.current_frame = 3
+    data.config = SimpleNamespace(training_view_seed=0,
+                                 extra_dataloader_kwargs=dict(num_workers=0, pin_memory=False))
+    data.get_train_dataset = lambda scale: list(range(20))
+    sequences = []
+    for perturb in (1, 1000):
+        torch.manual_seed(23)
+        torch.rand(perturb)
+        loader = data.train_dataloader()
+        fetcher = DATA.PairedFetcher(loader, True, None, seed=3)
+        sequence = []
+        for _ in range(60):
+            torch.rand(perturb)
+            sequence.append(fetcher.next())
+        sequences.append(sequence)
+    assert sequences[0] == sequences[1]
+    assert all(sorted(sequences[0][start:start + 20]) == list(range(20)) for start in (0, 20, 40))
+
+
+def test_fixed_budget_random_preserves_counts_rng_gradients_and_checkpoint():
+    raw, reference = gated_fixture(count=108)
+    root_count = reference.counts[0]
+    counts = [[root_count - 2, 1, 1], [1, 1, 1], [1, 2, 0]]
+    before = torch.random.get_rng_state().clone()
+    first = GR.fixed_budget_states(reference.active_layout, counts, seed=7)
+    second = GR.fixed_budget_states(reference.active_layout, counts, seed=7)
+    torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
+    for left, right in zip(first, second):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
+    selected = GR._selection(reference.active_layout, first)
+    for level in range(3):
+        visited = selected[0][level]
+        assert [int(((first[level] == action) & visited).sum())
+                for action in range(3)] == counts[level]
+    try:
+        GR.fixed_budget_states(reference.active_layout, [[1, 0, 0]] * 3, seed=7)
+    except ValueError as error:
+        assert 'Infeasible' in str(error)
+    else:
+        raise AssertionError('Impossible reachable counts must fail')
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'budget.json'
+        path.write_text(json.dumps(dict(frames={'1': dict(level_counts=counts)})))
+        cfg = gated_residual_test_config(gate_policy='fixed_budget_random',
+                                        fixed_gate_budget_path=str(path), fixed_gate_seed=6)
+        fixed = GR.GatedResidualMotion(cfg)
+        fixed.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+        assert sum(p.numel() for p in fixed.parameters()) == sum(
+            p.numel() for p in reference.parameters())
+        with torch.no_grad():
+            for parameter in fixed.region_translation:
+                parameter.fill_(.1)
+        xyz, _ = fixed(cfg.motion_steps, training=True)
+        xyz.sum().backward()
+        assert all(p.grad is None for p in fixed.gate_logits)
+        assert any(p.grad is not None and p.grad.abs().sum() > 0
+                   for p in fixed.region_translation)
+        keep = fixed.gate_state_arrays()['gs_terminal'] == GR.KEEP
+        torch.testing.assert_close(xyz[keep], raw['xyz'][keep], rtol=0, atol=0)
+        restored = GR.GatedResidualMotion(cfg)
+        restored.restore(copy.deepcopy(fixed.capture()))
+        for left, right in zip(fixed(cfg.motion_steps), restored(cfg.motion_steps)):
+            torch.testing.assert_close(left, right, rtol=0, atol=0)
+
+
+def test_inherited_keep_zero_candidates_have_no_image_learning_signal():
+    raw, motion = gated_fixture(motion_gradient_mode='hard_path', gate_refine_steps=0)
+    set_gates(motion, {0: GR.KEEP, 1: GR.KEEP, 2: GR.KEEP})
+    xyz, _ = motion(1, training=True)
+    target = raw['xyz'] + .1
+    (xyz - target).square().mean().backward()
+    for parameter in motion.parameters():
+        if parameter.grad is not None:
+            torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter.grad),
+                                       rtol=0, atol=1e-7)
+    motion.committed = True
+    motion.register_materialized_layout(raw['xyz'], torch.empty(0, dtype=torch.long))
+    original_packet = copy.deepcopy(motion.capture())
+    packet = copy.deepcopy(original_packet)
+    packet['config']['reset_keep_gate_priors'] = True
+    cfg = gated_residual_test_config(motion_gradient_mode='hard_path',
+                                    gate_refine_steps=0, reset_keep_gate_priors=True)
+    reopened = GR.GatedResidualMotion(cfg)
+    reopened.restore(packet)
+    reopened.setup(raw['xyz'], raw['rotation'], 1., previous_rows=torch.arange(len(raw['xyz'])),
+                   previous_new_count=0, frame_index=2)
+    assert reopened.tree_setup['reset_keep_gate_nodes'] == reopened.counts
+    assert bool((reopened.gate_state_arrays()['states'][0] == GR.SHARE).all())
+    assert reopened.statistics()['levels'][0]['refreshed_keep_final_counts'] == [
+        0, reopened.counts[0], 0]
+    xyz, _ = reopened(1, training=True)
+    (xyz - target).square().mean().backward()
+    assert reopened.region_translation[0].grad.abs().sum() > 0
+    assert original_packet['config']['reset_keep_gate_priors'] is False
+
+
+def test_trainer_restore_maps_cpu_checkpoint_to_training_device():
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'trainer.py'
+    trainer = next(node for node in ast.parse(source_path.read_text(encoding='utf-8')).body
+                   if isinstance(node, ast.ClassDef) and node.name == 'Trainer')
+    method = next(node for node in trainer.body
+                  if isinstance(node, ast.FunctionDef) and node.name == 'setup')
+    scope = dict(torch=torch)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), 'exec'), scope)
+    xyz = torch.tensor([[1., 2., 3.]])
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'cpu.pth'
+        torch.save(dict(global_step=200, current_frame=99, xyz=xyz), path)
+        for target in ('cpu', 'meta'):
+            events, packets = [], []
+            module = SimpleNamespace(
+                setup=lambda: events.append('module_setup'),
+                on_load_checkpoint=lambda packet: packets.append(packet))
+            module.to = lambda device: module
+            subject = SimpleNamespace(device=torch.device(target), output_dir=Path(directory),
+                init_logger=lambda: events.append('logger'),
+                datamodule=SimpleNamespace(setup=lambda output: events.append('data_setup'),
+                    on_load_checkpoint=lambda packet: events.append('data_restore')))
+            scope['setup'](subject, module, path)
+            assert packets[0]['xyz'].device.type == target
+            assert packets[0]['xyz'].shape == xyz.shape and packets[0]['xyz'].dtype == xyz.dtype
+            assert packets[0]['current_frame'] == 99 and subject.global_step == 200
+            assert events == ['logger', 'data_setup', 'module_setup', 'data_restore']
+            assert module.trainer is subject
+            if target == 'cpu':
+                torch.testing.assert_close(packets[0]['xyz'], xyz, rtol=0, atol=0)
+
+
+def test_actual_motion_statistics_measures_keep_and_quaternion_sign():
+    xyz = torch.zeros(3, 3)
+    rotation = torch.tensor([[1., 0., 0., 0.]] * 3)
+    moved = xyz.clone()
+    moved[1, 0] = .2
+    rotated = rotation.clone()
+    rotated[1] = R.rotation_vector_quaternion(torch.tensor([0., 0., .01]))
+    rotated[2] *= -1
+    stats = GR.actual_motion_statistics(xyz, rotation, moved, rotated, 2.,
+                                       [0., .05, .15], [0., .005, .02],
+                                       torch.tensor([GR.KEEP, GR.SHARE, GR.KEEP]))
+    assert stats['keep_position_changed_count'] == 0
+    assert stats['keep_rotation_changed_count'] == 0
+    assert stats['any_pose_changed_count'] == 1
+    assert [x['count'] for x in stats['translation_extent']['above_threshold']] == [1, 1, 0]
+    assert [x['count'] for x in stats['rotation_radians']['above_threshold']] == [1, 1, 0]
+    torch.testing.assert_close(torch.tensor(stats['rotation_radians']['quantiles']['max']),
+                               torch.tensor(.01), rtol=1e-5, atol=1e-7)
+
+
+
+
+def test_gs_activity_configuration_validation_and_legacy_zero_weight_restore():
+    gated_residual_test_config(gs_activity_loss_weight=.001).validate()
+    for bad in (-.001, float('nan'), float('inf'), True):
+        try:
+            gated_residual_test_config(gs_activity_loss_weight=bad).validate()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid GS activity weight accepted')
+    raw, motion = gated_fixture()
+    packet = copy.deepcopy(motion.capture())
+    packet['config'].pop('gs_activity_loss_weight')
+    restored = GR.GatedResidualMotion(motion.config)
+    restored.restore(packet)
+    for original, current in zip(motion(2), restored(2)):
+        torch.testing.assert_close(original, current, rtol=0, atol=0)
+
+
+def test_gated_gs_activity_fraction_preserves_motion_and_counts_cancellation():
+    raw, motion = gated_fixture(gs_activity_loss_weight=.001,
+                                motion_xyz_step_extent=.001, gate_refine_steps=0)
+    set_gates(motion, {0: GR.SPLIT, 1: GR.SHARE, 2: GR.SHARE})
+    with torch.no_grad():
+        motion.region_translation[0][:, 0] = .01
+        motion.region_translation[1][:, 0] = -.01
+    torch.testing.assert_close(motion.gs_activity_fraction(2, hard=True), torch.tensor(0.),
+                               rtol=0, atol=0)
+    assert float(motion.storage_parts(2, hard=True)['region_motion_bytes']) > 0
+    set_gates(motion, {0: GR.SHARE, 1: GR.SHARE, 2: GR.SHARE})
+    torch.testing.assert_close(motion.gs_activity_fraction(2, hard=True), torch.tensor(1.),
+                               rtol=0, atol=0)
+    before = [value.detach().clone() for value in motion(2)]
+    value = motion.gs_activity_fraction(2)
+    assert 0 <= float(value) <= 1
+    value.backward()
+    assert motion.gate_logits[0].grad.abs().sum() > 0
+    assert all(parameter.grad is None for parameter in motion.region_translation)
+    for previous, current in zip(before, motion(2)):
+        torch.testing.assert_close(previous, current, rtol=0, atol=0)
+
+
+def test_gs_activity_training_cost_skips_zero_and_caches_post_commit_value():
+    import textwrap
+    source = (project_root / 'pipeline/ReCon-GS/module.py').read_text(encoding='utf8')
+    start = source.index('            loss_activity = loss_storage.new_zeros(())')
+    end = source.index("            metrics.update({'storage/'", start)
+    block = textwrap.dedent(source[start:end])
+    calls = []
+    candidate = torch.tensor(.4, requires_grad=True)
+    motion = SimpleNamespace(committed=False, last_metrics={'gs_activity/expected_fraction': .1},
+        storage_scale=lambda step: 1., gs_activity_fraction=lambda step: calls.append(step) or candidate)
+    def calculate(weight, step):
+        initial = torch.tensor(.023)
+        scope = dict(loss=initial, loss_storage=torch.tensor(.003), metrics={},
+                     cfg=SimpleNamespace(gs_activity_loss_weight=weight),
+                     self=SimpleNamespace(residual_motion=motion), current_step=step)
+        exec(block, scope)
+        return initial, scope
+    initial, disabled = calculate(0., 133)
+    assert disabled['loss'] is initial and calls == []
+    torch.testing.assert_close(disabled['metrics']['loss/gs_activity'], torch.tensor(0.),
+                               rtol=0, atol=0)
+    _, joint = calculate(.001, 133)
+    torch.testing.assert_close(joint['loss'], torch.tensor(.0234), rtol=1e-6, atol=1e-7)
+    joint['loss'].backward()
+    torch.testing.assert_close(candidate.grad, torch.tensor(.001), rtol=1e-6, atol=1e-7)
+    motion.committed = True
+    candidate = torch.tensor(.6)
+    _, committed = calculate(.001, 134)
+    torch.testing.assert_close(committed['loss'], torch.tensor(.0236), rtol=1e-6, atol=1e-7)
+    candidate = torch.tensor(.9)
+    _, cached = calculate(.001, 135)
+    torch.testing.assert_close(cached['loss'], committed['loss'], rtol=0, atol=0)
+    assert calls == [133, 134]
+
+
+def test_gs_activity_cost_allows_mixed_subregions_with_exact_kept_pose():
+    raw, motion = gated_fixture(gs_activity_loss_weight=.001,
+                                motion_xyz_step_extent=.001, gate_refine_steps=0)
+    set_gates(motion, {0: GR.SPLIT, 1: GR.KEEP, 2: GR.KEEP})
+    with torch.no_grad():
+        motion.region_translation[0][:, 0] = .02
+        motion.gate_logits[1][0] = torch.tensor([-20., 20., -20.])
+    moved = motion.index[1] == 0
+    assert moved.any() and (~moved).any()
+    xyz, rotation = motion(2)
+    torch.testing.assert_close(xyz[~moved], raw['xyz'][~moved], rtol=0, atol=0)
+    torch.testing.assert_close(rotation[~moved], raw['rotation'][~moved], rtol=0, atol=0)
+    expected_translation = torch.tensor([.02, 0., 0.]).expand(int(moved.sum()), 3)
+    torch.testing.assert_close(xyz[moved] - raw['xyz'][moved], expected_translation,
+                               rtol=1e-6, atol=1e-7)
+    expected_cost = moved.float().mean()
+    torch.testing.assert_close(motion.gs_activity_fraction(2, hard=True), expected_cost,
+                               rtol=1e-6, atol=1e-7)
+    assert 0 < float(expected_cost) < 1
+    set_gates(motion, {0: GR.SHARE})
+    torch.testing.assert_close(motion.gs_activity_fraction(2, hard=True), torch.tensor(1.),
+                               rtol=0, atol=0)
+
+
+
+def keep_local_probe_fixture(mode, choices=None, mixed=False):
+    raw, motion = gated_fixture(motion_gradient_mode=mode, gate_refine_steps=0,
+        motion_xyz_step_extent=.001, motion_rotation_step_rad=.001,
+        gs_activity_loss_weight=.001)
+    choices = {0: GR.SPLIT, 1: GR.SHARE, 2: GR.SPLIT} if choices is None else choices
+    with torch.no_grad():
+        for level, logits in enumerate(motion.gate_logits):
+            logits.fill_(-.7)
+            logits[:, choices.get(level, GR.KEEP)] = .9
+            motion.region_translation[level][:] = torch.tensor([.02, -.003, .004]) * (level + 1)
+            motion.region_rotation[level][:] = torch.tensor([.003, .002, -.005]) * (level + 1)
+        motion.gs_translation[:] = torch.tensor([.002, -.001, .003])
+        motion.gs_rotation[:] = torch.tensor([-.002, .004, .001])
+        if mixed:
+            motion.gate_logits[1][0] = torch.tensor([.9, -.7, -.7])
+            motion.gate_logits[1][1] = torch.tensor([-.7, -.7, .9])
+            fine = torch.where(motion.parents[1] == 1)[0][0]
+            motion.gate_logits[2][fine] = torch.tensor([.9, -.7, -.7])
+    return raw, motion
+
+
+def test_keep_local_probe_preserves_hard_pose_gate_gradients_and_storage():
+    results = []
+    for mode in ('keep_probe', 'keep_local_probe'):
+        raw, motion = keep_local_probe_fixture(mode, mixed=True)
+        xyz, rotation = motion(2, training=True)
+        weights = torch.linspace(.3, 1.5, len(xyz))[:, None]
+        activity = motion.gs_activity_fraction(2)
+        storage = sum(motion.storage_parts(2).values())
+        loss = (xyz.square() * weights).sum() + (rotation * weights).sum()
+        loss = loss + .001 * activity + .0001 * storage
+        loss.backward()
+        results.append((xyz.detach(), rotation.detach(),
+            [p.grad.clone() for p in motion.gate_logits], activity.detach(), storage.detach()))
+        assert any(p.grad.abs().sum() > 0 for p in motion.gate_logits)
+        with torch.no_grad():
+            hard_xyz, hard_rotation = motion(2)
+        torch.testing.assert_close(xyz, hard_xyz, rtol=0, atol=0)
+        torch.testing.assert_close(rotation, hard_rotation, rtol=0, atol=0)
+    for index in (0, 1, 3, 4):
+        torch.testing.assert_close(results[0][index], results[1][index], rtol=0, atol=0)
+    for a, b in zip(results[0][2], results[1][2]):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_keep_local_probe_blocks_kept_descendant_ancestor_motion_only():
+    outcomes = []
+    for mode in ('keep_probe', 'keep_local_probe'):
+        raw, motion = keep_local_probe_fixture(mode)
+        with torch.no_grad():
+            motion.gate_logits[1][0] = torch.tensor([.9, -.7, -.7])
+        kept = motion.index[1] == 0
+        xyz, rotation = motion(2, training=True)
+        (xyz[kept].sum() + rotation[kept].sum()).backward()
+        outcomes.append(motion)
+        torch.testing.assert_close(xyz[kept], raw['xyz'][kept], rtol=0, atol=0)
+        torch.testing.assert_close(rotation[kept], raw['rotation'][kept], rtol=0, atol=0)
+        assert motion.region_translation[1].grad[0].abs().sum() > 0
+        assert motion.region_rotation[1].grad[0].abs().sum() > 0
+        for p in (*motion.region_translation[2:], *motion.region_rotation[2:],
+                  motion.gs_translation, motion.gs_rotation):
+            torch.testing.assert_close(p.grad, torch.zeros_like(p), rtol=0, atol=0)
+    old, new = outcomes
+    assert old.region_translation[0].grad.abs().sum() > 0
+    assert old.region_rotation[0].grad.abs().sum() > 0
+    for p in (new.region_translation[0], new.region_rotation[0]):
+        torch.testing.assert_close(p.grad, torch.zeros_like(p), rtol=0, atol=0)
+    for a, b in zip(old.gate_logits, new.gate_logits):
+        torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
+
+
+def test_keep_local_probe_preserves_active_chains_and_root_keep_probe():
+    cases = ({0: GR.SPLIT, 1: GR.SPLIT, 2: GR.SPLIT},
+             {0: GR.SPLIT, 1: GR.SHARE}, {0: GR.SHARE}, {0: GR.KEEP})
+    for choices in cases:
+        outcomes = []
+        for mode in ('keep_probe', 'keep_local_probe'):
+            raw, motion = keep_local_probe_fixture(mode, choices=choices)
+            xyz, rotation = motion(2, training=True)
+            weights = torch.linspace(.3, 1.5, len(xyz))[:, None]
+            ((xyz.square() * weights).sum() + (rotation * weights).sum()).backward()
+            parameters = [*motion.region_translation, *motion.region_rotation,
+                          motion.gs_translation, motion.gs_rotation]
+            outcomes.append([p.grad.clone() for p in parameters])
+            assert motion.region_translation[0].grad.abs().sum() > 0
+        for a, b in zip(*outcomes):
+            torch.testing.assert_close(a, b, rtol=1e-6, atol=1e-7)
+
+
+def test_keep_local_probe_validation_and_checkpoint_roundtrip():
+    gated_residual_test_config(motion_gradient_mode='keep_local_probe').validate()
+    for options in (dict(enable_learned_gates=False, storage_loss_weight=0),
+                    dict(gate_policy='fixed_coarse')):
+        try:
+            gated_residual_test_config(motion_gradient_mode='keep_local_probe', **options).validate()
+        except ValueError as error:
+            assert 'keep_local_probe' in str(error)
+        else:
+            raise AssertionError('Isolated KEEP probe accepted without learned gates')
+    raw, motion = keep_local_probe_fixture('keep_local_probe', mixed=True)
+    restored = GR.GatedResidualMotion(copy.deepcopy(motion.config))
+    restored.restore(copy.deepcopy(motion.capture()))
+    assert restored.config.motion_gradient_mode == 'keep_local_probe'
+    for a, b in zip(motion(2), restored(2)):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_keep_candidate_loss_preserves_hard_path_and_gate_proxy():
+    outcomes = []
+    for mode in ('hard_path', 'keep_candidate_loss'):
+        raw, motion = keep_local_probe_fixture(mode, mixed=True)
+        xyz, rotation = motion(2, training=True)
+        storage = sum(motion.storage_parts(2).values())
+        activity = motion.gs_activity_fraction(2)
+        ((xyz.square()).sum() + rotation.sum() + .001 * storage + .001 * activity).backward()
+        outcomes.append((xyz.detach(), rotation.detach(), storage.detach(), activity.detach(),
+            [p.grad.clone() for p in (*motion.region_translation, *motion.region_rotation,
+                                     motion.gs_translation, motion.gs_rotation, *motion.gate_logits)]))
+    for index in range(4):
+        torch.testing.assert_close(outcomes[0][index], outcomes[1][index], rtol=0, atol=0)
+    for a, b in zip(outcomes[0][4], outcomes[1][4]):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_keep_candidate_own_pose_gradients_exclude_gates_ancestors_and_active_nodes():
+    raw, motion = keep_local_probe_fixture('keep_candidate_loss')
+    with torch.no_grad():
+        motion.gate_logits[1][0] = torch.tensor([.9, -.7, -.7])
+    kept = motion.index[1] == 0
+    xyz, rotation, count = motion.keep_share_candidate_pose()
+    assert count == 1
+    assert not torch.equal(xyz[kept], raw['xyz'][kept])
+    (xyz.sum() + rotation.sum()).backward()
+    for parameters in (motion.region_translation, motion.region_rotation):
+        torch.testing.assert_close(parameters[0].grad, torch.zeros_like(parameters[0]), rtol=0, atol=0)
+        assert parameters[1].grad[0].abs().sum() > 0
+        torch.testing.assert_close(parameters[1].grad[1:], torch.zeros_like(parameters[1][1:]),
+                                   rtol=0, atol=0)
+        torch.testing.assert_close(parameters[2].grad, torch.zeros_like(parameters[2]), rtol=0, atol=0)
+    assert all(p.grad is None for p in (*motion.gate_logits, motion.gs_translation, motion.gs_rotation))
+    set_gates(motion, {0: GR.SHARE})
+    assert motion.keep_share_candidate_pose() is None
+
+
+def test_keep_candidate_own_loss_corrects_overshot_closed_translation_gradient():
+    raw, motion = gated_fixture(motion_gradient_mode='keep_candidate_loss',
+                                gate_refine_steps=0, motion_xyz_step_extent=.001)
+    with torch.no_grad():
+        for logits in motion.gate_logits:
+            logits[:] = torch.tensor([.9, -.7, -.7])
+        motion.region_translation[0][:, 0] = .3
+    target = raw['xyz'][:, 0] + .1
+    hard_xyz, _ = motion(2, training=True)
+    hard_loss = (hard_xyz[:, 0] - target).square().mean()
+    hard_loss.backward()
+    torch.testing.assert_close(motion.region_translation[0].grad,
+                               torch.zeros_like(motion.region_translation[0]), rtol=0, atol=0)
+    motion.zero_grad()
+    xyz, _, _ = motion.keep_share_candidate_pose()
+    loss = (xyz[:, 0] - target).square().mean()
+    loss.backward()
+    torch.testing.assert_close(loss.detach(), torch.tensor(.04), rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(motion.region_translation[0].grad[:, 0].sum(), torch.tensor(.4),
+                               rtol=1e-5, atol=1e-7)
+    assert all(p.grad is None for p in motion.gate_logits)
+
+
+def test_keep_candidate_loss_schedule_validation_and_checkpoint():
+    cfg = gated_residual_test_config(motion_gradient_mode='keep_candidate_loss',
+                                     motion_steps=133, gate_refine_steps=0,
+                                     keep_candidate_fit_interval=10, keep_candidate_fit_weight=1.)
+    cfg.validate()
+    assert [step for step in range(1, 201) if cfg.keep_candidate_fit_due(step)] == list(range(1, 134, 10))
+    assert len([step for step in range(1, 201) if cfg.keep_candidate_fit_due(step)]) == 14
+    for options in (dict(keep_candidate_fit_interval=0), dict(keep_candidate_fit_interval=True),
+                    dict(keep_candidate_fit_interval=1.2), dict(keep_candidate_fit_weight=0.),
+                    dict(keep_candidate_fit_weight=float('nan')), dict(keep_candidate_fit_weight=True),
+                    dict(motion_gradient_warmup_steps=1),
+                    dict(enable_learned_gates=False, storage_loss_weight=0),
+                    dict(gate_policy='fixed_coarse')):
+        try:
+            gated_residual_test_config(motion_gradient_mode='keep_candidate_loss', **options).validate()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'Invalid candidate configuration accepted: {options}')
+    raw, motion = keep_local_probe_fixture('keep_candidate_loss', mixed=True)
+    restored = GR.GatedResidualMotion(copy.deepcopy(motion.config))
+    restored.restore(copy.deepcopy(motion.capture()))
+    assert restored.config.motion_gradient_mode == 'keep_candidate_loss'
+    for a, b in zip(motion(2), restored(2)):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_candidate_render_audit_samples_before_image_outcomes():
+    path = project_root / 'scripts' / 'audit_closed_candidate_render.py'
+    parsed = ast.parse(path.read_text())
+    function = next(node for node in parsed.body
+                    if isinstance(node, ast.FunctionDef) and node.name == 'sample_keep_nodes')
+    namespace = {'torch': torch, 'np': np}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), 'exec'), namespace)
+    counts = torch.arange(1, 19)
+    index = torch.repeat_interleave(torch.arange(18), counts)
+    states = [torch.zeros(18, dtype=torch.long) for _ in range(3)]
+    visited = [torch.ones(18, dtype=torch.bool) for _ in range(3)]
+    for choice, reach in zip(states, visited):
+        choice[0] = 1
+        reach[-3:] = False
+    selection = dict(states=states, visited=visited)
+    layout = dict(index=[index.clone() for _ in range(3)])
+    sample = namespace['sample_keep_nodes']
+    first, population = sample(selection, layout, 37, 8, 3)
+    assert sample(selection, layout, 37, 8, 3) == (first, population)
+    assert sample(selection, layout, 38, 8, 3)[0] != first
+    assert len(first) == 24
+    assert all(item['reachable_keep_nodes'] == 14 for item in population)
+    for level in range(3):
+        selected = [item for item in first if item['level'] == level]
+        assert [sum(item['size_bin'] == group for item in selected) for group in range(3)] == [3, 3, 2]
+        assert len({item['node'] for item in selected}) == 8
+        assert all(1 <= item['node'] < 15 and item['members'] == item['node'] + 1
+                   for item in selected)
+
+
+def test_fine_split_candidate_fits_closed_local_without_active_or_gate_gradients():
+    raw, motion = gated_fixture(motion_gradient_mode='keep_candidate_loss',
+                                gate_refine_steps=0, fit_fine_split_candidates=True)
+    set_gates(motion, {0: GR.SPLIT, 1: GR.SPLIT, 2: GR.SHARE})
+    hard = motion(2)
+    candidate = motion.keep_share_candidate_pose()
+    assert candidate is not None and candidate[2] > 0
+    # A zero local candidate initially has the same values but a fitting Jacobian.
+    for a, b in zip(hard, candidate[:2]):
+        torch.testing.assert_close(a, b, rtol=0, atol=1e-6)
+    (candidate[0].sum() + candidate[1].sum()).backward()
+    assert motion.gs_translation.grad.abs().sum() > 0
+    assert motion.gs_rotation.grad.abs().sum() > 0
+    for p in (*motion.region_translation, *motion.region_rotation):
+        torch.testing.assert_close(p.grad, torch.zeros_like(p), rtol=0, atol=0)
+    assert all(p.grad is None for p in motion.gate_logits)
+    with torch.no_grad():
+        motion.gs_translation[:, 0] = 2 * motion.motion_steps_vector[0]
+    changed = motion.keep_share_candidate_pose()
+    assert not torch.equal(changed[0], hard[0])
+    # Shadow fitting never changes the selected hard SHARE pose.
+    for a, b in zip(hard, motion(2)):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_fine_split_candidate_gradients_exclude_keep_and_open_local_rows():
+    raw, motion = gated_fixture(count=72, motion_gradient_mode='keep_candidate_loss',
+                                gate_refine_steps=0, fit_fine_split_candidates=True)
+    set_gates(motion, {0: GR.SPLIT, 1: GR.SPLIT, 2: GR.SHARE})
+    with torch.no_grad():
+        motion.gate_logits[2][0] = torch.tensor([20., -20., -20.])
+        motion.gate_logits[2][1] = torch.tensor([-20., -20., 20.])
+    selection = motion.gate_state_arrays()
+    eligible = (selection['states'][2] == GR.SHARE)[motion.index[2]]
+    assert eligible.any() and (~eligible).any()
+    pose = motion.keep_share_candidate_pose()
+    (pose[0].sum() + pose[1].sum()).backward()
+    assert motion.gs_translation.grad[eligible].abs().sum() > 0
+    for p in (motion.gs_translation, motion.gs_rotation):
+        torch.testing.assert_close(p.grad[~eligible], torch.zeros_like(p[~eligible]), rtol=0, atol=0)
+    hard = motion(2)
+    kept = selection['gs_terminal'] == GR.KEEP
+    torch.testing.assert_close(hard[0][kept], raw['xyz'][kept], rtol=0, atol=0)
+    assert all(p.grad is None for p in motion.gate_logits)
+
+
+def test_fine_split_candidate_config_resume_and_graph_budget():
+    cfg = gated_residual_test_config(motion_gradient_mode='keep_candidate_loss',
+        motion_steps=133, gate_refine_steps=0, fit_fine_split_candidates=True)
+    cfg.validate()
+    assert sum(cfg.keep_candidate_fit_due(step) for step in range(1, 201)) == 14
+    for options in (dict(fit_fine_split_candidates=1),
+                    dict(fit_fine_split_candidates=True, motion_gradient_mode='hard_path')):
+        try:
+            gated_residual_test_config(**options).validate()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid fine candidate settings accepted')
+    raw, motion = gated_fixture(motion_gradient_mode='keep_candidate_loss',
+                                gate_refine_steps=0, fit_fine_split_candidates=True)
+    restored = GR.GatedResidualMotion(copy.deepcopy(motion.config))
+    restored.restore(copy.deepcopy(motion.capture()))
+    assert restored.config.fit_fine_split_candidates
+    for a, b in zip(motion(2), restored(2)):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,14 @@
+# 启动前冻结严重回退规则；不按test00调参或早停。
+# 连续两个不重叠20帧窗口，训练探针image objective均比旧正式run同帧高至少25%，才停止。
+reference_run: output/fs_core_keep_candidate_zero_inherit_refaligned_seed0_300f_20261003/20261003T174228_5fe082
+window_frames: 20
+severe_train_image_objective_ratio: 1.25
+consecutive_nonoverlapping_windows: 2
+first_quality_check_frame: 40
+maximum_extra_graphs: 14
+stop_on_nonfinite: true
+stop_on_program_failure: true
+test00_used_for_stop: false
+scope: Fixed five TRAIN probes after_retention image objective; same-frame priorformal
+  comparator. Halt only catastrophic sustained train regression; no test tuning or
+  best-checkpoint selection.

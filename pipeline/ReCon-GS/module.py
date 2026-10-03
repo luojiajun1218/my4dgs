@@ -27,12 +27,13 @@ from .model.learned_selective import LearnedSelectiveMotion, LearnedSelectiveCon
 from .model.residual_motion import (QuantizedResidualConfig, QuantizedResidualMotion,
     QuantizedNewGaussianView, RAW_FIELDS, RAW_ATTRIBUTES,
     model_raw, materialize_quantized_gaussians, reference_digest, survivor_rows)
-from .model.gated_residual import GatedResidualMotion
+from .model.gated_residual import GatedResidualMotion, actual_motion_statistics
 
 import json
 import csv
 import numpy as np
 import time
+import math
 
 @dataclass
 class GaussianConfig:
@@ -62,8 +63,28 @@ class QuantizedDiagnosticsConfig:
     deletion_damage_enabled: bool = False
     deletion_damage_view_name: Optional[str] = None
     deletion_damage_every_n_frames: Optional[int] = None
+    control_quality_enabled: bool = False
+    control_quality_camera_names: Optional[List[str]] = None
+    prediction_quality_enabled: bool = False
+    gradient_steps: Optional[List[int]] = None
+    actual_motion_enabled: bool = False
+    translation_extent_thresholds: Optional[List[float]] = None
+    rotation_radian_thresholds: Optional[List[float]] = None
 
     def validate(self):
+        if self.control_quality_camera_names is not None:
+            if (not self.control_quality_camera_names or
+                    len(set(self.control_quality_camera_names)) != len(self.control_quality_camera_names)):
+                raise ValueError('control_quality_camera_names must be nonempty and unique')
+        if self.actual_motion_enabled:
+            for name in ('translation_extent_thresholds', 'rotation_radian_thresholds'):
+                values = getattr(self, name)
+                if not values or any(not math.isfinite(v) or v < 0 for v in values):
+                    raise ValueError(f'{name} requires finite nonnegative thresholds')
+        if self.gradient_steps is not None and any(
+                isinstance(step, bool) or not isinstance(step, int) or step < 1
+                for step in self.gradient_steps):
+            raise ValueError('gradient_steps must contain positive integer steps')
         if not self.deletion_damage_enabled:
             return
         interval = self.deletion_damage_every_n_frames
@@ -94,6 +115,7 @@ class ModuleConfig(BaseModuleConfig):
     renderer: RendererConfig = field(default_factory=RendererConfig)
     deformation: DeformConfig = field(default_factory=DeformConfig)
     motion_mode: str = 'legacy'
+    sparse_export_index_encoding: str = 'per_row'
     selective_motion: SelectiveMotionConfig = field(default_factory=SelectiveMotionConfig)
     learned_selective_motion: LearnedSelectiveConfig = field(default_factory=LearnedSelectiveConfig)
     quantized_residual: QuantizedResidualConfig = field(default_factory=QuantizedResidualConfig)
@@ -124,6 +146,8 @@ class Module(BaseModule):
     def setup(self):
         if self.config.motion_mode not in {'legacy', 'selective', 'learned_selective', 'quantized_residual'}:
             raise ValueError('motion_mode must be legacy, selective, learned_selective or quantized_residual')
+        if self.config.sparse_export_index_encoding not in {'per_row', 'shared_table'}:
+            raise ValueError('sparse_export_index_encoding must be per_row or shared_table')
         if self.config.motion_mode in {'selective', 'learned_selective'}:
             self.motion_config.validate()
             if self.trainer.config.num_incr_steps != self.motion_config.total_steps:
@@ -172,6 +196,7 @@ class Module(BaseModule):
                            self.config.deformation.num_grid_levels == 4 else Deformation)
         self.deform = deformation_cls(self.config.deformation)
         self.timer = Timer()
+        self._sparse_motion_export = None
 
     def on_save_checkpoint(self, ckpt: dict):
         ckpt["gaussians"] = self.gaussians.capture()
@@ -258,6 +283,91 @@ class Module(BaseModule):
                 self.renderer.gaussians = MergedGaussianModel([self.gaussians, self.gaussians_incr])
         else:
             self.deform.restore(ckpt["deformation"])
+
+    @torch.no_grad()
+    def load_sparse_motion_export(self, motion_path, incremental_ply=None):
+        """Load one sparse-v2/v3 frame for playback on the pre-frame base model.
+
+        The caller must advance the base Gaussian state to the start of this
+        frame. The optional PLY contains only this frame's newly added points.
+        """
+        if not isinstance(self.deform, GatedFourDeformation):
+            raise RuntimeError("Sparse gated-four playback requires GatedFourDeformation")
+        field = GatedFourDeformation.decode_export_motion(motion_path)
+        base = self.gaussians.get_xyz_ori
+        if field.shape != (len(base), 7):
+            raise ValueError(f"Sparse motion has shape {field.shape}; expected ({len(base)}, 7)")
+        motion = torch.as_tensor(field, dtype=base.dtype, device=base.device).contiguous()
+        delta_rotation = torch.nn.functional.normalize(motion[:, 3:], dim=-1)
+        incremental = None
+        if incremental_ply is not None:
+            incremental = GaussianModel(self.config.sh_degree)
+            incremental.load_ply(str(incremental_ply))
+            # libgs GaussianModel is a plain Python container, not nn.Module;
+            # load_ply hardcodes CUDA, so move its renderer tensors explicitly.
+            for name in ('_xyz', '_features_dc', '_features_rest', '_opacity',
+                         '_scaling', '_rotation', 'max_radii2D',
+                         'xyz_gradient_accum', 'denom'):
+                value = getattr(incremental, name, None)
+                if torch.is_tensor(value):
+                    dtype = base.dtype if value.is_floating_point() else value.dtype
+                    setattr(incremental, name, value.to(device=base.device, dtype=dtype))
+        self._sparse_motion_export = (motion[:, :3], delta_rotation, incremental)
+        return dict(motion_rows=len(motion),
+                    incremental_rows=0 if incremental is None else len(incremental.get_xyz))
+
+    @torch.no_grad()
+    def forward_sparse_motion_export(self, viewpoint: TensorSpace) -> dict:
+        """Render the currently loaded sparse-v2 frame through the normal rasterizer."""
+        if self._sparse_motion_export is None:
+            raise RuntimeError("Load a sparse motion export before rendering it")
+        delta_xyz, delta_rotation, incremental = self._sparse_motion_export
+        original_model = self.renderer.gaussians
+        original_delta_xyz = getattr(self.gaussians, "delta_xyz", None)
+        original_delta_rotation = getattr(self.gaussians, "delta_rot", None)
+        try:
+            self.gaussians.delta_xyz = delta_xyz
+            self.gaussians.delta_rot = delta_rotation
+            if incremental is not None:
+                self.renderer.gaussians = MergedGaussianModel([self.gaussians, incremental])
+            else:
+                self.renderer.gaussians = self.gaussians
+            return self.renderer(viewpoint, self.background)
+        finally:
+            self.gaussians.delta_xyz = original_delta_xyz
+            self.gaussians.delta_rot = original_delta_rotation
+            self.renderer.gaussians = original_model
+
+    def clear_sparse_motion_export(self):
+        """Release the decoded motion field and any loaded incremental points."""
+        self._sparse_motion_export = None
+
+    @torch.no_grad()
+    def advance_sparse_motion_export(self):
+        """Commit the loaded frame and move base state to the next frame.
+
+        This mirrors the legacy training transition: apply motion to the old
+        base, merge this frame's births, then prune the same number of lowest
+        opacity points before the next frame's motion is decoded.
+        """
+        if self._sparse_motion_export is None:
+            raise RuntimeError("Load and render a sparse motion export before advancing")
+        if not self.config.merge_to_base:
+            raise RuntimeError("Sparse sequential playback currently requires merge_to_base")
+        if any(getattr(self.gaussians, name, None) is not None for name in
+               ("delta_xyz", "delta_rot", "rigid_xyz", "rigid_rotation", "noise_scale")):
+            raise RuntimeError("Clear temporary Gaussian motion overrides before advancing")
+        delta_xyz, delta_rotation, incremental = self._sparse_motion_export
+        self.gaussians.apply_deformation(delta_xyz, delta_rotation)
+        incremental_rows = 0 if incremental is None else len(incremental.get_xyz)
+        if incremental_rows:
+            self.gaussians.extend(incremental)
+            lowest_opacity = self.gaussians.get_opacity.flatten().sort().indices
+            self.gaussians.prune_points(lowest_opacity[:incremental_rows])
+        self.renderer.gaussians = self.gaussians
+        self.clear_sparse_motion_export()
+        return dict(base_rows=len(self.gaussians.get_xyz),
+                    merged_incremental_rows=incremental_rows)
 
     def forward(self, viewpoint: TensorSpace, training: bool = False, **kwargs) -> dict:
         bg_color = self.background
@@ -436,6 +546,7 @@ class Module(BaseModule):
         loss = (1.0 - lambda_dssim) * loss_rgb + lambda_dssim * loss_dssim
 
         metrics = {
+            "loss/image": loss,
             "loss/rgb": loss_rgb,
             "loss/dssim": loss_dssim,
             "psnr": psnr(image, gt_image).mean().double(),
@@ -483,10 +594,35 @@ class Module(BaseModule):
             loss_storage = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
                             * storage / reference_bytes)
             loss = loss + loss_storage
+            loss_activity = loss_storage.new_zeros(())
+            if cfg.gs_activity_loss_weight > 0:
+                if self.residual_motion.committed:
+                    # Gates/motion are fixed during newborn fitting; reuse their final cost.
+                    cached = self.residual_motion.last_metrics.get('gs_activity/committed_fraction')
+                    if cached is None:
+                        expected_activity = self.residual_motion.gs_activity_fraction(current_step)
+                        self.residual_motion.last_metrics['gs_activity/committed_fraction'] = float(
+                            expected_activity.detach())
+                    else:
+                        expected_activity = loss_storage.new_tensor(cached)
+                else:
+                    expected_activity = self.residual_motion.gs_activity_fraction(current_step)
+                loss_activity = (cfg.gs_activity_loss_weight *
+                                 self.residual_motion.storage_scale(current_step) * expected_activity)
+                loss = loss + loss_activity
+                metrics['gs_activity/expected_fraction'] = expected_activity
+            metrics['loss/gs_activity'] = loss_activity
             metrics.update({'storage/' + name: value for name, value in storage_details.items()})
             metrics['storage/expected_total_bytes'] = storage
             metrics['storage/reference_bytes'] = loss_rgb.new_tensor(reference_bytes)
             metrics['loss/storage'] = loss_storage
+            loss_candidate = loss_storage.new_zeros(())
+            if (not self.residual_motion.committed and cfg.keep_candidate_fit_due(current_step)):
+                candidate = self.keep_candidate_image_loss(viewpoint)
+                if candidate is not None:
+                    loss_candidate = cfg.keep_candidate_fit_weight * candidate
+                    loss = loss + loss_candidate
+            metrics['loss/keep_candidate'] = loss_candidate
             if self.residual_motion.committed and cfg.enable_incremental:
                 # An empty newborn pool must still allow the stage's backward call.
                 loss = loss + self.gaussians_incr._xyz.sum() * 0
@@ -500,6 +636,37 @@ class Module(BaseModule):
         self.timer.clock("tensorboard logging").stop()
 
         return loss, metrics, render_pkg
+
+    def keep_candidate_image_loss(self, viewpoint):
+        """One extra actual candidate render, with no gate/active-motion gradient."""
+        pose = self.residual_motion.keep_share_candidate_pose()
+        if pose is None:
+            return None
+        xyz, rotation, nodes = pose
+        original = self.renderer.gaussians
+        original_xyz = getattr(self.gaussians, 'rigid_xyz', None)
+        original_rotation = getattr(self.gaussians, 'rigid_rotation', None)
+        self.trainer.synchronize()
+        started = time.perf_counter()
+        try:
+            self.gaussians.rigid_xyz, self.gaussians.rigid_rotation = xyz, rotation
+            self.renderer.gaussians = self.gaussians
+            image = self.renderer(viewpoint, self.background)['render']
+            weight = self.config.lambda_dssim
+            loss = ((1 - weight) * l1_loss(image, viewpoint.image) +
+                    weight * (1 - ssim(image, viewpoint.image)))
+        finally:
+            self.gaussians.rigid_xyz = original_xyz
+            self.gaussians.rigid_rotation = original_rotation
+            self.renderer.gaussians = original
+        self.trainer.synchronize()
+        stats = self.residual_motion.last_metrics
+        stats['candidate_fit/extra_renders'] = stats.get('candidate_fit/extra_renders', 0) + 1
+        stats['candidate_fit/forward_loss_seconds'] = stats.get('candidate_fit/forward_loss_seconds', 0.) + time.perf_counter() - started
+        stats['candidate_fit/last_nodes'] = nodes
+        stats['candidate_fit/last_image_loss'] = float(loss.detach())
+        stats['candidate_fit/image_loss_sum'] = stats.get('candidate_fit/image_loss_sum', 0.) + float(loss.detach())
+        return loss
 
     def selective_pairs(self):
         cfg = self.motion_config
@@ -810,8 +977,106 @@ class Module(BaseModule):
         return image, metrics
 
     @torch.no_grad()
+    def quantized_quality_snapshot(self, stage, view=None, preserve_motion=False):
+        """Read-only metrics on all train/test cameras; never selects a branch."""
+        if not self.config.quantized_diagnostics.control_quality_enabled:
+            return
+        original = self.renderer.gaussians
+        original_xyz = getattr(self.gaussians, 'rigid_xyz', None)
+        original_rot = getattr(self.gaussians, 'rigid_rotation', None)
+        if not preserve_motion:
+            self.gaussians.rigid_xyz = self.gaussians.rigid_rotation = None
+        result = {}
+        try:
+            self.renderer.gaussians = (self.gaussians if view is None else
+                                      MergedGaussianModel([self.gaussians, view]))
+            # Worker seeds must not advance model/optimization random streams.
+            with torch.random.fork_rng(devices=[]):
+                names = getattr(self.config.quantized_diagnostics, 'control_quality_camera_names', None)
+                if names is not None:
+                    # Load the small read-only diagnostic subset once per frame.
+                    # Explicit indices may include validation cameras; this loader
+                    # never supplies an optimization step.
+                    cached = getattr(self, 'quant_phase_views', None)
+                    if cached is None or cached[0] != self.current_frame:
+                        dataset = self.datamodule.get_train_dataset()
+                        indices = self.datamodule._camera_indices(dataset, names)
+                        views = [v.to(self.device) for v in self.datamodule.train_dataloader(
+                            random=False, indices=indices)]
+                        self.quant_phase_views = (self.current_frame, views)
+                    validation = set(self.datamodule.config.validation_camera_names or [])
+                    views = self.quant_phase_views[1]
+                    loaders = [('train_probe', [v for v in views if v.path.name not in validation]),
+                               ('validation_probe', [v for v in views if v.path.name in validation])]
+                else:
+                    loaders = [('train', self.datamodule.train_dataloader(random=False)),
+                               ('test', self.datamodule.test_dataloader())]
+                for split, loader in loaders:
+                    if loader is None or (isinstance(loader, list) and not loader):
+                        continue
+                    rows = []
+                    for viewpoint in loader:
+                        viewpoint = viewpoint.to(self.device)
+                        raw_image = self.renderer(viewpoint, self.background)['render']
+                        gt = viewpoint.image
+                        image = raw_image.clamp(0., 1.)
+                        weight = self.config.lambda_dssim
+                        objective = ((1 - weight) * l1_loss(raw_image, gt)
+                                     + weight * (1 - ssim(raw_image, gt)))
+                        rows.append(dict(camera=viewpoint.path.name, psnr=float(psnr(image, gt)),
+                            ssim=float(ssim(image, gt)), l1=float(l1_loss(image, gt)),
+                            image_objective=float(objective)))
+                    result[split] = dict(views=rows, mean={key: float(np.mean([r[key] for r in rows]))
+                        for key in ('psnr', 'ssim', 'l1', 'image_objective')})
+        finally:
+            self.renderer.gaussians = original
+            self.gaussians.rigid_xyz, self.gaussians.rigid_rotation = original_xyz, original_rot
+        self.quant_control_diagnostics[stage] = result
+        self.save_quantized_control_diagnostics()
+
+    def save_quantized_control_diagnostics(self):
+        path = self.output_dir / 'frame_summary' / f'control_{self.current_frame:03d}.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(frame=self.current_frame,
+            motion_gradient_mode=self.config.quantized_residual.motion_gradient_mode,
+            quality=self.quant_control_diagnostics, gradients=self.quant_gradient_diagnostics,
+            semantics='Quality snapshots use all train/test cameras. Image objective is the '
+                'unclamped training L1/DSSIM objective without storage; PSNR/SSIM/L1 use clamped '
+                'images. Gradient summaries are combined-loss gradients before optimizer.step '
+                'at sampled steps; gate changes are between sampled steps. No background mask.'), indent=2))
+
+    @torch.no_grad()
+    def record_quantized_gradients(self):
+        if self.trainer.is_first_frame or self.residual_motion.committed:
+            return
+        motion = self.residual_motion
+        groups = {f'region_translation_{i}': p for i, p in enumerate(motion.region_translation)}
+        groups.update({f'region_rotation_{i}': p for i, p in enumerate(motion.region_rotation)})
+        groups.update({f'gate_{i}': p for i, p in enumerate(motion.gate_logits)})
+        groups.update(gs_translation=motion.gs_translation, gs_rotation=motion.gs_rotation)
+        gradients = {}
+        for name, parameter in groups.items():
+            grad = parameter.grad
+            gradients[name] = (None if grad is None else dict(
+                l2=float(grad.norm()), max_abs=float(grad.abs().max()),
+                nonzero_rows=int((grad.abs().sum(-1) > 0).sum()), rows=len(grad)))
+        states = [s.cpu().clone() for s in motion.gate_state_arrays()['states']]
+        previous = getattr(self, 'quant_last_sampled_gates', None)
+        changes = ([int((a != b).sum()) for a, b in zip(states, previous)]
+                   if previous is not None else None)
+        self.quant_last_sampled_gates = states
+        self.quant_gradient_diagnostics.append(dict(step=self.global_step,
+            gradients=gradients, sampled_gate_changes=changes,
+            activity=motion.statistics(), training_metrics=dict(motion.last_metrics)))
+        self.save_quantized_control_diagnostics()
+
+    @torch.no_grad()
     def prepare_quantized_frame(self):
         started = time.perf_counter()
+        self.quant_control_diagnostics = {}
+        self.quant_gradient_diagnostics = []
+        self.quant_last_sampled_gates = None
+        self.quantized_quality_snapshot('before_deletion')
         self.quant_previous_reference = {name: value.cpu() for name, value in model_raw(self.gaussians).items()}
         self.quant_previous_sha256 = reference_digest(self.quant_previous_reference)
         if self.quant_first_frame_gs_count is None:
@@ -857,6 +1122,7 @@ class Module(BaseModule):
         before_image, before_metrics = self.deletion_diagnostic_render(viewpoint) if viewpoint is not None else (None, None)
         if count:
             self.gaussians.prune_points(deleted)
+        self.quantized_quality_snapshot('after_deletion')
         self.quant_point_birth_frame = origins[previous_rows.cpu()]
         point_origins.update(
             remaining_first_frame=int((self.quant_point_birth_frame == 0).sum()),
@@ -911,6 +1177,16 @@ class Module(BaseModule):
         self.trainer.synchronize()
         self.residual_motion.stage_seconds['layout'] = time.perf_counter() - layout_started
         self.residual_motion.stage_seconds['deletion_diagnostics'] = diagnostic_seconds if viewpoint is not None else 0.
+        if getattr(getattr(self.config, 'quantized_diagnostics', None),
+                   'prediction_quality_enabled', False):
+            original_xyz = getattr(self.gaussians, 'rigid_xyz', None)
+            original_rotation = getattr(self.gaussians, 'rigid_rotation', None)
+            try:
+                self.gaussians.rigid_xyz, self.gaussians.rigid_rotation = self.residual_motion(1)
+                self.quantized_quality_snapshot('after_initialization', preserve_motion=True)
+            finally:
+                self.gaussians.rigid_xyz = original_xyz
+                self.gaussians.rigid_rotation = original_rotation
         self.trainer.synchronize()
         self.residual_motion.stage_seconds['frame_prepare'] = time.perf_counter() - started
 
@@ -976,6 +1252,7 @@ class Module(BaseModule):
                 xyz, rotation = motion(self.global_step)
                 self.gaussians.apply_selected_motion(xyz, rotation)
                 motion.committed = True
+                self.quantized_quality_snapshot('after_motion')
                 for parameter in motion.parameters():
                     parameter.requires_grad_(False)
                 if cfg.enable_incremental:
@@ -1037,6 +1314,7 @@ class Module(BaseModule):
         finalize_started = time.perf_counter()
         cfg = self.config.quantized_residual
         view = self.make_quantized_new_view() if cfg.enable_incremental else None
+        self.quantized_quality_snapshot('before_retention', view)
         opacity_eligible = int(view.keep.sum()) if view is not None else 0
         retention = (view.apply_retention_budget(cfg.max_retained_gaussians)
                      if view is not None else dict(eligible=0, pruned=0,
@@ -1056,6 +1334,7 @@ class Module(BaseModule):
         if cfg.enable_learned_gates:
             self.residual_motion.register_materialized_layout(raw['xyz'], retained_sources)
         self.install_quantized_raw(raw)
+        self.quantized_quality_snapshot('after_retention')
         self.trainer.synchronize()
         state_update_seconds = time.perf_counter() - state_started
         self.residual_motion.stage_seconds['state_update'] = state_update_seconds
@@ -1078,14 +1357,45 @@ class Module(BaseModule):
             new_retained=retained_count, final_total=len(raw['xyz']))
         self.quant_finalized = True
         reference_sha256 = reference_digest(raw)
+        actual_motion = None
+        diagnostics = getattr(self.config, 'quantized_diagnostics', None)
+        if getattr(diagnostics, 'actual_motion_enabled', False):
+            if not cfg.enable_learned_gates:
+                raise ValueError('Actual motion diagnostics require gated motion')
+            xyz, rotation = self.residual_motion(cfg.motion_steps)
+            actual_motion = actual_motion_statistics(
+                self.residual_motion.base_xyz, self.residual_motion.base_rotation,
+                xyz, rotation, self.residual_motion.extent,
+                diagnostics.translation_extent_thresholds,
+                diagnostics.rotation_radian_thresholds,
+                self.residual_motion.gate_state_arrays()['gs_terminal'])
         self.quant_report = dict(
             frame=self.current_frame, storage_only=True,
+            candidate_fit=dict(mode=cfg.motion_gradient_mode,
+                interval=cfg.keep_candidate_fit_interval, weight=cfg.keep_candidate_fit_weight,
+                extra_renders=int(self.residual_motion.last_metrics.get('candidate_fit/extra_renders', 0)),
+                forward_loss_seconds=self.residual_motion.last_metrics.get('candidate_fit/forward_loss_seconds', 0.),
+                last_nodes=self.residual_motion.last_metrics.get('candidate_fit/last_nodes', 0),
+                image_loss_sum=self.residual_motion.last_metrics.get('candidate_fit/image_loss_sum', 0.),
+                semantics='Extra candidate render shares this step training view; only reachable KEEP '
+                          'terminal motion fits its own image objective. Gate/active motion detached. '
+                          'Forward time excludes auxiliary backward; full training time includes it.'),
             state_update_seconds=state_update_seconds,
             expected_storage_bytes=float(expected_storage),
             hard_storage_bytes=float(hard_storage),
             storage_bytes_by_class={name: float(value) for name, value in hard_parts.items()},
             expected_storage_bytes_by_class={name: float(value) for name, value in expected_parts.items()},
             reference_storage_bytes=reference_bytes,
+            gs_activity_cost=(dict(
+                weight=cfg.gs_activity_loss_weight,
+                expected_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step)),
+                hard_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step, hard=True)),
+                translation_threshold_world=self.residual_motion.extent * cfg.motion_xyz_step_extent / 2,
+                rotation_threshold_radians=cfg.motion_rotation_step_rad / 2,
+                semantics='Expected changed old-GS fraction over full quantized terminal poses; '
+                          'KEEP and canceled candidate poses cost zero. Geometry support is detached; '
+                          'only gate probabilities receive this cost gradient. No masks or visibility oracle.')
+                if cfg.enable_learned_gates else None),
             storage_semantics=('Estimated effective parameter bytes: reachable gate states, SHARE/SPLIT region motion, '
                 'open GS residuals, retained newborn raw attributes and int32 source, and int32 deletions. '
                 'Hierarchy membership is deterministically reconstructed from the previous materialized GS, '
@@ -1097,6 +1407,18 @@ class Module(BaseModule):
                 'int32 source and int32 deletions. No nongated sparse positions are assumed; file headers, first-frame '
                 'reference, logs and optimizer are excluded.'),
             activities=self.residual_motion.statistics(),
+            actual_motion=actual_motion,
+            gate_policy=cfg.gate_policy,
+            motion_gradient_schedule=dict(
+                configured_mode=cfg.motion_gradient_mode,
+                all_split_warmup_steps=cfg.motion_gradient_warmup_steps,
+                semantics=('Use all candidate motion Jacobians through the warmup step, then the configured mode. '
+                           'Hard forward poses and the gate proxy are unchanged; this schedule affects only motion '
+                           'parameter gradients during differentiable training forwards. keep_probe fits SHARE '
+                           'candidates at reachable KEEP terminals while retaining learned gate priors; '
+                           'KEEP and SHARE both stop descent, so unvisited descendants stay closed. '
+                           'keep_local_probe additionally detaches ancestor pose/pivots only for a '
+                           'descendant KEEP terminal candidate, preserving its own SHARE probe gradient.')),
             last_training_metrics=dict(self.residual_motion.last_metrics),
             stage_seconds=None,
             new_count=retained_count,
@@ -1349,7 +1671,8 @@ class Module(BaseModule):
                     storage_dir = self.output_dir / "frame_storage"
                     storage_dir.mkdir(parents=True, exist_ok=True)
                     motion_path = storage_dir / f"motion_{self.current_frame:03d}.npz"
-                    stats = self.deform.export(motion_path)
+                    stats = self.deform.export(
+                        motion_path, index_encoding=self.config.sparse_export_index_encoding)
                     gs_path = storage_dir / f"incremental_{self.current_frame:03d}.ply"
                     self.gaussians_incr.save_ply(gs_path)
                     stats.update(frame=self.current_frame, incremental_gs=num_incr_gs,
