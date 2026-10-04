@@ -1,9 +1,5 @@
-# 配对筛查：共享首帧0，连续训练1–5。唯一变量是关闭运动候选的全路径梯度预热。
-# hard_path 为实际硬路径；处理组前50个运动步使用 all_split Jacobian，再切回 hard_path。
-# motion_gradient_mode生产默认all_split；gate代理与硬门前向均保持不变。
-# seed0与独立视角RNG使各帧300步相机顺序相同，逐步序列写入training_views_*.json。
-# 沿用200联合+100补点、refine0、温度1.5→0.5、每5帧重建、最终200点预算。
-# control_quality记录全部20训练/1测试视角阶段目标；gradient_steps仅采样诊断。
+# 当前完整序列候选的参数；本轮实测为24帧后断点继续。
+# 本配置从共享首帧重新开始，尚未执行这份完整重跑配置。
 ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
 data:
   eval_test: true
@@ -12,16 +8,18 @@ data:
     num_workers: 8
     pin_memory: true
   extra_dataset_kwargs:
-    num_frames: 6
-  first_frame_eval_train: true
+    num_frames: 300
+  first_frame_eval_train: false
   resolution: -1
   root: data/colmap4d/flame_steak
   shuffle: true
   split_train_test: true
   white_background: false
   training_view_seed: 0
+  training_camera_names: null
+  validation_camera_names: null
 detect_anomaly: false
-experiment_name: fs_gatewarm_hardpath_warm50_seed0_6
+experiment_name: fs_sparse_hierarchical_psnr_candidate_300
 gui_ip: 127.0.0.1
 gui_port: 6009
 mode: train
@@ -45,20 +43,38 @@ module:
   lambda_deform: 0.0
   lambda_dssim: 0.2
   lpips_required: false
-  motion_mode: quantized_residual
+  motion_mode: sparse_hierarchical
   num_saving_images: 5
   quantized_diagnostics:
-    deletion_damage_enabled: true
+    deletion_damage_enabled: false
     deletion_damage_every_n_frames: 1
     deletion_damage_view_name: cam00.png
     control_quality_enabled: true
     gradient_steps:
     - 1
-    - 30
-    - 80
-    - 150
+    - 100
+    - 101
+    - 160
+    - 161
     - 200
-  quantized_residual:
+    control_quality_camera_names:
+    - cam01.png
+    - cam17.png
+    - cam18.png
+    - cam19.png
+    - cam20.png
+    actual_motion_enabled: true
+    translation_extent_thresholds:
+    - 0.0
+    - 1.0e-05
+    - 0.0001
+    - 0.001
+    rotation_radian_thresholds:
+    - 0.0
+    - 0.001
+    - 0.01
+    prediction_quality_enabled: true
+  sparse_hierarchical:
     adam_betas:
     - 0.9
     - 0.999
@@ -67,24 +83,25 @@ module:
     densification_stats_steps: 30
     enable_incremental: true
     enable_learned_gates: true
+    gate_policy: learned
     fine_region_gs: 24
-    gate_initial_logits:
-    - -1.0
-    - 0.0
-    - -0.5
-    gate_lr: 0.02
-    gate_refine_steps: 0
-    gate_temperature_end: 0.5
-    gate_temperature_start: 1.5
+    dense_fit_steps: 100
+    gate_compress_steps: 60
+    gate_refine_steps: 40
+    initial_gate_logit: 2.0
+    gate_lr: 0.05
+    gate_hard_threshold: 0.51
+    gate_temperature_end: 1.0
+    gate_temperature_start: 1.0
     gs_rotation_lr: 0.0001
     gs_translation_lr: 0.0001
     incremental_steps: 100
     max_new_gaussians: null
     max_retained_gaussians: 200
-    motion_init_decay: 0.6
-    motion_rotation_step_rad: 0.001
+    motion_init_decay: 0.0
+    motion_rotation_step_rad: 0.0001
     motion_steps: 200
-    motion_xyz_step_extent: 1.0e-05
+    motion_xyz_step_extent: 1.0e-06
     new_logscale_step: 0.001
     new_max_screen_size: 20.0
     new_opacity_step: 0.01
@@ -93,17 +110,24 @@ module:
     new_xyz_step_extent: 1.0e-05
     opacity_keep_threshold: 0.01
     opacity_support_temperature: 0.05
-    region_rotation_lr: 0.0005
+    region_rotation_lr: 5.0e-05
     region_translation_lr: 0.0005
     shared_warmup_steps: 0
-    storage_loss_weight: 0.001
+    storage_loss_weight: 0.0
     storage_only: true
-    storage_ramp_steps: 50
-    storage_warmup_steps: 30
+    storage_ramp_steps: 20
+    storage_warmup_steps: 100
     tree_rebuild_interval: 5
     tree_rebuild_neighbors: 3
-    motion_gradient_mode: hard_path
-    motion_gradient_warmup_steps: 50
+    motion_gradient_mode: all_split
+    reset_keep_gate_priors: false
+    gs_activity_loss_weight: 0.0
+    refine_lr_scale: 0.1
+    rebase_on_hardening: true
+    m_initial_gate_logit: 0.0
+    m_fine_sharing: true
+    m_fine_gate_lr: 0.02
+    m_hard_forward: false
   random_background: false
   renderer:
     compute_cov3D_python: false
@@ -112,6 +136,11 @@ module:
     debug_from: -1
   saving_gs_frames:
   - 5
+  - 10
+  - 50
+  - 100
+  - 200
+  - 299
   saving_gs_steps: []
   selective_diagnostics_config: null
   sh_degree: 1
@@ -124,10 +153,12 @@ trainer:
   num_init_steps: 15000
   saving_ckpt_frames:
   - 5
+  - 10
+  - 50
+  - 100
+  - 200
+  - 299
   saving_ckpt_steps: []
   selective_console_mode: compact
-  testing_steps:
-  - 30
-  - 150
-  - 200
+  testing_steps: []
 random_seed: 0

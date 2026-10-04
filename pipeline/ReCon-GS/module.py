@@ -16,6 +16,7 @@ from libgs.pipeline import ModuleConfig as BaseModuleConfig
 from libgs.renderer import Renderer, RendererConfig
 from libgs.renderer.network_gui import interact_with_gui
 from libgs.utils.time import Timer
+from libgs.utils.general import quaternion_multiply
 
 from .data import DataModule
 from .model.deformation import Deformation, DeformConfig
@@ -26,14 +27,18 @@ from .model.selective_diagnostics import summarize, concise
 from .model.learned_selective import LearnedSelectiveMotion, LearnedSelectiveConfig
 from .model.residual_motion import (QuantizedResidualConfig, QuantizedResidualMotion,
     QuantizedNewGaussianView, RAW_FIELDS, RAW_ATTRIBUTES,
-    model_raw, materialize_quantized_gaussians, reference_digest, survivor_rows)
+    model_raw, materialize_quantized_gaussians, reference_digest, survivor_rows,
+    inverse_unit_quaternion)
 from .model.gated_residual import GatedResidualMotion, actual_motion_statistics
+from .model.sparse_hierarchical import SparseHierarchicalConfig, SparseHierarchicalMotion
 
 import json
 import csv
 import numpy as np
 import time
 import math
+
+QUANTIZED_MOTION_MODES = {'quantized_residual', 'sparse_hierarchical'}
 
 @dataclass
 class GaussianConfig:
@@ -119,6 +124,7 @@ class ModuleConfig(BaseModuleConfig):
     selective_motion: SelectiveMotionConfig = field(default_factory=SelectiveMotionConfig)
     learned_selective_motion: LearnedSelectiveConfig = field(default_factory=LearnedSelectiveConfig)
     quantized_residual: QuantizedResidualConfig = field(default_factory=QuantizedResidualConfig)
+    sparse_hierarchical: SparseHierarchicalConfig = field(default_factory=SparseHierarchicalConfig)
     quantized_diagnostics: QuantizedDiagnosticsConfig = field(default_factory=QuantizedDiagnosticsConfig)
     selective_diagnostics_config: Optional[str] = 'config/diagnostics/selective_motion.yaml'
 
@@ -144,8 +150,8 @@ class Module(BaseModule):
                 else self.config.selective_motion)
 
     def setup(self):
-        if self.config.motion_mode not in {'legacy', 'selective', 'learned_selective', 'quantized_residual'}:
-            raise ValueError('motion_mode must be legacy, selective, learned_selective or quantized_residual')
+        if self.config.motion_mode not in {'legacy', 'selective', 'learned_selective', *QUANTIZED_MOTION_MODES}:
+            raise ValueError('Unsupported motion_mode')
         if self.config.sparse_export_index_encoding not in {'per_row', 'shared_table'}:
             raise ValueError('sparse_export_index_encoding must be per_row or shared_table')
         if self.config.motion_mode in {'selective', 'learned_selective'}:
@@ -159,16 +165,27 @@ class Module(BaseModule):
             self.selective = (LearnedSelectiveMotion(self.motion_config) if self.config.motion_mode == 'learned_selective'
                               else SelectiveMotion(self.motion_config))
             self.change_reference = {}
-        if self.config.motion_mode == 'quantized_residual':
-            cfg = self.config.quantized_residual
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES:
+            cfg = (self.config.sparse_hierarchical
+                   if self.config.motion_mode == 'sparse_hierarchical'
+                   else self.config.quantized_residual)
+            # Shared post-processing and birth code consumes one residual-config
+            # alias. Keep old quantized mode pointed at its original config.
+            self.config.quantized_residual = cfg
             cfg.validate()
             self.config.quantized_diagnostics.validate()
             if self.trainer.config.num_incr_steps != cfg.total_steps or self.config.deformation.num_stage1_steps != cfg.motion_steps:
                 raise ValueError('Quantized residual budgets must agree with trainer and deformation stage boundary')
             if self.config.random_background:
                 raise ValueError('Quantized residual comparisons require a fixed background')
-            self.residual_motion = (GatedResidualMotion(cfg) if cfg.enable_learned_gates
-                                    else QuantizedResidualMotion(cfg))
+            if self.config.motion_mode == 'sparse_hierarchical':
+                if self.config.selective_diagnostics_config is not None:
+                    raise ValueError('sparse_hierarchical does not support legacy selective overlays; '
+                                     'set selective_diagnostics_config: null')
+                self.residual_motion = SparseHierarchicalMotion(cfg)
+            else:
+                self.residual_motion = (GatedResidualMotion(cfg) if cfg.enable_learned_gates
+                                        else QuantizedResidualMotion(cfg))
             self.quant_previous_new_count = 0
             self.quant_first_frame_gs_count = None
             self.quant_previous_reference = None
@@ -201,7 +218,7 @@ class Module(BaseModule):
     def on_save_checkpoint(self, ckpt: dict):
         ckpt["gaussians"] = self.gaussians.capture()
         if not self.trainer.is_first_frame:
-            if self.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual'} and self.gaussians_incr.optimizer is None:
+            if self.config.motion_mode in {'selective', 'learned_selective', *QUANTIZED_MOTION_MODES} and self.gaussians_incr.optimizer is None:
                 ckpt['gaussians_incr'] = None
             else:
                 ckpt["gaussians_incr"] = self.gaussians_incr.capture()
@@ -211,8 +228,8 @@ class Module(BaseModule):
             if self.config.motion_mode == 'learned_selective':
                 ckpt['learned_change_reference'] = self.change_reference
 
-        if self.config.motion_mode == 'quantized_residual':
-            ckpt['motion_mode'] = 'quantized_residual'
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES:
+            ckpt['motion_mode'] = self.config.motion_mode
             ckpt['quantized_residual_motion'] = self.residual_motion.capture()
             ckpt['quantized_frame_state'] = dict(previous_new_count=self.quant_previous_new_count,
                 first_frame_gs_count=self.quant_first_frame_gs_count, previous_reference=self.quant_previous_reference,
@@ -222,18 +239,18 @@ class Module(BaseModule):
                 point_birth_frame=self.quant_point_birth_frame)
 
     def on_load_checkpoint(self, ckpt: dict):
-        if (not self.trainer.is_first_frame and ckpt.get('motion_mode') == 'quantized_residual'
-                and self.config.motion_mode != 'quantized_residual'):
-            raise ValueError('Incremental quantized residual checkpoint cannot resume a different motion mode')
+        if (not self.trainer.is_first_frame and ckpt.get('motion_mode') in QUANTIZED_MOTION_MODES
+                and self.config.motion_mode != ckpt.get('motion_mode')):
+            raise ValueError('Incremental quantized checkpoint cannot resume a different motion mode')
         self.gaussians.restore(ckpt["gaussians"], self.config.gaussian)
         if not self.trainer.is_first_frame:
-            if self.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual'} and ckpt.get('gaussians_incr') is None:
+            if self.config.motion_mode in {'selective', 'learned_selective', *QUANTIZED_MOTION_MODES} and ckpt.get('gaussians_incr') is None:
                 self.gaussians_incr = GaussianModel(self.config.sh_degree)
             else:
                 self.gaussians_incr.restore(
                     ckpt["gaussians_incr"], self.config.gaussian_stage2
                 )
-        if self.config.motion_mode == 'quantized_residual':
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES:
             packet = ckpt.get('quantized_residual_motion')
             if not self.trainer.is_first_frame and packet is None:
                 raise ValueError('Incremental quantized residual resume requires matching motion-mode checkpoint')
@@ -291,10 +308,21 @@ class Module(BaseModule):
         The caller must advance the base Gaussian state to the start of this
         frame. The optional PLY contains only this frame's newly added points.
         """
-        if not isinstance(self.deform, GatedFourDeformation):
-            raise RuntimeError("Sparse gated-four playback requires GatedFourDeformation")
-        field = GatedFourDeformation.decode_export_motion(motion_path)
         base = self.gaussians.get_xyz_ori
+        if getattr(self.config, 'motion_mode', 'legacy') == 'sparse_hierarchical':
+            moved_xyz, moved_rotation = SparseHierarchicalMotion.decode_export_motion(
+                motion_path, base, self.gaussians._rotation)
+            moved_xyz = torch.as_tensor(moved_xyz, device=base.device, dtype=base.dtype)
+            moved_rotation = torch.as_tensor(moved_rotation, device=base.device, dtype=base.dtype)
+            base_rotation = self.gaussians.get_rotation
+            delta_rotation = quaternion_multiply(
+                inverse_unit_quaternion(base_rotation), moved_rotation)
+            field = torch.cat((moved_xyz - base,
+                               torch.nn.functional.normalize(delta_rotation, dim=-1)), dim=-1)
+        else:
+            if not isinstance(self.deform, GatedFourDeformation):
+                raise RuntimeError("Sparse gated-four playback requires GatedFourDeformation")
+            field = GatedFourDeformation.decode_export_motion(motion_path)
         if field.shape != (len(base), 7):
             raise ValueError(f"Sparse motion has shape {field.shape}; expected ({len(base)}, 7)")
         motion = torch.as_tensor(field, dtype=base.dtype, device=base.device).contiguous()
@@ -376,7 +404,7 @@ class Module(BaseModule):
 
         results = {}
         if not self.trainer.is_first_frame:
-            if self.config.motion_mode == 'quantized_residual':
+            if self.config.motion_mode in QUANTIZED_MOTION_MODES:
                 return self.forward_quantized_residual(viewpoint, training=training, **kwargs)
             if self.config.motion_mode in {'selective', 'learned_selective'} and not self.selective.committed:
                 stage, owner = self.selective.stage(self.global_step)
@@ -424,10 +452,18 @@ class Module(BaseModule):
         if self.trainer.is_first_step:
             self.timer.clock("frame").start()
 
+        if (not self.trainer.is_first_frame and
+                self.config.motion_mode == 'sparse_hierarchical' and
+                self.global_step == (self.config.sparse_hierarchical.dense_fit_steps +
+                                     self.config.sparse_hierarchical.gate_compress_steps + 1)):
+            # Finish the training phase transition before its read-only probe.
+            self.residual_motion._configure_phase(self.global_step)
+            self.quantized_quality_snapshot('after_gate_hardening')
+
         if not self.trainer.is_first_frame and self.trainer.is_first_step:
             self.timer.clock("frame setup").start()
             num_incr_gs = self.gaussians_incr.get_xyz.shape[0]
-            if self.config.motion_mode == 'quantized_residual':
+            if self.config.motion_mode in QUANTIZED_MOTION_MODES:
                 self.prepare_quantized_frame()
                 self.timer.clock('frame setup').stop()
                 return
@@ -488,7 +524,7 @@ class Module(BaseModule):
             self.renderer.gaussians = self.gaussians
             self.timer.clock("frame setup").stop()
 
-        if self.config.motion_mode == 'quantized_residual' and not self.trainer.is_first_frame:
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES and not self.trainer.is_first_frame:
             return
         if self.config.motion_mode == 'learned_selective' and not self.trainer.is_first_frame:
             if self.global_step > self.motion_config.warmup_steps + self.motion_config.joint_steps and not self.selective.selected:
@@ -524,7 +560,7 @@ class Module(BaseModule):
             self.gaussians.update_learning_rate(current_step)
         elif (current_stage2_step := current_step - num_stage1_steps) > 0:
             self.gaussians_incr.update_learning_rate(current_stage2_step)
-            if self.config.motion_mode == 'quantized_residual' and current_stage2_step == 1:
+            if self.config.motion_mode in QUANTIZED_MOTION_MODES and current_stage2_step == 1:
                 self.quant_birth_control['stage2_optimizer_lrs'] = {
                     group['name']: float(group['lr']) for group in self.gaussians_incr.optimizer.param_groups}
 
@@ -550,7 +586,7 @@ class Module(BaseModule):
             "loss/rgb": loss_rgb,
             "loss/dssim": loss_dssim,
             "psnr": psnr(image, gt_image).mean().double(),
-            "gs": (len(render_pkg["radii"]) if self.config.motion_mode == "quantized_residual"
+            "gs": (len(render_pkg["radii"]) if self.config.motion_mode in QUANTIZED_MOTION_MODES
                    else self.renderer.gaussians.get_xyz.shape[0]),
         }
 
@@ -586,14 +622,31 @@ class Module(BaseModule):
                 self.selective.last_metrics['incremental_loss_dssim'] = float(loss_dssim.detach())
                 self.selective.last_metrics['incremental_step'] = current_step
 
-        if self.config.motion_mode == 'quantized_residual' and not self.trainer.is_first_frame:
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES and not self.trainer.is_first_frame:
             render_pkg['quantized_started'] = selective_started
             cfg = self.config.quantized_residual
-            storage, storage_details = self.quantized_storage(render_pkg.get('quantized_new_view'))
+            storage_active = (self.config.motion_mode != 'sparse_hierarchical' or
+                              self.residual_motion.stage(current_step) in
+                              {'gate_compress', 'incremental'})
+            storage_weight = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
+                              if storage_active else 0.)
+            if self.config.motion_mode == 'sparse_hierarchical':
+                # Temporarily disable this mode's storage training computation,
+                # including soft diagnostics, until its numerical checks pass.
+                # storage, storage_details = self.quantized_storage(
+                #     render_pkg.get('quantized_new_view'))
+                storage_weight = 0.
+                storage = loss_rgb.new_zeros(())
+                storage_details = {}
+            else:
+                # Preserve the existing storage path for other motion modes.
+                with torch.set_grad_enabled(torch.is_grad_enabled() and storage_weight > 0):
+                    storage, storage_details = self.quantized_storage(render_pkg.get('quantized_new_view'))
             reference_bytes = self.residual_motion.reference_storage_bytes(self.quant_first_frame_gs_count)
-            loss_storage = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
-                            * storage / reference_bytes)
-            loss = loss + loss_storage
+            loss_storage = loss_rgb.new_zeros(())
+            if storage_weight > 0:
+                loss_storage = storage_weight * storage / reference_bytes
+                loss = loss + loss_storage
             loss_activity = loss_storage.new_zeros(())
             if cfg.gs_activity_loss_weight > 0:
                 if self.residual_motion.committed:
@@ -617,7 +670,8 @@ class Module(BaseModule):
             metrics['storage/reference_bytes'] = loss_rgb.new_tensor(reference_bytes)
             metrics['loss/storage'] = loss_storage
             loss_candidate = loss_storage.new_zeros(())
-            if (not self.residual_motion.committed and cfg.keep_candidate_fit_due(current_step)):
+            if (self.config.motion_mode != 'sparse_hierarchical' and
+                    not self.residual_motion.committed and cfg.keep_candidate_fit_due(current_step)):
                 candidate = self.keep_candidate_image_loss(viewpoint)
                 if candidate is not None:
                     loss_candidate = cfg.keep_candidate_fit_weight * candidate
@@ -773,7 +827,7 @@ class Module(BaseModule):
         self, render_pkg, gate_progress: Optional[Callable[[str], None]] = None
     ):
         num_stage1_steps = self.deform.config.num_stage1_steps
-        if self.config.motion_mode == 'quantized_residual':
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES:
             self.post_quantized_residual(render_pkg)
             return
         if self.config.motion_mode in {'selective', 'learned_selective'}:
@@ -985,7 +1039,18 @@ class Module(BaseModule):
         original_xyz = getattr(self.gaussians, 'rigid_xyz', None)
         original_rot = getattr(self.gaussians, 'rigid_rotation', None)
         if not preserve_motion:
-            self.gaussians.rigid_xyz = self.gaussians.rigid_rotation = None
+            mode = getattr(self.config, 'motion_mode', 'legacy')
+            motion = getattr(self, 'residual_motion', None)
+            can_probe_sparse_motion = (
+                mode == 'sparse_hierarchical' and
+                stage not in {'before_deletion', 'after_deletion'} and
+                motion is not None and getattr(motion, 'index', None) is not None and
+                not getattr(motion, 'committed', True))
+            if can_probe_sparse_motion:
+                self.gaussians.rigid_xyz, self.gaussians.rigid_rotation = self.residual_motion(
+                    self.global_step, training=False)
+            else:
+                self.gaussians.rigid_xyz = self.gaussians.rigid_rotation = None
         result = {}
         try:
             self.renderer.gaussians = (self.gaussians if view is None else
@@ -1037,13 +1102,19 @@ class Module(BaseModule):
     def save_quantized_control_diagnostics(self):
         path = self.output_dir / 'frame_summary' / f'control_{self.current_frame:03d}.json'
         path.parent.mkdir(parents=True, exist_ok=True)
+        mode = getattr(self.config, 'motion_mode', 'legacy')
+        semantics = ('Sparse hierarchical snapshots use direct soft-gated image forwards in dense/compress '
+                     'and the fixed binary gates in refine. The m/z diagnostics are independent binary gates; '
+                     'they are not KEEP/SHARE/SPLIT states.'
+                     if mode == 'sparse_hierarchical' else
+                     'Quality snapshots use all train/test cameras. Image objective is the unclamped training '
+                     'L1/DSSIM objective without storage; PSNR/SSIM/L1 use clamped images. Gradient summaries '
+                     'are combined-loss gradients before optimizer.step at sampled steps; gate changes are '
+                     'between sampled steps. No background mask.')
         path.write_text(json.dumps(dict(frame=self.current_frame,
             motion_gradient_mode=self.config.quantized_residual.motion_gradient_mode,
             quality=self.quant_control_diagnostics, gradients=self.quant_gradient_diagnostics,
-            semantics='Quality snapshots use all train/test cameras. Image objective is the '
-                'unclamped training L1/DSSIM objective without storage; PSNR/SSIM/L1 use clamped '
-                'images. Gradient summaries are combined-loss gradients before optimizer.step '
-                'at sampled steps; gate changes are between sampled steps. No background mask.'), indent=2))
+            semantics=semantics), indent=2))
 
     @torch.no_grad()
     def record_quantized_gradients(self):
@@ -1052,15 +1123,33 @@ class Module(BaseModule):
         motion = self.residual_motion
         groups = {f'region_translation_{i}': p for i, p in enumerate(motion.region_translation)}
         groups.update({f'region_rotation_{i}': p for i, p in enumerate(motion.region_rotation)})
-        groups.update({f'gate_{i}': p for i, p in enumerate(motion.gate_logits)})
+        if self.config.motion_mode == 'sparse_hierarchical':
+            groups.update(m_gate=motion.m_logits, z_local=motion.z_local_logits)
+            if motion.config.m_fine_sharing:
+                groups['m_fine_gate'] = motion.m_fine_logits
+            groups.update({f'z_region_{i}': p for i, p in enumerate(motion.z_region_logits)})
+        else:
+            groups.update({f'gate_{i}': p for i, p in enumerate(motion.gate_logits)})
         groups.update(gs_translation=motion.gs_translation, gs_rotation=motion.gs_rotation)
         gradients = {}
         for name, parameter in groups.items():
             grad = parameter.grad
+            if grad is None:
+                nonzero_rows = None
+            elif grad.ndim == 1:
+                nonzero_rows = int((grad != 0).sum())
+            else:
+                nonzero_rows = int((grad.abs().sum(-1) > 0).sum())
             gradients[name] = (None if grad is None else dict(
                 l2=float(grad.norm()), max_abs=float(grad.abs().max()),
-                nonzero_rows=int((grad.abs().sum(-1) > 0).sum()), rows=len(grad)))
-        states = [s.cpu().clone() for s in motion.gate_state_arrays()['states']]
+                nonzero_rows=nonzero_rows, rows=len(grad)))
+        if self.config.motion_mode == 'sparse_hierarchical':
+            masks = motion._hard_masks_for_step(self.global_step)
+            states = [masks['m'].cpu().clone(),
+                      *[value.cpu().clone() for value in masks['z_regions']],
+                      masks['z_local'].cpu().clone()]
+        else:
+            states = [s.cpu().clone() for s in motion.gate_state_arrays()['states']]
         previous = getattr(self, 'quant_last_sampled_gates', None)
         changes = ([int((a != b).sum()) for a, b in zip(states, previous)]
                    if previous is not None else None)
@@ -1248,6 +1337,11 @@ class Module(BaseModule):
             stage = render_pkg['quantized_stage']
             self.trainer.synchronize()
             motion.stage_seconds[stage] = motion.stage_seconds.get(stage, 0.) + time.perf_counter() - render_pkg['quantized_started']
+            if self.config.motion_mode == 'sparse_hierarchical':
+                if self.global_step == cfg.dense_fit_steps:
+                    self.quantized_quality_snapshot('after_dense_fit')
+                elif self.global_step == cfg.dense_fit_steps + cfg.gate_compress_steps:
+                    self.quantized_quality_snapshot('after_gate_compress_soft')
             if self.global_step == cfg.motion_steps:
                 xyz, rotation = motion(self.global_step)
                 self.gaussians.apply_selected_motion(xyz, rotation)
@@ -1324,6 +1418,13 @@ class Module(BaseModule):
         expected_storage, expected_parts = self.quantized_storage(view)
         hard_storage, hard_parts = self.quantized_storage(view, hard=True)
         reference_bytes = self.residual_motion.reference_storage_bytes(self.quant_first_frame_gs_count)
+        motion_export = None
+        incremental_export = None
+        frame_manifest = None
+        if self.config.motion_mode == 'sparse_hierarchical':
+            storage_dir = self.output_dir / 'frame_storage' / 'sparse_hierarchical'
+            motion_path = storage_dir / f'motion_{self.current_frame:03d}.npz'
+            motion_export = self.residual_motion.export_motion(motion_path)
         self.quant_birth_control['final_candidate_count'] = (
             len(self.gaussians_incr.get_xyz) if cfg.enable_incremental else 0)
 
@@ -1334,6 +1435,35 @@ class Module(BaseModule):
         if cfg.enable_learned_gates:
             self.residual_motion.register_materialized_layout(raw['xyz'], retained_sources)
         self.install_quantized_raw(raw)
+        if self.config.motion_mode == 'sparse_hierarchical' and retained_count:
+            birth_model = GaussianModel(self.config.sh_degree)
+            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
+                setattr(birth_model, attr, torch.nn.Parameter(raw[name][-retained_count:].detach().clone()))
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            incremental_path = storage_dir / f'incremental_{self.current_frame:03d}.ply'
+            birth_model.save_ply(incremental_path)
+            incremental_export = dict(path=str(incremental_path),
+                                      archive_bytes=incremental_path.stat().st_size,
+                                      rows=retained_count)
+        if self.config.motion_mode == 'sparse_hierarchical':
+            manifest_path = storage_dir / f'frame_{self.current_frame:03d}.json'
+            manifest = dict(
+                layout_version='independent_binary_hierarchical_motion_v1',
+                frame=self.current_frame,
+                playback_scope=('Single-frame post-deletion motion override plus this frame\'s birth PLY. '
+                    'First confirm previous_reference_sha256 against the previous materialized Gaussian state; '
+                    'then apply deleted_indices and confirm motion_base_digest against the post-deletion base '
+                    'before decoding motion. This manifest does not implement automatic sequential playback.'),
+                previous_reference_sha256=self.quant_previous_sha256,
+                motion_base_digest=self.residual_motion._base_digest(),
+                deleted_indices=self.quant_deleted_indices.detach().cpu().to(torch.int32).tolist(),
+                deleted_indices_dtype='int32',
+                deleted_indices_payload_bytes=int(self.quant_deleted_indices.numel() * 4),
+                motion_export=motion_export,
+                incremental_export=incremental_export)
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+            frame_manifest = dict(path=str(manifest_path), archive_bytes=manifest_path.stat().st_size,
+                                  deleted_indices_payload_bytes=manifest['deleted_indices_payload_bytes'])
         self.quantized_quality_snapshot('after_retention')
         self.trainer.synchronize()
         state_update_seconds = time.perf_counter() - state_started
@@ -1363,15 +1493,39 @@ class Module(BaseModule):
             if not cfg.enable_learned_gates:
                 raise ValueError('Actual motion diagnostics require gated motion')
             xyz, rotation = self.residual_motion(cfg.motion_steps)
+            terminal = (self.residual_motion._hard_masks_for_step(cfg.motion_steps)['m'].long()
+                        if self.config.motion_mode == 'sparse_hierarchical'
+                        else self.residual_motion.gate_state_arrays()['gs_terminal'])
             actual_motion = actual_motion_statistics(
                 self.residual_motion.base_xyz, self.residual_motion.base_rotation,
                 xyz, rotation, self.residual_motion.extent,
                 diagnostics.translation_extent_thresholds,
                 diagnostics.rotation_radian_thresholds,
-                self.residual_motion.gate_state_arrays()['gs_terminal'])
-        self.quant_report = dict(
-            frame=self.current_frame, storage_only=True,
-            candidate_fit=dict(mode=cfg.motion_gradient_mode,
+                terminal)
+            if self.config.motion_mode == 'sparse_hierarchical':
+                actual_motion['semantics'] = ('m=0 rows are exact previous poses; m=1 rows use the '
+                    'quantized hierarchical candidate. This is binary m reporting, not a KEEP/SHARE/SPLIT cut.')
+        sparse_mode = self.config.motion_mode == 'sparse_hierarchical'
+        if sparse_mode:
+            candidate_fit_report = dict(enabled=False, extra_renders=0,
+                semantics='Disabled in sparse_hierarchical v1. Gate compression receives its image loss '
+                          'through the same direct soft-gated rendering graph.')
+            motion_gradient_report = dict(
+                stages=dict(dense_fit='all m/z forced open; optimize motion only',
+                            gate_compress='freeze motion; optimize soft m/z with direct rendering and storage',
+                            gate_refine='freeze thresholded m/z; optimize selected motion only',
+                            incremental='freeze motion/gates; fit retained newborn Gaussians'),
+                semantics='The current phase is selected from the explicit training step. No hard-pose '
+                          'soft-gate Jacobian proxy or KEEP/SHARE/SPLIT gradient schedule is used.')
+            method_semantics = (
+                'Independent binary hierarchy. Every region has an independent z residual gate; a child z=1 '
+                'can add motion even when its parent z=0. Local z controls each GS residual. Final m=0 returns '
+                'the exact base xyz and rotation. Motion is composed coarse to fine around parent-advected pivots, '
+                'then the per-GS residual is applied. The m tree uses short all-off/all-on tags or recursive mixed tags. '
+                'm storage is not monotonic in the number of moving GSs, and this model does not establish that '
+                'storage alone replaces an activity objective.' )
+        else:
+            candidate_fit_report = dict(mode=cfg.motion_gradient_mode,
                 interval=cfg.keep_candidate_fit_interval, weight=cfg.keep_candidate_fit_weight,
                 extra_renders=int(self.residual_motion.last_metrics.get('candidate_fit/extra_renders', 0)),
                 forward_loss_seconds=self.residual_motion.last_metrics.get('candidate_fit/forward_loss_seconds', 0.),
@@ -1379,13 +1533,41 @@ class Module(BaseModule):
                 image_loss_sum=self.residual_motion.last_metrics.get('candidate_fit/image_loss_sum', 0.),
                 semantics='Extra candidate render shares this step training view; only reachable KEEP '
                           'terminal motion fits its own image objective. Gate/active motion detached. '
-                          'Forward time excludes auxiliary backward; full training time includes it.'),
+                          'Forward time excludes auxiliary backward; full training time includes it.')
+            motion_gradient_report = dict(
+                configured_mode=cfg.motion_gradient_mode,
+                all_split_warmup_steps=cfg.motion_gradient_warmup_steps,
+                semantics=('Use all candidate motion Jacobians through the warmup step, then the configured mode. '
+                           'Hard forward poses and the gate proxy are unchanged; this schedule affects only motion '
+                           'parameter gradients during differentiable training forwards. keep_probe fits SHARE '
+                           'candidates at reachable KEEP terminals while retaining learned gate priors; '
+                           'KEEP and SHARE both stop descent, so unvisited descendants stay closed. '
+                           'keep_local_probe additionally detaches ancestor pose/pivots only for a '
+                           'descendant KEEP terminal candidate, preserving its own SHARE probe gradient.'))
+            method_semantics = ('Learned KEEP/SHARE/SPLIT hierarchy with optional periodic spatial rebuild. '
+                'Rebuild inherits same-level KNN motion priors and gates by surviving member overlap; '
+                'otherwise region membership persists. KEEP cancels all ancestor motion; '
+                'SHARE closes descendants; SPLIT retains shared rigid motion and opens children/local residuals. '
+                'Region rotations move centers around parent-advected pivots. Only reachable branches carry motion.'
+                if cfg.enable_learned_gates else
+                'Fixed nested spatial candidates with dense quantized residual-motion tensors. '
+                'Position offsets add; world orientation composes coarse, middle, fine, then GS residual.')
+
+        self.quant_report = dict(
+            frame=self.current_frame, storage_only=True,
+            candidate_fit=candidate_fit_report,
             state_update_seconds=state_update_seconds,
             expected_storage_bytes=float(expected_storage),
             hard_storage_bytes=float(hard_storage),
             storage_bytes_by_class={name: float(value) for name, value in hard_parts.items()},
             expected_storage_bytes_by_class={name: float(value) for name, value in expected_parts.items()},
             reference_storage_bytes=reference_bytes,
+            motion_export=motion_export,
+            incremental_export=incremental_export,
+            frame_manifest=frame_manifest,
+            storage_gate_bits=(self.residual_motion.storage_bit_counts(
+                self.global_step, hard=True)
+                if self.config.motion_mode == 'sparse_hierarchical' else None),
             gs_activity_cost=(dict(
                 weight=cfg.gs_activity_loss_weight,
                 expected_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step)),
@@ -1395,8 +1577,16 @@ class Module(BaseModule):
                 semantics='Expected changed old-GS fraction over full quantized terminal poses; '
                           'KEEP and canceled candidate poses cost zero. Geometry support is detached; '
                           'only gate probabilities receive this cost gradient. No masks or visibility oracle.')
-                if cfg.enable_learned_gates else None),
-            storage_semantics=('Estimated effective parameter bytes: reachable gate states, SHARE/SPLIT region motion, '
+                if cfg.enable_learned_gates and self.config.motion_mode != 'sparse_hierarchical' else None),
+            storage_semantics=('Expected m-tree code length uses independent Bernoulli mean-field probabilities '
+                'and includes both uniform-off and uniform-on short codes. Hard estimate and exported bitstreams '
+                'use the same recursive 2-bit node tags and a mixed fine-region GS bitmap. Region z bits are '
+                'stored only where at least one m=1 GS reaches the region; local z bits only for m=1 rows. '
+                'Motion payload slots are six int32 symbols (24 bytes) for each relevant z=1 region/local row. '
+                'Uniform m=1 regions can be cheaper than mixed masks, so this rate is not monotonic in moved-GS count. '
+                'The archive file size is reported separately; tree membership and packet headers are excluded.'
+                if self.config.motion_mode == 'sparse_hierarchical' else
+                'Estimated effective parameter bytes: reachable gate states, SHARE/SPLIT region motion, '
                 'open GS residuals, retained newborn raw attributes and int32 source, and int32 deletions. '
                 'Hierarchy membership is deterministically reconstructed from the previous materialized GS, '
                 'ordered surviving rows, configured rebuild interval and stable_layout algorithm; no membership '
@@ -1409,16 +1599,7 @@ class Module(BaseModule):
             activities=self.residual_motion.statistics(),
             actual_motion=actual_motion,
             gate_policy=cfg.gate_policy,
-            motion_gradient_schedule=dict(
-                configured_mode=cfg.motion_gradient_mode,
-                all_split_warmup_steps=cfg.motion_gradient_warmup_steps,
-                semantics=('Use all candidate motion Jacobians through the warmup step, then the configured mode. '
-                           'Hard forward poses and the gate proxy are unchanged; this schedule affects only motion '
-                           'parameter gradients during differentiable training forwards. keep_probe fits SHARE '
-                           'candidates at reachable KEEP terminals while retaining learned gate priors; '
-                           'KEEP and SHARE both stop descent, so unvisited descendants stay closed. '
-                           'keep_local_probe additionally detaches ancestor pose/pivots only for a '
-                           'descendant KEEP terminal candidate, preserving its own SHARE probe gradient.')),
+            motion_gradient_schedule=motion_gradient_report,
             last_training_metrics=dict(self.residual_motion.last_metrics),
             stage_seconds=None,
             new_count=retained_count,
@@ -1426,15 +1607,7 @@ class Module(BaseModule):
             normalization_first_frame_gs=self.quant_first_frame_gs_count,
             birth_control=self.quant_birth_control,
             tree_setup=(self.residual_motion.tree_setup if cfg.enable_learned_gates else None),
-            method_semantics=('Learned KEEP/SHARE/SPLIT hierarchy with optional periodic spatial rebuild. '
-                'Rebuild inherits same-level KNN motion priors and gates by surviving member overlap; '
-                'otherwise region membership persists. '
-                'KEEP cancels all ancestor motion; '
-                'SHARE closes descendants; SPLIT retains shared rigid motion and opens children/local residuals. '
-                'Region rotations move centers around parent-advected pivots. Only reachable branches carry motion.'
-                if cfg.enable_learned_gates else
-                'Fixed nested spatial candidates with dense quantized residual-motion tensors. '
-                'Position offsets add; world orientation composes coarse, middle, fine, then GS residual.'),
+            method_semantics=method_semantics,
             timing_semantics=('frame_prepare includes deletion/layout; layout is a subcomponent. '
                 'tree_topology and tree_initialization are inside layout; tree_rebuild is their sum only on rebuild '
                 'frames and must not be added again. Topology includes row/pose validation and pivots. '
@@ -1664,7 +1837,7 @@ class Module(BaseModule):
             self.timer.clock("frame").stop()
             if not self.trainer.is_first_frame:
                 num_incr_gs = (self.quant_report['new_count']
-                               if self.config.motion_mode == 'quantized_residual'
+                               if self.config.motion_mode in QUANTIZED_MOTION_MODES
                                else self.gaussians_incr.get_xyz.shape[0])
                 self.trainer.routine_info(f"Number of incremental gaussians: {num_incr_gs}")
                 if self.config.motion_mode == 'legacy' and isinstance(self.deform, GatedFourDeformation):
@@ -1714,7 +1887,7 @@ class Module(BaseModule):
             self.timer.reset()
 
     def save_selective_image_diagnostics(self, viewpoint, image_path, camera_name):
-        if self.config.motion_mode == 'quantized_residual':
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES:
             self.save_quantized_image_diagnostics(viewpoint, image_path, camera_name)
             return
         if self.config.motion_mode == 'legacy':
@@ -1862,7 +2035,7 @@ class Module(BaseModule):
         filename = f"gaussians-{self.current_frame}-{self.global_step}.ply"
         save_path = self.output_dir / "point_cloud" / filename
         self.trainer.routine_info(f"Save gaussians to {save_path}")
-        if self.trainer.is_first_frame or self.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual'}:
+        if self.trainer.is_first_frame or self.config.motion_mode in {'selective', 'learned_selective', *QUANTIZED_MOTION_MODES}:
             self.gaussians.save_ply(save_path)
         else:
             self.gaussians_incr.save_ply(save_path)
