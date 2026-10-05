@@ -145,13 +145,19 @@ class Trainer(BaseTrainer):
                 f'{row["denominator"]}' for row in activity['levels'])
             logging.info(
                 '帧 %d 独立门控最终评估 | %s | 纯训练=%.2fs 本帧总计=%.2fs | '
-                '参数与门掩码=%.2f KiB（模型估算） | '
+                '必要参数=%.2f KiB（含门/层级/中心）密集训练参数=%.2f KiB | '
                 '旧GS=%d m开=%d m关=%d local z开=%d | %s | 新增=%d 删除=%d',
                 self.current_frame, quality, clocks['training'], clocks['wall'],
                 stream['hard_storage_bytes'] / 1024,
+                stream.get('dense_motion_training_parameter_bytes', 0.) / 1024,
                 gs['denominator'], gs['m_open'], gs['m_closed'], gs['local_z_on'],
                 ratios, stream['new_count'], stream['deleted_count'])
             logging.info('门控语义 | 各层z独立；m关闭精确保持上一帧位姿；门开启数不等于实际变化GS数。')
+            if stream.get('inference_file_bytes') is not None:
+                logging.info('模型存储 | 必要文件实测=%.4f MB/动态帧（含文件头；不含共享首帧） | '
+                             '格式=%s；不计图片、训练checkpoint或完整点云检查副本。',
+                             stream['inference_file_bytes'] / 1e6,
+                             stream['motion_export']['motion_export_format'])
             return
 
         def ratio(row):
@@ -299,6 +305,7 @@ class Trainer(BaseTrainer):
     def progress_label(self, phase):
         """Status text only; it does not control the training stage."""
         names = {'setup': '准备', 'initial': '首帧训练', 'motion': '运动拟合',
+                 'tree_probe': '建树探针', 'dense_fit': '运动拟合', 'gate_compress': '门压缩',
                  'soft_warmup': '预热', 'hard_joint': '联合选择', 'fixed_refine': '精修', 'fixed_leaf': '固定细区域运动',
                  'shared_warmup': '共享运动预热', 'joint_residual': '残差联合训练',
                  'gate_joint': '门控与运动联合学习', 'gate_refine': '固定门控精修',

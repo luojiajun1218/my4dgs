@@ -99,6 +99,63 @@ class ExperimentInventoryTests(unittest.TestCase):
             self.assertNotIn('stream', entry)
             self.assertNotIn('estimated_bits', rows[0])
 
+
+    def test_storage_report_keeps_selected_arrays_and_allocated_training_parameters_separate(self):
+        stream = self.storage_fixture()
+        stream.update(dense_motion_training_parameter_bytes=512,
+                      storage_accounting='uncompressed_inference_arrays_v1')
+        row = REPORT.stream_frame(Path('unused'), dict(frame=1, stream=stream))
+        self.assertEqual(row['hard_storage_bytes'], 126.)
+        self.assertEqual(row['dense_motion_training_parameter_bytes'], 512)
+        self.assertEqual(row['storage_accounting'], 'uncompressed_inference_arrays_v1')
+        self.assertNotIn('stream_bytes', row)
+        stream['dense_motion_training_parameter_bytes'] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'Dense training parameter bytes'):
+            REPORT.stream_frame(Path('unused'), dict(frame=1, stream=stream))
+
+    def test_sparse_binary_reports_keep_model_file_bytes_separate_from_debug_files(self):
+        stream = self.storage_fixture()
+        stream.update(storage_accounting='sparse_inference_arrays_v1',
+            activities=dict(gs=dict(denominator=10, m_open=2, m_closed=8, local_z_on=1, local_z_off=1),
+                levels=[dict(level=0, denominator=1, z_on_relevant_regions=1, z_off_relevant_regions=0)]),
+            motion_export=dict(archive_bytes=100), incremental_export=dict(archive_bytes=20),
+            frame_manifest=dict(archive_bytes=30), inference_file_bytes=150)
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            config = dict(trainer=dict(num_incr_steps=300, num_init_steps=15000),
+                data=dict(root='fixture', resolution=-1, extra_dataset_kwargs=dict(num_frames=2)),
+                module=dict(sh_degree=1, motion_mode='sparse_hierarchical', quantized_codec_enabled=False))
+            (run / 'config.yaml').write_text(yaml.safe_dump(config))
+            (run / 'logging.INFO').write_text('')
+            (run / 'frame_summary').mkdir()
+            report = dict(frame=1, quantized_evaluation=dict(test=dict(psnr=35., ssim=.98, l1=.01)),
+                          timing=dict(training=1., wall=2.), debug_storage=dict(total_bytes=10 ** 9), stream=stream)
+            (run / 'frame_summary/frame_001.json').write_text(json.dumps(report))
+            entry, rows, _, _ = REPORT.summarize_run(run)
+            self.assertEqual(rows[0]['gs_m_open_fraction'], .2)
+            self.assertEqual(rows[0]['storage_accounting'], 'sparse_inference_arrays_v1')
+            self.assertEqual(rows[0]['inference_file_bytes'], 150)
+            self.assertEqual(rows[0]['debug_storage_bytes'], 10 ** 9)
+            self.assertEqual(entry['inference_files']['mean_bytes'], 150)
+            self.assertEqual(entry['storage']['mean_hard_bytes'], 126.)
+            self.assertNotIn('gs_shared_fraction', rows[0])
+            del stream['inference_file_bytes']
+            historical = REPORT.stream_frame(run, dict(frame=1, stream=stream))
+            self.assertEqual(historical['inference_file_bytes'], 150)
+
+    def test_sparse_binary_reports_reject_inconsistent_activity_and_file_totals(self):
+        stream = self.storage_fixture()
+        stream['activities'] = dict(gs=dict(denominator=10, m_open=2, m_closed=8,
+                                            local_z_on=1, local_z_off=1))
+        REPORT.stream_frame(Path('unused'), dict(frame=1, stream=stream))
+        stream['activities']['gs']['m_closed'] = 7
+        with self.assertRaisesRegex(ValueError, 'Binary activity counts'):
+            REPORT.stream_frame(Path('unused'), dict(frame=1, stream=stream))
+        stream['activities']['gs']['m_closed'] = 8
+        stream.update(motion_export=dict(archive_bytes=100), inference_file_bytes=101)
+        with self.assertRaisesRegex(ValueError, 'Inference file bytes'):
+            REPORT.stream_frame(Path('unused'), dict(frame=1, stream=stream))
+
     def test_storage_console_uses_final_birth_count_and_explicit_denominators(self):
         info = Mock()
         finish_summary = load_production_method('trainer.py', 'Trainer',
@@ -129,7 +186,8 @@ class ExperimentInventoryTests(unittest.TestCase):
             fake = SimpleNamespace(
                 output_dir=Path(tmp), current_frame=2,
                 module=SimpleNamespace(quant_report=stream,
-                    config=SimpleNamespace(quantized_residual=SimpleNamespace(enable_learned_gates=True))),
+                    config=SimpleNamespace(motion_mode='quantized_residual',
+                        quantized_residual=SimpleNamespace(enable_learned_gates=True))),
                 frame_eval_metrics=dict(test=dict(psnr=35.)),
                 frame_times=dict(training=2., evaluation=1., drawing=0., saving=0.),
                 synchronize=lambda: None, frame_storage=lambda: dict(total_bytes=1024),
@@ -170,7 +228,8 @@ class ExperimentInventoryTests(unittest.TestCase):
     def test_step_console_reads_retained_births_after_incremental_buffer_reset(self):
         import torch
         post_step = load_production_method('module.py', 'Module', 'post_training_step',
-            dict(torch=torch, time=time, Optional=Optional, Callable=Callable))
+            dict(torch=torch, time=time, Optional=Optional, Callable=Callable,
+                 QUANTIZED_MOTION_MODES={'quantized_residual', 'sparse_hierarchical'}))
         info = Mock()
         fake = SimpleNamespace(
             timer=Mock(), global_step=300,

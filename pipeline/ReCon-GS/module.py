@@ -454,7 +454,8 @@ class Module(BaseModule):
 
         if (not self.trainer.is_first_frame and
                 self.config.motion_mode == 'sparse_hierarchical' and
-                self.global_step == (self.config.sparse_hierarchical.dense_fit_steps +
+                self.global_step == (self.config.sparse_hierarchical.tree_probe_steps +
+                                     self.config.sparse_hierarchical.dense_fit_steps +
                                      self.config.sparse_hierarchical.gate_compress_steps + 1)):
             # Finish the training phase transition before its read-only probe.
             self.residual_motion._configure_phase(self.global_step)
@@ -630,12 +631,8 @@ class Module(BaseModule):
                               {'gate_compress', 'incremental'})
             storage_weight = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
                               if storage_active else 0.)
-            if self.config.motion_mode == 'sparse_hierarchical':
-                # Temporarily disable this mode's storage training computation,
-                # including soft diagnostics, until its numerical checks pass.
-                # storage, storage_details = self.quantized_storage(
-                #     render_pkg.get('quantized_new_view'))
-                storage_weight = 0.
+            if self.config.motion_mode == 'sparse_hierarchical' and storage_weight <= 0:
+                # Disabled/frozen sparse phases build no storage backward graph.
                 storage = loss_rgb.new_zeros(())
                 storage_details = {}
             else:
@@ -648,7 +645,9 @@ class Module(BaseModule):
                 loss_storage = storage_weight * storage / reference_bytes
                 loss = loss + loss_storage
             loss_activity = loss_storage.new_zeros(())
-            if cfg.gs_activity_loss_weight > 0:
+            activity_active = (self.config.motion_mode != 'sparse_hierarchical' or
+                               self.residual_motion.stage(current_step) == 'gate_compress')
+            if cfg.gs_activity_loss_weight > 0 and activity_active:
                 if self.residual_motion.committed:
                     # Gates/motion are fixed during newborn fitting; reuse their final cost.
                     cached = self.residual_motion.last_metrics.get('gs_activity/committed_fraction')
@@ -957,6 +956,8 @@ class Module(BaseModule):
                 self.gaussians.rigid_xyz, self.gaussians.rigid_rotation = xyz, rotation
                 self.renderer.gaussians = self.gaussians
                 results['quantized_stage'] = motion.stage(self.global_step)
+                if training and results['quantized_stage'] == 'tree_probe':
+                    results['tree_probe_view_name'] = viewpoint.path.name
             elif (not training and self.global_step == self.config.quantized_residual.motion_steps
                   and not self.quant_finalized):
                 # Clones already exist at this boundary, but this evaluation measures old-GS motion only.
@@ -1305,7 +1306,9 @@ class Module(BaseModule):
         """Count effective motion, gate, birth and deletion parameter bytes."""
         parts = self.residual_motion.storage_parts(self.global_step, hard=hard)
         zero = next(iter(parts.values())) * 0
-        birth_bytes_per_row = 4  # int32 source among surviving old Gaussians.
+        # Raw sparse motion stores ownership directly, so a birth source used
+        # only during training is not an inference parameter in this mode.
+        birth_bytes_per_row = 0 if self.config.motion_mode == 'sparse_hierarchical' else 4
         for attr in RAW_ATTRIBUTES:
             value = getattr(self.gaussians, attr)
             birth_bytes_per_row += int(np.prod(value.shape[1:])) * value.element_size()
@@ -1323,6 +1326,10 @@ class Module(BaseModule):
         cfg = self.config.quantized_residual
         motion = self.residual_motion
         if not motion.committed:
+            if self.config.motion_mode == 'sparse_hierarchical':
+                if 'tree_probe_view_name' in render_pkg:
+                    motion.observe_tree_probe(render_pkg['visibility_filter'],
+                                              render_pkg['tree_probe_view_name'])
             motion.optimizer_step()
             self.gaussians.optimizer.zero_grad(set_to_none=True)
             birth = self.quant_birth_control
@@ -1338,9 +1345,12 @@ class Module(BaseModule):
             self.trainer.synchronize()
             motion.stage_seconds[stage] = motion.stage_seconds.get(stage, 0.) + time.perf_counter() - render_pkg['quantized_started']
             if self.config.motion_mode == 'sparse_hierarchical':
-                if self.global_step == cfg.dense_fit_steps:
+                probe_steps = getattr(cfg, 'tree_probe_steps', 0)
+                if probe_steps and self.global_step == probe_steps:
+                    self.quantized_quality_snapshot('after_tree_probe')
+                elif self.global_step == probe_steps + cfg.dense_fit_steps:
                     self.quantized_quality_snapshot('after_dense_fit')
-                elif self.global_step == cfg.dense_fit_steps + cfg.gate_compress_steps:
+                elif self.global_step == probe_steps + cfg.dense_fit_steps + cfg.gate_compress_steps:
                     self.quantized_quality_snapshot('after_gate_compress_soft')
             if self.global_step == cfg.motion_steps:
                 xyz, rotation = motion(self.global_step)
@@ -1521,9 +1531,9 @@ class Module(BaseModule):
                 'Independent binary hierarchy. Every region has an independent z residual gate; a child z=1 '
                 'can add motion even when its parent z=0. Local z controls each GS residual. Final m=0 returns '
                 'the exact base xyz and rotation. Motion is composed coarse to fine around parent-advected pivots, '
-                'then the per-GS residual is applied. The m tree uses short all-off/all-on tags or recursive mixed tags. '
-                'm storage is not monotonic in the number of moving GSs, and this model does not establish that '
-                'storage alone replaces an activity objective.' )
+                'then the per-GS residual is applied. Storage counts selected float32 motion plus plain masks '
+                'and routing arrays. A selected identity/canceled transform still costs a motion row; '
+                'the m-open activity objective is recorded separately.' )
         else:
             candidate_fit_report = dict(mode=cfg.motion_gradient_mode,
                 interval=cfg.keep_candidate_fit_interval, weight=cfg.keep_candidate_fit_weight,
@@ -1565,10 +1575,30 @@ class Module(BaseModule):
             motion_export=motion_export,
             incremental_export=incremental_export,
             frame_manifest=frame_manifest,
+            dense_motion_training_parameter_bytes=(self.residual_motion.dense_training_parameter_bytes()
+                if self.config.motion_mode == 'sparse_hierarchical' else None),
+            storage_accounting=('sparse_inference_arrays_v1'
+                if sparse_mode and cfg.motion_export_format == 'sparse_parameters' else
+                'uncompressed_inference_arrays_v1'
+                if self.config.motion_mode == 'sparse_hierarchical' else None),
+            inference_file_bytes=(sum(item['archive_bytes'] for item in
+                (motion_export, incremental_export, frame_manifest) if item is not None)
+                if sparse_mode else None),
+            inference_file_semantics=('Necessary motion NPZ, retained birth PLY and deletion/frame manifest '
+                'file bytes for this dynamic frame. Includes container headers and verification metadata; '
+                'excludes the shared first-frame model, images, full-frame debug PLYs, checkpoints and logs.'
+                if sparse_mode else None),
             storage_gate_bits=(self.residual_motion.storage_bit_counts(
                 self.global_step, hard=True)
-                if self.config.motion_mode == 'sparse_hierarchical' else None),
+                if self.config.motion_mode == 'sparse_hierarchical' and cfg.motion_export_format == 'legacy' else None),
             gs_activity_cost=(dict(
+                weight=cfg.gs_activity_loss_weight,
+                expected_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step)),
+                hard_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step, hard=True)),
+                semantics='Old-GS m-open fraction. Selected zero or canceled motion still counts; '
+                          'actual pose changes are reported separately. This cost selects m gates only '
+                          'during gate_compress; frozen phases report the committed hard mask.')
+                if self.config.motion_mode == 'sparse_hierarchical' else dict(
                 weight=cfg.gs_activity_loss_weight,
                 expected_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step)),
                 hard_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step, hard=True)),
@@ -1577,14 +1607,22 @@ class Module(BaseModule):
                 semantics='Expected changed old-GS fraction over full quantized terminal poses; '
                           'KEEP and canceled candidate poses cost zero. Geometry support is detached; '
                           'only gate probabilities receive this cost gradient. No masks or visibility oracle.')
-                if cfg.enable_learned_gates and self.config.motion_mode != 'sparse_hierarchical' else None),
-            storage_semantics=('Expected m-tree code length uses independent Bernoulli mean-field probabilities '
-                'and includes both uniform-off and uniform-on short codes. Hard estimate and exported bitstreams '
-                'use the same recursive 2-bit node tags and a mixed fine-region GS bitmap. Region z bits are '
-                'stored only where at least one m=1 GS reaches the region; local z bits only for m=1 rows. '
-                'Motion payload slots are six int32 symbols (24 bytes) for each relevant z=1 region/local row. '
-                'Uniform m=1 regions can be cheaper than mixed masks, so this rate is not monotonic in moved-GS count. '
-                'The archive file size is reported separately; tree membership and packet headers are excluded.'
+                if cfg.enable_learned_gates else None),
+            storage_semantics=('Sparse necessary inference arrays: six float32 motion values for relevant '
+                'z=1 regions and m=1/z=1 local rows; uint32 m-open GS IDs; uint16/uint32 fine owners '
+                'and parent tables; bool local z on m-open GSs; bool regional z and float32 pivots '
+                'on relevant regions; counts/source row count; retained newborn raw attributes and '
+                'int32 deletion IDs. Soft loss charges expected selected rows and relevant paths. '
+                'Parameter bytes exclude file headers and verification metadata; inference_file_bytes '
+                'reports necessary files separately. Shared first-frame model is counted once separately. '
+                'Images, checkpoints, gradients and optimizer state are excluded.'
+                if sparse_mode and cfg.motion_export_format == 'sparse_parameters' else
+                'Uncompressed necessary inference arrays: six float32 motion values for '
+                'each relevant z=1 region and m=1/z=1 local row; full bool m/z masks; int32 fine ownership, '
+                'parent tables and counts; float32 regional pivots; retained newborn raw attributes and '
+                'int32 deletion identities. Soft loss uses expected selected rows. First-frame GS is counted '
+                'once separately. File headers, diagnostic manifests, dense training tensors, gradients and '
+                'optimizer state are excluded. Dense motion/gate training parameter bytes are a separate field.'
                 if self.config.motion_mode == 'sparse_hierarchical' else
                 'Estimated effective parameter bytes: reachable gate states, SHARE/SPLIT region motion, '
                 'open GS residuals, retained newborn raw attributes and int32 source, and int32 deletions. '

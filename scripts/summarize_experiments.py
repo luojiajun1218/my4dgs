@@ -183,14 +183,22 @@ def inventory_bytes(run):
 def stream_frame(run, report):
     stream = report['stream']
     frame = report['frame']
-    activity = stream['activities']['gs']['fractions']
+    gs_activity = stream['activities']['gs']
+    binary = 'm_open' in gs_activity
     storage_only = stream.get('storage_only', False)
     stage_prefix = 'storage' if storage_only else 'codec'
     result = dict(births=stream['new_count'],
                   deletions=stream['deleted_count'], old_gs_count=stream['activities']['gs']['denominator'],
-                  gs_keep_fraction=activity['KEEP'], gs_shared_fraction=activity['SHARED'],
-                  gs_local_fraction=activity['SPLIT'],
                   **{f'{stage_prefix}_{key}_seconds': value for key, value in stream['stage_seconds'].items()})
+    if binary:
+        denominator = gs_activity['denominator']
+        result.update(gs_m_open=gs_activity['m_open'], gs_m_closed=gs_activity['m_closed'],
+                      gs_m_open_fraction=gs_activity['m_open'] / denominator if denominator else 0.,
+                      gs_local_z_on=gs_activity['local_z_on'], gs_local_z_off=gs_activity['local_z_off'])
+    else:
+        activity = gs_activity['fractions']
+        result.update(gs_keep_fraction=activity['KEEP'], gs_shared_fraction=activity['SHARED'],
+                      gs_local_fraction=activity['SPLIT'])
     if storage_only:
         if stream.get('codec_enabled', False) or any(stream.get(key) is not None for key in
                 ('actual', 'actual_bytes_by_class', 'total_stream_bytes', 'bootstrap_bytes',
@@ -198,6 +206,18 @@ def stream_frame(run, report):
             raise ValueError('Storage-only reports must not claim encoded bytes or estimated bits')
         for state_row in [stream['activities']['gs'], *stream['activities'].get('levels', [])]:
             denominator = state_row['denominator']
+            if binary:
+                names = (('m_open', 'm_closed') if 'm_open' in state_row else
+                         ('z_on_relevant_regions', 'z_off_relevant_regions'))
+                counts = [state_row[name] for name in names]
+                if (not isinstance(denominator, int) or denominator < 0 or
+                        any(not isinstance(value, int) or value < 0 for value in counts)
+                        or sum(counts) != denominator):
+                    raise ValueError('Binary activity counts do not match their denominator')
+                if 'm_open' in state_row and (state_row['local_z_on'] < 0 or state_row['local_z_off'] < 0
+                        or state_row['local_z_on'] + state_row['local_z_off'] != state_row['m_open']):
+                    raise ValueError('Local z counts do not match m-open GSs')
+                continue
             counts = state_row.get('counts')
             fractions = state_row['fractions']
             if (not isinstance(denominator, int) or denominator < 0 or
@@ -222,6 +242,22 @@ def stream_frame(run, report):
         reference = stream['reference_storage_bytes']
         if not isinstance(reference, (int, float)) or not math.isfinite(reference) or reference <= 0:
             raise ValueError('Reference storage bytes must be finite and positive')
+        if stream.get('dense_motion_training_parameter_bytes') is not None:
+            dense = stream['dense_motion_training_parameter_bytes']
+            if not isinstance(dense, (int, float)) or not math.isfinite(dense) or dense < 0:
+                raise ValueError('Dense training parameter bytes must be finite and nonnegative')
+            result['dense_motion_training_parameter_bytes'] = dense
+        if stream.get('storage_accounting') is not None:
+            result['storage_accounting'] = stream['storage_accounting']
+        if stream.get('inference_file_bytes') is not None or (binary and stream.get('motion_export') is not None):
+            exports = [stream.get(name) for name in ('motion_export', 'incremental_export', 'frame_manifest')]
+            files = sum(item['archive_bytes'] for item in exports if item is not None)
+            measured = stream.get('inference_file_bytes')
+            if measured is None:
+                measured = files
+            if not isinstance(measured, int) or measured < 0 or measured != files:
+                raise ValueError('Inference file bytes must equal the necessary export file sizes')
+            result['inference_file_bytes'] = measured
         return dict(result, storage_measurement='parameter_bytes_estimate',
                     expected_storage_bytes=stream['expected_storage_bytes'],
                     hard_storage_bytes=stream['hard_storage_bytes'],
@@ -424,6 +460,12 @@ def summarize_run(run, external=False):
             mean_expected_bytes=statistics.fmean(row['expected_storage_bytes'] for row in storage_estimates),
             semantics='Effective parameter-byte estimates per completed frame; excludes the external frame-0 '
                       'reference, headers, training files, logs and optimizer.')
+    inference_files = [row for row in dynamic if 'inference_file_bytes' in row]
+    if inference_files:
+        entry['inference_files'] = dict(measurement='necessary_file_bytes', frames=len(inference_files),
+            mean_bytes=statistics.fmean(row['inference_file_bytes'] for row in inference_files),
+            semantics='Dynamic-frame motion, retained birth and frame/deletion manifest files, including '
+                      'headers. Excludes the shared first-frame model, images, checkpoints and debug artifacts.')
     streamed = [row for row in dynamic if 'stream_bytes' in row]
     if streamed:
         bootstrap_path = run / 'incremental_stream' / 'bootstrap.json'
@@ -665,7 +707,8 @@ def main():
         frames=entry['completed_dynamic_frames'],
         psnr=entry.get('mean', {}).get('psnr'), ssim=entry.get('mean', {}).get('ssim'),
         mean_stream_bytes=entry.get('mean', {}).get('stream_bytes'),
-        mean_parameter_storage_bytes=entry.get('storage', {}).get('mean_hard_bytes'))
+        mean_parameter_storage_bytes=entry.get('storage', {}).get('mean_hard_bytes'),
+        mean_inference_file_bytes=entry.get('inference_files', {}).get('mean_bytes'))
         for entry in entries], indent=2))
 
 
