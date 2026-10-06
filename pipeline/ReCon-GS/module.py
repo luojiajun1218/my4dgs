@@ -33,6 +33,7 @@ from .model.gated_residual import GatedResidualMotion, actual_motion_statistics
 from .model.sparse_hierarchical import SparseHierarchicalConfig, SparseHierarchicalMotion
 from .model.flat_cluster import FlatClusterConfig, FlatClusterMotion
 from .model.binary_refinement import BinaryRefinementConfig, BinaryRefinementMotion
+from .model.storage_aware_binary import StorageAwareBinaryConfig, StorageAwareBinaryMotion, birth_ply_size
 
 import json
 import csv
@@ -40,7 +41,8 @@ import numpy as np
 import time
 import math
 
-SPARSE_MOTION_MODES = {'sparse_hierarchical', 'flat_cluster', 'binary_refinement'}
+SPARSE_MOTION_MODES = {'sparse_hierarchical', 'flat_cluster', 'binary_refinement',
+                       'storage_aware_binary'}
 QUANTIZED_MOTION_MODES = {'quantized_residual', *SPARSE_MOTION_MODES}
 
 @dataclass
@@ -130,6 +132,7 @@ class ModuleConfig(BaseModuleConfig):
     sparse_hierarchical: SparseHierarchicalConfig = field(default_factory=SparseHierarchicalConfig)
     flat_cluster: FlatClusterConfig = field(default_factory=FlatClusterConfig)
     binary_refinement: BinaryRefinementConfig = field(default_factory=BinaryRefinementConfig)
+    storage_aware_binary: StorageAwareBinaryConfig = field(default_factory=StorageAwareBinaryConfig)
     quantized_diagnostics: QuantizedDiagnosticsConfig = field(default_factory=QuantizedDiagnosticsConfig)
     selective_diagnostics_config: Optional[str] = 'config/diagnostics/selective_motion.yaml'
 
@@ -173,6 +176,8 @@ class Module(BaseModule):
         if self.config.motion_mode in QUANTIZED_MOTION_MODES:
             if self.config.motion_mode == 'binary_refinement':
                 cfg = self.config.binary_refinement
+            elif self.config.motion_mode == 'storage_aware_binary':
+                cfg = self.config.storage_aware_binary
             elif self.config.motion_mode == 'flat_cluster':
                 cfg = self.config.flat_cluster
             elif self.config.motion_mode == 'sparse_hierarchical':
@@ -192,7 +197,8 @@ class Module(BaseModule):
                 if self.config.selective_diagnostics_config is not None:
                     raise ValueError('Sparse motion does not support legacy selective overlays; '
                                      'set selective_diagnostics_config: null')
-                motion_cls = (BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
+                motion_cls = (StorageAwareBinaryMotion if self.config.motion_mode == 'storage_aware_binary'
+                              else BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
                               else FlatClusterMotion if self.config.motion_mode == 'flat_cluster'
                               else SparseHierarchicalMotion)
                 self.residual_motion = motion_cls(cfg)
@@ -321,6 +327,8 @@ class Module(BaseModule):
         The caller must advance the base Gaussian state to the start of this
         frame. The optional PLY contains only this frame's newly added points.
         """
+        if getattr(self.config, 'motion_mode', 'legacy') == 'storage_aware_binary':
+            raise RuntimeError('storage_aware_binary requires sequential playback with StorageAwareBinaryDecoder')
         base = self.gaussians.get_xyz_ori
         if getattr(self.config, 'motion_mode', 'legacy') in SPARSE_MOTION_MODES:
             motion_cls = (BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
@@ -642,9 +650,11 @@ class Module(BaseModule):
         if self.config.motion_mode in QUANTIZED_MOTION_MODES and not self.trainer.is_first_frame:
             render_pkg['quantized_started'] = selective_started
             cfg = self.config.quantized_residual
+            stage = self.residual_motion.stage(current_step)
             storage_active = (self.config.motion_mode not in SPARSE_MOTION_MODES or
-                              self.residual_motion.stage(current_step) in
-                              {'gate_compress', 'incremental'})
+                              stage in ({'gate_compress', 'gate_refine', 'incremental'}
+                                        if self.config.motion_mode == 'storage_aware_binary'
+                                        else {'gate_compress', 'incremental'}))
             storage_weight = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
                               if storage_active else 0.)
             if self.config.motion_mode in SPARSE_MOTION_MODES and storage_weight <= 0:
@@ -1120,7 +1130,10 @@ class Module(BaseModule):
         path = self.output_dir / 'frame_summary' / f'control_{self.current_frame:03d}.json'
         path.parent.mkdir(parents=True, exist_ok=True)
         mode = getattr(self.config, 'motion_mode', 'legacy')
-        semantics = ('Binary refinement uses quantized parent/child residuals and hard-forward STE '
+        semantics = ('Storage-aware binary motion jointly selects hierarchy gates and per-node precision, '
+                     'then writes a deterministic preorder bitstream.'
+                     if mode == 'storage_aware_binary' else
+                     'Binary refinement uses quantized parent/child residuals and hard-forward STE '
                      'stop/refine choices. A stopped branch inherits its parent pose; parent zero '
                      'motion does not prohibit children. Compression jointly learns motion and gates.'
                      if mode == 'binary_refinement' else
@@ -1144,8 +1157,11 @@ class Module(BaseModule):
         motion = self.residual_motion
         groups = {f'region_translation_{i}': p for i, p in enumerate(motion.region_translation)}
         groups.update({f'region_rotation_{i}': p for i, p in enumerate(motion.region_rotation)})
-        if self.config.motion_mode == 'binary_refinement':
+        if self.config.motion_mode in {'binary_refinement', 'storage_aware_binary'}:
             groups.update({f'refine_gate_{i}': p for i, p in enumerate(motion.refine_logits)})
+            if self.config.motion_mode == 'storage_aware_binary':
+                groups.update({f'precision_logits_{i}': p
+                               for i, p in enumerate(motion.precision_logits)})
         elif self.config.motion_mode in SPARSE_MOTION_MODES:
             groups.update(m_gate=motion.m_logits, z_local=motion.z_local_logits)
             if motion.config.m_fine_sharing:
@@ -1153,7 +1169,7 @@ class Module(BaseModule):
             groups.update({f'z_region_{i}': p for i, p in enumerate(motion.z_region_logits)})
         else:
             groups.update({f'gate_{i}': p for i, p in enumerate(motion.gate_logits)})
-        if self.config.motion_mode != 'binary_refinement':
+        if self.config.motion_mode not in {'binary_refinement', 'storage_aware_binary'}:
             groups.update(gs_translation=motion.gs_translation, gs_rotation=motion.gs_rotation)
         gradients = {}
         for name, parameter in groups.items():
@@ -1167,8 +1183,12 @@ class Module(BaseModule):
             gradients[name] = (None if grad is None else dict(
                 l2=float(grad.norm()), max_abs=float(grad.abs().max()) if grad.numel() else 0.,
                 nonzero_rows=nonzero_rows, rows=len(grad)))
-        if self.config.motion_mode == 'binary_refinement':
+        if self.config.motion_mode in {'binary_refinement', 'storage_aware_binary'}:
             states = [value.detach().cpu().clone() for value in motion.refinement_masks(self.global_step)]
+            if self.config.motion_mode == 'storage_aware_binary':
+                states.extend(value.argmax(-1).detach().cpu().clone()
+                              for value in motion._precision_weights(self.global_step,
+                                                                     differentiable=False))
         elif self.config.motion_mode in SPARSE_MOTION_MODES:
             masks = motion._hard_masks_for_step(self.global_step)
             states = [masks['m'].cpu().clone(),
@@ -1205,8 +1225,11 @@ class Module(BaseModule):
         # frame's final KEEP decisions, in the exact materialized row order.
         if (self.config.quantized_residual.enable_learned_gates and
                 self.residual_motion.index is not None):
+            deletion_score = (self.gaussians._opacity
+                              if getattr(self.config, 'motion_mode', 'legacy') == 'storage_aware_binary'
+                              else self.gaussians.get_opacity)
             deleted, deletion_protection = self.residual_motion.compensation_deletions(
-                self.gaussians.get_opacity, count)
+                deletion_score, count)
         else:
             deleted = torch.argsort(self.gaussians.get_opacity.detach().flatten(), stable=True)[:count]
             deletion_protection = dict(
@@ -1331,6 +1354,21 @@ class Module(BaseModule):
         """Count effective motion, gate, birth and deletion parameter bytes."""
         parts = self.residual_motion.storage_parts(self.global_step, hard=hard)
         zero = next(iter(parts.values())) * 0
+        if self.config.motion_mode == 'storage_aware_binary':
+            if view is None:
+                birth_bytes = zero
+            elif hard:
+                birth_bytes = zero + birth_ply_size(int(view.keep.sum()), self.config.sh_degree)
+            else:
+                expected_count = view.keep_st.sum()
+                coefficient_count = (self.config.sh_degree + 1) ** 2
+                property_count = 6 + 3 + 3 * (coefficient_count - 1) + 1 + 3 + 4
+                row_bytes = property_count * 4
+                hard_count = int(view.keep.sum())
+                header_bytes = birth_ply_size(hard_count, self.config.sh_degree) - hard_count * row_bytes
+                birth_bytes = expected_count * row_bytes + header_bytes
+            details = dict(parts, new_bytes=birth_bytes, deletion_bytes=zero)
+            return sum(details.values()), details
         # Raw sparse motion stores ownership directly, so a birth source used
         # only during training is not an inference parameter in this mode.
         birth_bytes_per_row = 0 if self.config.motion_mode in SPARSE_MOTION_MODES else 4
@@ -1371,7 +1409,7 @@ class Module(BaseModule):
             motion.stage_seconds[stage] = motion.stage_seconds.get(stage, 0.) + time.perf_counter() - render_pkg['quantized_started']
             if self.config.motion_mode in SPARSE_MOTION_MODES:
                 probe_steps = getattr(cfg, 'tree_probe_steps', 0)
-                if (self.config.motion_mode == 'binary_refinement' and
+                if (self.config.motion_mode in {'binary_refinement', 'storage_aware_binary'} and
                         self.global_step == cfg.coarse_fit_steps):
                     self.quantized_quality_snapshot('after_coarse_fit')
                 elif probe_steps and self.global_step == probe_steps:
@@ -1461,8 +1499,10 @@ class Module(BaseModule):
         frame_manifest = None
         if self.config.motion_mode in SPARSE_MOTION_MODES:
             storage_dir = self.output_dir / 'frame_storage' / self.config.motion_mode
-            motion_path = storage_dir / f'motion_{self.current_frame:03d}.npz'
-            motion_export = self.residual_motion.export_motion(motion_path)
+            suffix = '.bin' if self.config.motion_mode == 'storage_aware_binary' else '.npz'
+            motion_path = storage_dir / f'motion_{self.current_frame:03d}{suffix}'
+            if self.config.motion_mode != 'storage_aware_binary':
+                motion_export = self.residual_motion.export_motion(motion_path)
         self.quant_birth_control['final_candidate_count'] = (
             len(self.gaussians_incr.get_xyz) if cfg.enable_incremental else 0)
 
@@ -1470,6 +1510,7 @@ class Module(BaseModule):
         state_started = time.perf_counter()
         raw, retained_sources = materialize_quantized_gaussians(model_raw(self.gaussians), view)
         retained_count = len(retained_sources)
+        post_motion_base_digest = reference_digest(model_raw(self.gaussians))
         if cfg.enable_learned_gates:
             self.residual_motion.register_materialized_layout(raw['xyz'], retained_sources)
         self.install_quantized_raw(raw)
@@ -1483,25 +1524,48 @@ class Module(BaseModule):
             incremental_export = dict(path=str(incremental_path),
                                       archive_bytes=incremental_path.stat().st_size,
                                       rows=retained_count)
+        if self.config.motion_mode == 'storage_aware_binary':
+            motion_export = self.residual_motion.export_motion(motion_path,
+                frame_index=self.current_frame,
+                previous_state_digest=self.quant_previous_sha256,
+                post_motion_digest=post_motion_base_digest,
+                previous_count=len(self.quant_previous_reference['xyz']),
+                deleted_count=int(self.quant_deleted_indices.numel()),
+                birth_count=retained_count)
         if self.config.motion_mode in SPARSE_MOTION_MODES:
             manifest_path = storage_dir / f'frame_{self.current_frame:03d}.json'
-            manifest = dict(
-                layout_version=self.residual_motion.layout_version,
-                frame=self.current_frame,
-                playback_scope=('Single-frame post-deletion motion override plus this frame\'s birth PLY. '
-                    'First confirm previous_reference_sha256 against the previous materialized Gaussian state; '
-                    'then apply deleted_indices and confirm motion_base_digest against the post-deletion base '
-                    'before decoding motion. This manifest does not implement automatic sequential playback.'),
-                previous_reference_sha256=self.quant_previous_sha256,
-                motion_base_digest=self.residual_motion._base_digest(),
-                deleted_indices=self.quant_deleted_indices.detach().cpu().to(torch.int32).tolist(),
-                deleted_indices_dtype='int32',
-                deleted_indices_payload_bytes=int(self.quant_deleted_indices.numel() * 4),
-                motion_export=motion_export,
-                incremental_export=incremental_export)
+            if self.config.motion_mode == 'storage_aware_binary':
+                manifest = dict(
+                    layout_version=self.residual_motion.layout_version,
+                    frame=self.current_frame,
+                    playback_scope=('Sequential decoder verifies the previous full-state hash, recreates '
+                        'deletions from the prior pose-change mask and opacity order, rebuilds or remaps the '
+                        'deterministic tree, decodes motion and verifies its post-motion base hash before '
+                        'appending the birth PLY. No row IDs or node ownership tables are present.'),
+                    previous_reference_sha256=self.quant_previous_sha256,
+                    post_motion_base_sha256=post_motion_base_digest,
+                    deleted_count=int(self.quant_deleted_indices.numel()),
+                    motion_export=motion_export,
+                    incremental_export=incremental_export)
+            else:
+                manifest = dict(
+                    layout_version=self.residual_motion.layout_version,
+                    frame=self.current_frame,
+                    playback_scope=('Single-frame post-deletion motion override plus this frame\'s birth PLY. '
+                        'First confirm previous_reference_sha256 against the previous materialized Gaussian state; '
+                        'then apply deleted_indices and confirm motion_base_digest against the post-deletion base '
+                        'before decoding motion. This manifest does not implement automatic sequential playback.'),
+                    previous_reference_sha256=self.quant_previous_sha256,
+                    motion_base_digest=self.residual_motion._base_digest(),
+                    deleted_indices=self.quant_deleted_indices.detach().cpu().to(torch.int32).tolist(),
+                    deleted_indices_dtype='int32',
+                    deleted_indices_payload_bytes=int(self.quant_deleted_indices.numel() * 4),
+                    motion_export=motion_export,
+                    incremental_export=incremental_export)
             manifest_path.write_text(json.dumps(manifest, indent=2))
             frame_manifest = dict(path=str(manifest_path), archive_bytes=manifest_path.stat().st_size,
-                                  deleted_indices_payload_bytes=manifest['deleted_indices_payload_bytes'])
+                deleted_count=manifest['deleted_count'] if self.config.motion_mode == 'storage_aware_binary'
+                else len(manifest['deleted_indices']))
         self.quantized_quality_snapshot('after_retention')
         self.trainer.synchronize()
         state_update_seconds = time.perf_counter() - state_started
@@ -1617,11 +1681,16 @@ class Module(BaseModule):
                 'uncompressed_inference_arrays_v1'
                 if self.config.motion_mode in SPARSE_MOTION_MODES else None),
             inference_file_bytes=(sum(item['archive_bytes'] for item in
-                (motion_export, incremental_export, frame_manifest) if item is not None)
+                ((motion_export, incremental_export) if self.config.motion_mode == 'storage_aware_binary'
+                 else (motion_export, incremental_export, frame_manifest)) if item is not None)
                 if sparse_mode else None),
-            inference_file_semantics=('Necessary motion NPZ, retained birth PLY and deletion/frame manifest '
-                'file bytes for this dynamic frame. Includes container headers and verification metadata; '
-                'excludes the shared first-frame model, images, full-frame debug PLYs, checkpoints and logs.'
+            inference_file_semantics=(
+                'Necessary preorder motion bitstream and retained birth PLY bytes. The motion header is '
+                'included; diagnostic JSON is excluded. Shared first-frame model, images, checkpoints and logs '
+                'are excluded.' if self.config.motion_mode == 'storage_aware_binary' else
+                'Necessary motion NPZ, retained birth PLY and deletion/frame manifest file bytes for this '
+                'dynamic frame. Includes container headers and verification metadata; excludes the shared '
+                'first-frame model, images, full-frame debug PLYs, checkpoints and logs.'
                 if sparse_mode else None),
             storage_gate_bits=(self.residual_motion.storage_bit_counts(
                 self.global_step, hard=True)
@@ -1720,6 +1789,36 @@ class Module(BaseModule):
             if actual_motion is not None:
                 actual_motion['semantics'] = (
                     'Actual quantized old-GS pose changes, without an independent m gate.')
+        elif self.config.motion_mode == 'storage_aware_binary':
+            semantics = (
+                'Storage-aware preorder bitstream. Every reached region carries a motion-presence flag; '
+                'nonzero records select one of 8/12/16/24/32-bit signed precision levels. An internal region '
+                'carries one stop/refine flag, and a closed branch inherits its parent pose. The binary spatial '
+                'tree is rebuilt at frames 1, 6, 11, ... and remapped between rebuilds. Deletion rows and newborn '
+                'source rows are reproduced deterministically; no owner, terminal, motion-node, or deletion IDs '
+                'are stored in the motion stream.')
+            self.quant_report.update(
+                method_semantics=semantics,
+                storage_accounting='storage_aware_binary_preorder_bitstream_v1',
+                storage_semantics=(
+                    f'Exact inference files are a {self.residual_motion.__class__.__name__} motion stream '
+                    'with a 132-byte header and byte-padded preorder payload plus the retained birth PLY. '
+                    'The header stores frame/counts, scene extent, state hashes and topology hash. No GS owner, '
+                    'terminal, motion-node or deletion IDs are transmitted; the decoder recreates deletions '
+                    'and cached tree membership. Diagnostic JSON is excluded from inference_file_bytes.'),
+                candidate_fit=dict(enabled=False, extra_renders=0, semantics=(
+                    'Child residuals learn through the normal quantized image forward.')),
+                motion_gradient_schedule=dict(stages=dict(
+                    dense_fit='fit the coarse layer for 50 steps, then open child residuals for 50 steps',
+                    gate_compress='jointly optimize quantized motion, refinement gates and node precision for 80 steps',
+                    gate_refine='freeze choices and refine motion for 20 steps while retaining rate loss',
+                    incremental='freeze motion choices and fit newborn Gaussians for 100 steps'),
+                    semantics=semantics),
+                gs_activity_cost=dict(weight=0., semantics=(
+                    'No per-GS activity gate. Zero quantized path motion reuses the exact base pose; '
+                    'actual pose changes are reported separately.')))
+            if actual_motion is not None:
+                actual_motion['semantics'] = 'Actual quantized old-GS pose changes; there is no per-GS gate.'
         self.trainer.synchronize()
         self.residual_motion.stage_seconds['finalize'] = time.perf_counter() - finalize_started
         self.quant_report['stage_seconds'] = dict(self.residual_motion.stage_seconds)

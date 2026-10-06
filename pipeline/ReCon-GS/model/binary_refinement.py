@@ -33,7 +33,7 @@ class BinaryRefinementConfig(SparseHierarchicalConfig):
     coarse_fit_steps: Optional[int] = None
     gate_adam_eps: Optional[float] = None
 
-    def validate(self):
+    def _validate_binary_config(self, *, max_levels=3, rebuild_interval=1):
         # This inherited validator checks quantization/birth settings and has
         # one historical hierarchy field. Binary seeding reads coarse_region_gs.
         self.fine_region_gs = self.coarse_region_gs
@@ -43,8 +43,8 @@ class BinaryRefinementConfig(SparseHierarchicalConfig):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f'{name} must be a positive integer')
-        if self.max_motion_levels > 3:
-            raise ValueError('binary_refinement supports at most three motion levels')
+        if self.max_motion_levels > max_levels:
+            raise ValueError(f'binary refinement supports at most {max_levels} motion levels')
         if self.coarse_region_gs < self.min_child_gs:
             raise ValueError('coarse_region_gs must be at least min_child_gs')
         if self.coarse_fit_steps >= self.dense_fit_steps:
@@ -55,8 +55,8 @@ class BinaryRefinementConfig(SparseHierarchicalConfig):
             raise ValueError('gate_adam_eps must be finite and positive')
         if self.tree_builder != 'spatial' or self.tree_probe_steps:
             raise ValueError('binary_refinement uses a spatial tree without a motion probe')
-        if self.tree_rebuild_interval != 1:
-            raise ValueError('binary_refinement rebuilds its spatial forest every frame')
+        if self.tree_rebuild_interval != rebuild_interval:
+            raise ValueError(f'binary refinement requires tree_rebuild_interval: {rebuild_interval}')
         if self.motion_init_decay:
             raise ValueError('binary_refinement currently requires motion_init_decay: 0')
         if self.m_fine_sharing or self.m_hard_forward or self.rebase_on_hardening:
@@ -65,6 +65,9 @@ class BinaryRefinementConfig(SparseHierarchicalConfig):
             raise ValueError('binary_refinement selects motion with storage loss, without m activity loss')
         if self.motion_export_format != 'sparse_parameters':
             raise ValueError('binary_refinement requires sparse_parameters export')
+
+    def validate(self):
+        self._validate_binary_config()
 
 
 def _copy_layout(layout):

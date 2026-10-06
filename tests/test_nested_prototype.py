@@ -37,6 +37,7 @@ GR = importlib.import_module('pipeline.ReCon-GS.model.gated_residual')
 SH = importlib.import_module('pipeline.ReCon-GS.model.sparse_hierarchical')
 FC = importlib.import_module('pipeline.ReCon-GS.model.flat_cluster')
 BR = importlib.import_module('pipeline.ReCon-GS.model.binary_refinement')
+SAB = importlib.import_module('pipeline.ReCon-GS.model.storage_aware_binary')
 MC = importlib.import_module('pipeline.ReCon-GS.model.motion_clustering')
 SL_CODEC = importlib.import_module('pipeline.ReCon-GS.model.sparse_layout_codec')
 GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
@@ -3375,7 +3376,7 @@ def test_sparse_hierarchical_activity_uses_soft_training_and_fixed_render_masks(
 def test_sparse_hierarchical_regularizers_reach_gates_and_newborns_in_correct_phases():
     import textwrap
     source = (project_root / 'pipeline/ReCon-GS/module.py').read_text()
-    start = source.index('            cfg = self.config.quantized_residual\n            storage_active')
+    start = source.index('            cfg = self.config.quantized_residual\n            stage =')
     end = source.index('            loss_candidate =', start)
     code = textwrap.dedent(source[start:end])
     for parameter_format, step in itertools.product(('legacy', 'sparse_parameters'), (1, 3, 5, 7)):
@@ -4502,6 +4503,203 @@ def test_binary_experiment_config_matches_confirmed_parameters():
     assert parameters.max_motion_levels == 3
     assert parameters.motion_xyz_step_extent == 1e-4
     assert parameters.motion_rotation_step_rad == 1e-3
+
+
+def storage_aware_binary_fixture(**overrides):
+    import yaml
+    path = project_root / 'config' / 'fs_storage_aware_binary_24f_20261006.yaml'
+    values = yaml.safe_load(path.read_text(encoding='utf-8'))['module']['storage_aware_binary']
+    values.update(coarse_region_gs=12, min_child_gs=2, max_motion_levels=4,
+        coarse_fit_steps=2, dense_fit_steps=4, gate_compress_steps=4,
+        gate_refine_steps=2, motion_steps=10, incremental_steps=2,
+        storage_warmup_steps=4, storage_ramp_steps=1,
+        translation_steps_extent=[.1, .05, .02, .01, .005],
+        rotation_steps_rad=[.1, .05, .02, .01, .005],
+        motion_xyz_step_extent=.1, motion_rotation_step_rad=.1,
+        densification_stats_steps=2)
+    values.update(overrides)
+    raw = residual_raw_fixture(48)
+    config = SAB.StorageAwareBinaryConfig(**values)
+    motion = SAB.StorageAwareBinaryMotion(config)
+    motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    return raw, motion
+
+
+def test_storage_aware_binary_config_matches_confirmed_parameters():
+    import yaml
+    path = project_root / 'config' / 'fs_storage_aware_binary_24f_20261006.yaml'
+    config = yaml.safe_load(path.read_text(encoding='utf-8'))
+    assert config['module']['motion_mode'] == 'storage_aware_binary'
+    parameters = SAB.StorageAwareBinaryConfig(**config['module']['storage_aware_binary'])
+    parameters.validate()
+    assert config['data']['extra_dataset_kwargs']['num_frames'] == 25
+    assert config['data']['resolution'] == -1
+    assert config['data']['expected_image_size'] == [1600, 1199]
+    assert config['trainer']['num_incr_steps'] == parameters.total_steps == 300
+    assert parameters.motion_steps == config['module']['deformation']['num_stage1_steps'] == 200
+    assert (parameters.coarse_fit_steps, parameters.dense_fit_steps,
+            parameters.gate_compress_steps, parameters.gate_refine_steps,
+            parameters.incremental_steps) == (50, 100, 80, 20, 100)
+    assert (parameters.coarse_region_gs, parameters.min_child_gs,
+            parameters.max_motion_levels, parameters.tree_rebuild_interval) == (96, 12, 4, 5)
+    assert parameters.precision_bits == [8, 12, 16, 24, 32]
+    assert parameters.translation_steps_extent == [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
+    assert parameters.rotation_steps_rad == [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+    assert parameters.storage_loss_weight == .01
+    assert parameters.storage_warmup_steps == 100 and parameters.storage_ramp_steps == 20
+    assert parameters.gate_lr == parameters.precision_lr == .02
+    assert parameters.initial_gate_logit == 0.
+    assert max(range(5), key=parameters.precision_initial_logits.__getitem__) == 4
+
+
+def test_storage_aware_binary_phase_schedule_and_ste_gradients():
+    _, motion = storage_aware_binary_fixture()
+    assert motion.tree_rebuilt
+    assert [motion.stage(step) for step in (1, 2, 3, 4, 5, 8, 9, 10, 11)] == [
+        'dense_fit', 'dense_fit', 'dense_fit', 'dense_fit', 'gate_compress',
+        'gate_compress', 'gate_refine', 'gate_refine', 'incremental']
+    assert motion.gate_probabilities(5)[0].eq(.5).all()
+    assert all(torch.equal(value.argmax(-1), torch.full((len(value),), 4,
+                     dtype=torch.long, device=value.device))
+               for value in motion._precision_probabilities(5))
+
+    motion(1, training=True)
+    assert motion.region_translation[0].requires_grad
+    assert not motion.region_translation[1].requires_grad
+    assert not motion.refine_logits[0].requires_grad
+    motion(3, training=True)
+    assert motion.region_translation[1].requires_grad
+    assert not motion.refine_logits[0].requires_grad
+    with torch.no_grad():
+        for value in motion.region_translation[1:]:
+            value[:, 0] = .37
+        motion.refine_logits[0].fill_(-.1)
+    xyz, _ = motion(5, training=True)
+    assert motion.region_translation[0].requires_grad
+    assert motion.refine_logits[0].requires_grad
+    assert motion.precision_logits[0].requires_grad
+    storage = sum(motion.storage_parts(5).values())
+    loss = xyz[:, 0].sum() + storage / 1000
+    loss.backward()
+    assert motion.refine_logits[0].grad is not None
+    assert torch.isfinite(motion.refine_logits[0].grad).all()
+    assert motion.precision_logits[1].grad is not None
+    assert torch.isfinite(motion.precision_logits[1].grad).all()
+    assert motion.precision_logits[1].grad.abs().sum() > 0
+
+
+def test_storage_aware_binary_bitstream_exact_cost_and_decode():
+    raw, motion = storage_aware_binary_fixture()
+    with torch.no_grad():
+        for value in motion.region_translation:
+            value[:, 0] = .37
+        for gate in motion.refine_logits:
+            gate.fill_(4.)
+    expected_xyz, expected_rotation = motion(10, training=True)
+    hard_bits = motion._hard_rate_bits(10)
+    payload, payload_bits, _, _ = motion._encode_payload(10)
+    assert payload_bits == hard_bits
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'frame_001.bin'
+        digest = Q.reference_digest(raw)
+        post_motion = {**raw, 'xyz': expected_xyz, 'rotation': expected_rotation}
+        export = motion.export_motion(path, frame_index=1,
+            previous_state_digest=digest,
+            post_motion_digest=Q.reference_digest(post_motion),
+            previous_count=len(raw['xyz']), deleted_count=0, birth_count=0)
+        assert isinstance(export['precision_bits'], list)
+        header = SAB.StorageAwareBinaryMotion.read_header(path)
+        assert header['extent'] == 1.
+        assert header['payload_bits'] == payload_bits
+        assert path.stat().st_size == SAB.CODEC_HEADER_BYTES + len(payload)
+        assert export['archive_bytes'] == path.stat().st_size
+        coded_storage = sum(motion.storage_parts(10, hard=True).values())
+        torch.testing.assert_close(coded_storage, torch.tensor(float(path.stat().st_size)),
+                                   rtol=0, atol=0)
+        decoder = SAB.StorageAwareBinaryDecoder(copy.deepcopy(motion.config))
+        decoded, info = decoder.advance(path, None, raw)
+        assert info['tree_rebuilt']
+        torch.testing.assert_close(decoded['xyz'], expected_xyz, rtol=0, atol=0)
+        torch.testing.assert_close(decoded['rotation'], expected_rotation, rtol=0, atol=0)
+        assert Q.reference_digest(decoded) == Q.reference_digest(
+            {**raw, 'xyz': expected_xyz, 'rotation': expected_rotation})
+        assert motion.statistics()['hard_coded_payload_bits'] == payload_bits
+
+
+def test_storage_aware_binary_tree_rebuilds_every_fifth_frame():
+    raw, motion = storage_aware_binary_fixture()
+    for frame in range(1, 8):
+        if frame > 1:
+            rows = torch.arange(len(raw['xyz']))
+            motion.setup(raw['xyz'], raw['rotation'], 1., previous_rows=rows,
+                         previous_new_count=0, frame_index=frame)
+        assert motion.tree_rebuilt == ((frame - 1) % 5 == 0)
+        motion.register_materialized_layout(raw['xyz'], torch.empty(0, dtype=torch.long))
+
+
+def test_storage_aware_binary_sequence_recreates_births_deletions_and_cached_tree():
+    raw, motion = storage_aware_binary_fixture()
+    decoder = SAB.StorageAwareBinaryDecoder(copy.deepcopy(motion.config))
+    with torch.no_grad():
+        for value in motion.region_translation:
+            value[:, 0] = .37
+        for gate in motion.refine_logits:
+            gate.fill_(4.)
+    moved_xyz, moved_rotation = motion(10, training=True)
+    birth = {name: value[:1].clone() for name, value in raw.items()}
+    birth['xyz'] = moved_xyz[:1] + torch.tensor([[.001, 0., 0.]])
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        birth_model = GAUSS.GaussianModel(1)
+        for name, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+            setattr(birth_model, attr, torch.nn.Parameter(birth[name].clone()))
+        birth_path = directory / 'birth_001.ply'
+        birth_model.save_ply(str(birth_path))
+        assert birth_path.stat().st_size == SAB.birth_ply_size(1, 1)
+        source = SAB._nearest_source_rows(moved_xyz, birth['xyz'])
+        full_xyz = torch.cat((moved_xyz, birth['xyz']), dim=0)
+        motion.register_materialized_layout(full_xyz, source)
+        motion_path = directory / 'motion_001.bin'
+        digest = Q.reference_digest(raw)
+        post_motion = {**raw, 'xyz': moved_xyz, 'rotation': moved_rotation}
+        motion.export_motion(motion_path, frame_index=1,
+            previous_state_digest=digest,
+            post_motion_digest=Q.reference_digest(post_motion),
+            previous_count=len(raw['xyz']), deleted_count=0, birth_count=1)
+        decoded, first = decoder.advance(motion_path, birth_path, raw)
+        assert first['tree_rebuilt'] and first['birth_count'] == 1
+        expected = {name: value.clone() for name, value in raw.items()}
+        expected['xyz'] = torch.cat((moved_xyz, birth['xyz']), dim=0)
+        expected['rotation'] = torch.cat((moved_rotation, birth['rotation']), dim=0)
+        for name in Q.RAW_FIELDS:
+            if name not in ('xyz', 'rotation'):
+                expected[name] = torch.cat((raw[name], birth[name]), dim=0)
+        assert Q.reference_digest(decoded) == Q.reference_digest(expected)
+
+        motion.committed = True
+        deleted, _ = motion.compensation_deletions(decoded['opacity'], 1)
+        rows = Q.survivor_rows(len(decoded['xyz']), deleted)
+        base = {name: value[rows].clone() for name, value in decoded.items()}
+        motion.setup(base['xyz'], base['rotation'], 1., previous_rows=rows,
+                     previous_new_count=1, frame_index=2)
+        assert not motion.tree_rebuilt
+        with torch.no_grad():
+            for value in motion.region_translation:
+                value[:, 1] = .11
+            for gate in motion.refine_logits:
+                gate.fill_(4.)
+        frame2_xyz, frame2_rotation = motion(10, training=True)
+        frame2_path = directory / 'motion_002.bin'
+        expected2 = {name: value.clone() for name, value in base.items()}
+        expected2['xyz'], expected2['rotation'] = frame2_xyz, frame2_rotation
+        motion.export_motion(frame2_path, frame_index=2,
+            previous_state_digest=Q.reference_digest(decoded),
+            post_motion_digest=Q.reference_digest(expected2),
+            previous_count=len(decoded['xyz']), deleted_count=1, birth_count=0)
+        decoded2, second = decoder.advance(frame2_path, None, decoded)
+        assert second['deleted_rows'] == deleted.tolist()
+        assert not second['tree_rebuilt']
+        assert Q.reference_digest(decoded2) == Q.reference_digest(expected2)
 
 
 if __name__ == '__main__':

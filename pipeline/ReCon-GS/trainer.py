@@ -45,7 +45,7 @@ class Trainer(BaseTrainer):
     @property
     def compact_console(self):
         return (self.config.selective_console_mode == 'compact'
-                and self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement'})
+                and self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement', 'storage_aware_binary'})
 
     def routine_info(self, message, *args):
         if not self.compact_console:
@@ -57,7 +57,7 @@ class Trainer(BaseTrainer):
             stream.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {text}\n')
 
     def synchronize(self):
-        if (self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement'} and torch.cuda.is_available()
+        if (self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement', 'storage_aware_binary'} and torch.cuda.is_available()
                 and str(self.device).startswith('cuda')):
             torch.cuda.synchronize(self.device)
 
@@ -89,6 +89,8 @@ class Trainer(BaseTrainer):
                 (self.output_dir / 'frame_storage' / 'flat_cluster').glob(f'*_{frame:03d}.*')),
             'binary_refinement_exports': list(
                 (self.output_dir / 'frame_storage' / 'binary_refinement').glob(f'*_{frame:03d}.*')),
+            'storage_aware_binary_exports': list(
+                (self.output_dir / 'frame_storage' / 'storage_aware_binary').glob(f'*_{frame:03d}.*')),
             'images': [],
         }
         image_dir = self.output_dir / 'image/frames' / f'{frame:04d}'
@@ -144,11 +146,13 @@ class Trainer(BaseTrainer):
                          self.current_frame, quality)
             return
         activity = stream['activities']
-        if self.module.config.motion_mode == 'binary_refinement':
+        if self.module.config.motion_mode in {'binary_refinement', 'storage_aware_binary'}:
+            label = ('存储感知二叉精度' if self.module.config.motion_mode == 'storage_aware_binary'
+                     else '二叉细化')
             logging.info(
-                '帧 %d 二叉细化 | %s | 纯训练=%.2fs 总计=%.2fs | '
+                '帧 %d %s | %s | 纯训练=%.2fs 总计=%.2fs | '
                 '必要文件=%.4f MB 参数=%.2f KiB | 新增=%d 删除=%d',
-                self.current_frame, quality, clocks['training'], clocks['wall'],
+                self.current_frame, label, quality, clocks['training'], clocks['wall'],
                 stream['inference_file_bytes'] / 1e6, stream['hard_storage_bytes'] / 1024,
                 stream['new_count'], stream['deleted_count'])
             self.routine_info('二叉细化活动: %s', json.dumps(activity, ensure_ascii=False))
@@ -251,7 +255,7 @@ class Trainer(BaseTrainer):
             logging.info('帧 %d 补点 | %s', self.current_frame, ' | '.join(details))
 
     def finish_frame_summary(self, wall_started):
-        if self.module.config.motion_mode in {'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement'}:
+        if self.module.config.motion_mode in {'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement', 'storage_aware_binary'}:
             self.finish_quantized_frame_summary(wall_started)
             return
         from .model.selective_diagnostics import summarize
@@ -452,7 +456,7 @@ class Trainer(BaseTrainer):
             loss, metrics, render_pkg = self.module.training_step(*args)
             self.module.timer.clock("backward").start()
             loss.backward()
-            if (self.module.config.motion_mode in {'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement'}
+            if (self.module.config.motion_mode in {'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement', 'storage_aware_binary'}
                     and self.module.config.quantized_diagnostics.gradient_steps is not None
                     and self.global_step in self.module.config.quantized_diagnostics.gradient_steps):
                 self.module.record_quantized_gradients()
@@ -551,7 +555,7 @@ class Trainer(BaseTrainer):
         if progress_bar is not None:
             progress_bar.close()
             self._progress_bar = None
-        if self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement'}:
+        if self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement', 'storage_aware_binary'}:
             if view_seed is not None:
                 path = self.output_dir / 'frame_summary' / f'training_views_{self.current_frame:03d}.json'
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -593,7 +597,7 @@ class Trainer(BaseTrainer):
         if num_loaders == 1:
             results_list = results_list[0]
         self.module.validation_end(results_list, num_loaders)
-        if self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement'}:
+        if self.module.config.motion_mode in {'selective', 'learned_selective', 'quantized_residual', 'sparse_hierarchical', 'flat_cluster', 'binary_refinement', 'storage_aware_binary'}:
             self.synchronize()
             started = time.perf_counter()
             path = self.output_dir / 'frame_summary' / f'evaluation_{self.current_frame:03d}_step{self.global_step}.json'
