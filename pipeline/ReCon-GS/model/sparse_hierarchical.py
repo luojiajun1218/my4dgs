@@ -199,10 +199,11 @@ def _transform(base_xyz, base_rotation, layout, regions, local, z_regions,
     n = len(base_xyz)
     xyz = base_xyz
     rotation = base_rotation
-    identity = _identity_quaternion(base_xyz)
-    advected_pivots = [pivots[level][index[level]] for level in range(3)]
+    depth = len(layout['counts'])
+    identity = _identity_quaternion(base_xyz) if depth > 1 else None
+    advected_pivots = [pivots[level][index[level]] for level in range(depth)]
 
-    for level in range(3):
+    for level in range(depth):
         owner = index[level]
         weight = z_regions[level][owner]
         transform = regions[level][owner]
@@ -217,7 +218,7 @@ def _transform(base_xyz, base_rotation, layout, regions, local, z_regions,
 
         # A parent rotation carries every child pivot with it, even when the
         # child has its own independent gate.
-        for child_level in range(level + 1, 3):
+        for child_level in range(level + 1, depth):
             old_pivot = advected_pivots[child_level]
             moved_pivot, _ = apply_region_rigid(
                 old_pivot, identity, advected_pivots[level], translation,
@@ -267,7 +268,7 @@ def _unpack_bit(data, cursor):
 def _children(layout):
     result = []
     occupancy = _occupancy(layout)
-    for level in range(2):
+    for level in range(len(layout['counts']) - 1):
         rows = [[] for _ in range(layout['counts'][level])]
         for child, parent in enumerate(layout['parents'][level].detach().cpu().tolist()):
             if bool(occupancy[level + 1][child]):
@@ -312,7 +313,7 @@ def encode_m_tree(mask, layout):
             bits.extend((0, 0))  # uniform off
         else:
             bits.extend((1, 0))  # mixed
-            if level == 2:
+            if level == len(layout['counts']) - 1:
                 bits.extend(values.to(torch.uint8).tolist())
             else:
                 for child in children[level][node]:
@@ -346,7 +347,7 @@ def decode_m_tree(data, bit_count, layout):
             return
         if (first, second) != (1, 0):
             raise ValueError('Unsupported m mask node tag')
-        if level == 2:
+        if level == len(layout['counts']) - 1:
             for member in members.tolist():
                 value, cursor = _unpack_bit(data, cursor)
                 result[member] = bool(value)
@@ -380,13 +381,13 @@ def _expected_m_tree_bits(probability, layout, log_probabilities=None):
 
     # Carry log probabilities between levels. An exp result may underflow to
     # zero; taking log of that result at its parent makes backward nonfinite.
-    log_all_on = segment_log_sum(log_on, index[2], layout['counts'][2])
-    log_all_off = segment_log_sum(log_off, index[2], layout['counts'][2])
+    log_all_on = segment_log_sum(log_on, index[-1], layout['counts'][-1])
+    log_all_off = segment_log_sum(log_off, index[-1], layout['counts'][-1])
     all_on, all_off = log_all_on.exp(), log_all_off.exp()
-    fine_sizes = torch.bincount(index[2], minlength=layout['counts'][2]).to(probability)
+    fine_sizes = torch.bincount(index[-1], minlength=layout['counts'][-1]).to(probability)
     expected = 2 + (1 - all_on - all_off).clamp_min(0) * fine_sizes
-    expected = expected * occupancy[2].to(probability)
-    for level in (1, 0):
+    expected = expected * occupancy[-1].to(probability)
+    for level in reversed(range(len(layout['counts']) - 1)):
         parent = child_owner[level]
         log_all_on = segment_log_sum(log_all_on[occupancy[level + 1]],
                                     parent[occupancy[level + 1]], layout['counts'][level])
@@ -407,6 +408,8 @@ class SparseHierarchicalMotion(nn.Module):
     """Three-stage, independent binary m/z hierarchical motion model."""
 
     layout_version = LAYOUT_VERSION
+    num_motion_levels = 3
+    config_class = SparseHierarchicalConfig
 
     def __init__(self, config: SparseHierarchicalConfig):
         super().__init__()
@@ -454,6 +457,19 @@ class SparseHierarchicalMotion(nn.Module):
         self.gate_optimizer = torch.optim.Adam(groups, **opts)
         self.optimizer = self.motion_optimizer
 
+    def _seed_layout(self, xyz):
+        return stable_layout(xyz, self.config.fine_region_gs)
+
+    def _cluster_layout(self, source, source_q, target, target_q, observations):
+        return cluster_motion_layout(source, source_q, target, target_q,
+            self.index.detach().cpu().numpy(), self.counts,
+            [value.detach().cpu().numpy() for value in self.parents], observations,
+            extent=self.extent, neighbors=self.config.tree_cluster_neighbors,
+            iterations=self.config.tree_cluster_iterations,
+            spatial_weight=self.config.tree_cluster_spatial_weight,
+            orientation_extent=self.config.tree_cluster_orientation_extent,
+            min_observations=self.config.tree_probe_min_observations)
+
     def setup(self, xyz, rotation, extent, warm_start=True,
               previous_rows=None, previous_new_count=None, frame_index=None,
               layout_override=None):
@@ -489,7 +505,7 @@ class SparseHierarchicalMotion(nn.Module):
             if previous_new_count is not None and old_count != len(self.base_xyz) + previous_new_count:
                 raise ValueError('Sparse previous layout and newborn count disagree')
             if rebuild:
-                index, counts, parents = stable_layout(xyz, self.config.fine_region_gs)
+                index, counts, parents = self._seed_layout(xyz)
                 layout = _layout(index, counts, parents, xyz)
             else:
                 old_index = old_layout['index'].to(xyz.device)[:, rows]
@@ -497,8 +513,10 @@ class SparseHierarchicalMotion(nn.Module):
                                  old_layout['pivots'])
         else:
             rows = None
-            index, counts, parents = stable_layout(xyz, self.config.fine_region_gs)
+            index, counts, parents = self._seed_layout(xyz)
             layout = _layout(index, counts, parents, xyz)
+        if len(layout['counts']) != self.num_motion_levels:
+            raise ValueError('Motion layout depth does not match the configured model')
         topology_seconds = time.perf_counter() - layout_start
         self.previous_layout = _layout_cpu(old_layout)
         self._export_survivor_rows = (
@@ -528,7 +546,7 @@ class SparseHierarchicalMotion(nn.Module):
         self.m_logits = nn.Parameter(xyz.new_full((len(xyz),), m_initial))
         # Shared fine evidence reaches members without a direct image gradient;
         # the existing per-GS logit can still override its region's decision.
-        self.m_fine_logits = nn.Parameter(xyz.new_zeros(self.counts[2]))
+        self.m_fine_logits = nn.Parameter(xyz.new_zeros(self.counts[-1]))
         self.z_region_logits = nn.ParameterList(
             [nn.Parameter(xyz.new_full((count,), initial)) for count in self.counts])
         self.z_local_logits = nn.Parameter(xyz.new_full((len(xyz),), initial))
@@ -550,7 +568,7 @@ class SparseHierarchicalMotion(nn.Module):
             action='rebuild' if rebuild else ('initial' if old_layout is None else 'reuse'),
             old_region_counts=list(old_layout['counts']) if old_layout is not None else None,
             region_counts=list(self.counts), topology_seconds=topology_seconds,
-            semantics='Three-level tree initialized with stable spatial regions. Current training probes '
+            semantics=f'{self.num_motion_levels} motion level(s) initialized with stable spatial regions. Current training probes '
                 'refine ownership using shared SE3 fits when tree_builder is rigid_cluster. Survivor '
                 'row identities are reused between periodic rebuilds. Gates and motion '
                 'gates reset each frame. Optional inherited total motion follows survivor identities; '
@@ -680,13 +698,8 @@ class SparseHierarchicalMotion(nn.Module):
         refreshed = (self.config.tree_builder == 'rigid_cluster' and
                      self.tree_setup['action'] in {'initial', 'rebuild'})
         if refreshed:
-            index, diagnostics = cluster_motion_layout(source, source_q, target, target_q,
-                before_index, self.counts, [cpu(value).astype(np.int64) for value in self.parents],
-                observations, extent=self.extent, neighbors=self.config.tree_cluster_neighbors,
-                iterations=self.config.tree_cluster_iterations,
-                spatial_weight=self.config.tree_cluster_spatial_weight,
-                orientation_extent=self.config.tree_cluster_orientation_extent,
-                min_observations=self.config.tree_probe_min_observations)
+            index, diagnostics = self._cluster_layout(
+                source, source_q, target, target_q, observations)
             self.active_layout = _layout(torch.as_tensor(index, device=self.base_xyz.device),
                 self.counts, self.parents, self.base_xyz)
             self.index = self.active_layout['index']
@@ -702,7 +715,7 @@ class SparseHierarchicalMotion(nn.Module):
             observed_rows=int((observations > 0).sum()), qualified_rows=int((weights > 0).sum()),
             before_shared_fit=before_fit, after_shared_fit=after_fit,
             changed_owners=[int(np.count_nonzero(before_index[level] != after_index[level]))
-                            for level in range(3)])
+                            for level in range(len(self.counts))])
         self.stage_seconds['tree_cluster'] = time.perf_counter() - started
         projection_started = time.perf_counter()
         for value in self.motion_parameters():
@@ -797,7 +810,7 @@ class SparseHierarchicalMotion(nn.Module):
         target_xyz, target_rotation = _transform(
             self.base_xyz, self.base_rotation, self.active_layout, regions, local,
             z_regions, z_local, m, soft_m=True)
-        for level in range(3):
+        for level in range(len(self.counts)):
             self.region_translation[level].mul_(z_regions[level][:, None])
             self.region_rotation[level].mul_(z_regions[level][:, None])
         regions, _ = _quantized_motion(self)
@@ -876,7 +889,7 @@ class SparseHierarchicalMotion(nn.Module):
 
     def _m_gate_logits(self):
         if self.config.m_fine_sharing:
-            return self.m_logits + self.m_fine_logits[self.index[2]]
+            return self.m_logits + self.m_fine_logits[self.index[-1]]
         return self.m_logits
 
     def _render_m_probability(self, probability):
@@ -985,11 +998,11 @@ class SparseHierarchicalMotion(nn.Module):
     def _encode_hard_gates(self, masks):
         m = masks['m'].detach().bool()
         m_data, m_bits = encode_m_tree(m, self.active_layout)
-        active = [self._region_has_open_m(m, level) for level in range(3)]
+        active = [self._region_has_open_m(m, level) for level in range(len(self.counts))]
         z_values = []
         active_rows, payload_rows = [], []
         region_slots = 0
-        for level in range(3):
+        for level in range(len(self.counts)):
             rows = torch.where(active[level])[0]
             selected = rows[masks['z_regions'][level].detach()[rows]]
             active_rows.append(rows.detach().cpu())
@@ -1041,7 +1054,7 @@ class SparseHierarchicalMotion(nn.Module):
         region_rows = self.base_xyz.new_zeros(())
         relevant_rows = self.base_xyz.new_zeros(())
         log_off = self._m_storage_log_probabilities(step)[1] if not fixed else None
-        for level in range(3):
+        for level in range(len(self.counts)):
             relevant = (self._region_has_open_m(m.bool(), level).to(m) if fixed else
                         self._region_open_probability(log_off, level))
             region_rows = region_rows + (z_regions[level] * relevant).sum()
@@ -1053,16 +1066,16 @@ class SparseHierarchicalMotion(nn.Module):
             # even when local z is closed. Every relevant region needs its
             # pivot and z even when that region's own residual is closed.
             parent_bytes = sum(self.counts[level + 1] * _region_index_dtype(self.counts[level]).itemsize
-                               for level in range(2))
+                               for level in range(len(self.counts) - 1))
             return dict(motion_region_bytes=region_rows * 24.,
                         motion_local_bytes=local_bytes,
                         m_index_bytes=m.sum() * 4.,
                         z_mask_bytes=m.sum() + relevant_rows,
-                        topology_bytes=m.sum() * _region_index_dtype(self.counts[2]).itemsize
-                            + parent_bytes + 16.,  # Three int32 counts + uint32 source row count.
+                        topology_bytes=m.sum() * _region_index_dtype(self.counts[-1]).itemsize
+                            + parent_bytes + 4. * (len(self.counts) + 1),
                         pivot_bytes=relevant_rows * 12.)
         # These are the exact ordinary-array dtypes in _raw_parameter_arrays.
-        topology_bytes = 4 * (count + sum(self.counts[1:]) + 3)
+        topology_bytes = 4 * (count + sum(self.counts[1:]) + len(self.counts))
         pivot_bytes = 12 * regions
         return dict(motion_region_bytes=region_rows * 24.,
                     motion_local_bytes=local_bytes,
@@ -1084,7 +1097,7 @@ class SparseHierarchicalMotion(nn.Module):
         log_probabilities = self._m_storage_log_probabilities(step)
         m_bits = _expected_m_tree_bits(m, self.active_layout, log_probabilities)
         z_bits = m.new_zeros(())
-        for level in range(3):
+        for level in range(len(self.counts)):
             p_any = self._region_open_probability(log_probabilities[1], level)
             z_bits = z_bits + p_any.sum()
         return dict(m_bits=m_bits, z_bits=z_bits + m.sum())
@@ -1140,7 +1153,7 @@ class SparseHierarchicalMotion(nn.Module):
         masks = self._hard_masks_for_step(max(self.last_step, 1))
         m = masks['m']
         levels = []
-        for level in range(3):
+        for level in range(len(self.counts)):
             active = self._region_has_open_m(m, level)
             z = masks['z_regions'][level]
             levels.append(dict(level=level, denominator=int(active.sum()),
@@ -1162,15 +1175,15 @@ class SparseHierarchicalMotion(nn.Module):
         def array(value, dtype):
             return value.detach().cpu().numpy().astype(dtype)
         arrays = dict(
-            representation=np.array(LAYOUT_VERSION),
+            representation=np.array(self.layout_version),
             motion_export_format=np.array('raw_parameters'),
             base_digest=np.array(self._base_digest()),
             counts=np.asarray(self.counts, dtype=np.int32),
-            fine_index=array(self.index[2], np.int32),
+            fine_index=array(self.index[-1], np.int32),
             m_mask=array(masks['m'], np.bool_),
             z_local_mask=array(masks['z_local'], np.bool_),
             local_payload=array(local[masks['m'] & masks['z_local']], np.float32))
-        for level in range(3):
+        for level in range(len(self.counts)):
             arrays[f'pivots_l{level}'] = array(self.active_layout['pivots'][level], np.float32)
             arrays[f'z_region_mask_l{level}'] = array(masks['z_regions'][level], np.bool_)
             active = self._region_has_open_m(masks['m'], level) & masks['z_regions'][level]
@@ -1191,16 +1204,16 @@ class SparseHierarchicalMotion(nn.Module):
             return value.detach().cpu().numpy().astype(dtype)
         rows = torch.where(masks['m'])[0]
         arrays = dict(
-            representation=np.array(LAYOUT_VERSION),
+            representation=np.array(self.layout_version),
             motion_export_format=np.array('sparse_parameters'),
             base_digest=np.array(self._base_digest()),
             source_row_count=np.array(count, dtype=np.uint32),
             counts=np.asarray(self.counts, dtype=np.int32),
             m_rows=array(rows, np.uint32),
-            fine_index=array(self.index[2][rows], _region_index_dtype(self.counts[2])),
+            fine_index=array(self.index[-1][rows], _region_index_dtype(self.counts[-1])),
             z_local_mask=array(masks['z_local'][rows], np.bool_),
             local_payload=array(local[masks['m'] & masks['z_local']], np.float32))
-        for level in range(3):
+        for level in range(len(self.counts)):
             relevant = torch.unique(self.index[level][rows], sorted=True)
             z = masks['z_regions'][level][relevant]
             arrays[f'pivots_l{level}'] = array(self.active_layout['pivots'][level][relevant], np.float32)
@@ -1225,7 +1238,7 @@ class SparseHierarchicalMotion(nn.Module):
         m = masks['m'].detach().cpu()
         region_symbols, local_symbols = _quantized_motion(self, integer=True)
         arrays = dict(
-            representation=np.array(LAYOUT_VERSION),
+            representation=np.array(self.layout_version),
             base_digest=np.array(self._base_digest()),
             extent=np.array(self.extent, dtype=np.float32),
             motion_steps=np.asarray(self.motion_steps_vector.detach().cpu(), dtype=np.float32),
@@ -1238,7 +1251,7 @@ class SparseHierarchicalMotion(nn.Module):
                 arrays[f'parents_l{level}'] = value.detach().cpu().numpy().astype(np.int32)
             for level, value in enumerate(self.active_layout['pivots']):
                 arrays[f'pivots_l{level}'] = value.detach().cpu().numpy().astype(np.float32)
-        for level in range(3):
+        for level in range(len(self.counts)):
             rows = cache['active_rows'][level]
             selected = cache['payload_rows'][level]
             arrays[f'z_region_rows_l{level}'] = rows.numpy().astype(np.int32)
@@ -1267,17 +1280,25 @@ class SparseHierarchicalMotion(nn.Module):
             sparse = self.config.motion_export_format == 'sparse_parameters'
             arrays = self._sparse_parameter_arrays() if sparse else self._raw_parameter_arrays()
             np.savez(path, **arrays)
+            encoding = 'sparse_fine_parent_arrays' if sparse else 'raw_fine_parent_arrays'
+            semantics = ('Selected float32 motion rows; uint32 m-open GS IDs; uint16/uint32 fine '
+                         'owners and parent tables; bool local z for m-open GSs; bool regional z and '
+                         'float32 pivots only for relevant regions; counts and source row count. '
+                         'Ordinary uncompressed NPZ with no cross-frame topology dependency.' if sparse else
+                         'Selected float32 motion rows, full bool m/z masks, int32 fine ownership, '
+                         'parent tables/counts and float32 pivots. Ordinary uncompressed NPZ; '
+                         'archive_bytes additionally includes container and verification metadata.')
+            if self.num_motion_levels == 1:
+                encoding = 'sparse_cluster_arrays' if sparse else 'raw_cluster_arrays'
+                semantics = ('Single-level group ownership with shared rigid motion, local residuals, '
+                             'binary m/z gates and group pivots. No parent tables or octree. '
+                             'Selected motion values are float32 in ordinary uncompressed NPZ; '
+                             'parameter_bytes excludes file headers and verification metadata.')
             return dict(path=str(path), archive_bytes=path.stat().st_size,
                 motion_export_format=self.config.motion_export_format,
-                layout_encoding='sparse_fine_parent_arrays' if sparse else 'raw_fine_parent_arrays',
+                layout_encoding=encoding,
                 layout_dependency=None, parameter_bytes=self.raw_parameter_bytes(arrays),
-                semantics=('Selected float32 motion rows; uint32 m-open GS IDs; uint16/uint32 fine '
-                          'owners and parent tables; bool local z for m-open GSs; bool regional z and '
-                          'float32 pivots only for relevant regions; counts and source row count. '
-                          'Ordinary uncompressed NPZ with no cross-frame topology dependency.' if sparse else
-                          'Selected float32 motion rows, full bool m/z masks, int32 fine ownership, '
-                          'parent tables/counts and float32 pivots. Ordinary uncompressed NPZ; '
-                          'archive_bytes additionally includes container and verification metadata.'))
+                semantics=semantics)
         layout = numpy_layout(self.active_layout)
         previous_layout = (numpy_layout(self.previous_layout)
                            if self.previous_layout is not None else None)
@@ -1312,18 +1333,23 @@ class SparseHierarchicalMotion(nn.Module):
     def _load_raw_parameter_pose(packet, xyz, rotation):
         counts = packet['counts'].astype(np.int64)
         fine = packet['fine_index'].astype(np.int64)
-        parents = [packet[f'parents_l{level}'].astype(np.int64) for level in range(2)]
-        if (counts.shape != (3,) or (counts < 1).any() or fine.shape != (len(xyz),)
-                or (fine < 0).any() or (fine >= counts[2]).any()):
+        depth = len(counts)
+        if (counts.shape != (depth,) or depth not in (1, 3) or (counts < 1).any()
+                or fine.shape != (len(xyz),)
+                or (fine < 0).any() or (fine >= counts[-1]).any()):
             raise ValueError('Invalid raw parameter topology')
-        for level in range(2):
+        parents = [packet[f'parents_l{level}'].astype(np.int64)
+                   for level in range(depth - 1)]
+        for level in range(depth - 1):
             if (parents[level].shape != (counts[level + 1],) or
                     (parents[level] < 0).any() or (parents[level] >= counts[level]).any()):
                 raise ValueError('Invalid raw parameter parent table')
-        middle = parents[1][fine]
+        owners = [fine]
+        for parent in reversed(parents):
+            owners.insert(0, parent[owners[0]])
         layout_np = dict(counts=counts, parents=parents,
-            index=np.stack((parents[0][middle], middle, fine)),
-            pivots=[packet[f'pivots_l{level}'] for level in range(3)])
+            index=np.stack(owners),
+            pivots=[packet[f'pivots_l{level}'] for level in range(depth)])
         validate_layout(layout_np)
         layout = dict(counts=counts.tolist(),
             index=torch.as_tensor(layout_np['index'], device=xyz.device),
@@ -1363,7 +1389,9 @@ class SparseHierarchicalMotion(nn.Module):
         """Restore the necessary sparse paths; closed GSs keep base poses."""
         counts = packet['counts']
         source_count = packet['source_row_count']
-        if (counts.dtype != np.int32 or counts.shape != (3,) or (counts < 1).any()
+        depth = len(counts)
+        if (counts.dtype != np.int32 or counts.shape != (depth,) or depth not in (1, 3)
+                or (counts < 1).any()
                 or source_count.dtype != np.uint32 or source_count.shape != ()
                 or int(source_count.item()) != len(xyz)):
             raise ValueError('Invalid sparse parameter dimensions')
@@ -1373,12 +1401,12 @@ class SparseHierarchicalMotion(nn.Module):
             raise ValueError('Sparse m rows must be ordered unique GS indices')
         rows = rows.astype(np.int64)
         fine = packet['fine_index']
-        if (fine.dtype != _region_index_dtype(counts[2]) or fine.shape != (len(rows),)
-                or (fine >= counts[2]).any()):
+        if (fine.dtype != _region_index_dtype(counts[-1]) or fine.shape != (len(rows),)
+                or (fine >= counts[-1]).any()):
             raise ValueError('Invalid sparse fine ownership')
         fine = fine.astype(np.int64)
         parents = []
-        for level in range(2):
+        for level in range(depth - 1):
             value = packet[f'parents_l{level}']
             if (value.dtype != _region_index_dtype(counts[level])
                     or value.shape != (int(counts[level + 1]),)
@@ -1402,8 +1430,9 @@ class SparseHierarchicalMotion(nn.Module):
         raw['z_local_mask'][rows] = boolean('z_local_mask', len(rows))
         for level, parent in enumerate(parents):
             raw[f'parents_l{level}'] = parent
-        middle = parents[1][fine]
-        owners = (parents[0][middle], middle, fine)
+        owners = [fine]
+        for parent in reversed(parents):
+            owners.insert(0, parent[owners[0]])
         for level, owner in enumerate(owners):
             relevant = np.unique(owner)
             pivots = packet[f'pivots_l{level}']
@@ -1417,8 +1446,8 @@ class SparseHierarchicalMotion(nn.Module):
             raw[f'region_payload_l{level}'] = packet[f'region_payload_l{level}']
         return SparseHierarchicalMotion._load_raw_parameter_pose(raw, xyz, rotation)
 
-    @staticmethod
-    def decode_export_motion(path, base_xyz, base_rotation):
+    @classmethod
+    def decode_export_motion(cls, path, base_xyz, base_rotation):
         """Decode absolute poses, resolving same-directory layout dependencies.
 
         Legacy self-contained packets remain readable. New reuse packets need
@@ -1426,7 +1455,7 @@ class SparseHierarchicalMotion(nn.Module):
         """
         with np.load(path, allow_pickle=False) as packet:
             representation = str(packet['representation'].item())
-            if representation != LAYOUT_VERSION:
+            if representation != cls.layout_version:
                 raise ValueError(f'Unsupported sparse hierarchical export: {representation}')
             xyz = torch.as_tensor(base_xyz).detach()
             rotation = torch.as_tensor(base_rotation, device=xyz.device, dtype=xyz.dtype).detach()
@@ -1438,14 +1467,18 @@ class SparseHierarchicalMotion(nn.Module):
             if digest.hexdigest() != str(packet['base_digest'].item()):
                 raise ValueError('Sparse hierarchical export base digest mismatch')
             if 'motion_export_format' in packet:
+                if len(packet['counts']) != cls.num_motion_levels:
+                    raise ValueError('Export layout depth does not match its representation')
                 parameter_format = str(packet['motion_export_format'].item())
                 if parameter_format == 'raw_parameters':
-                    return SparseHierarchicalMotion._load_raw_parameter_pose(packet, xyz, rotation)
+                    return cls._load_raw_parameter_pose(packet, xyz, rotation)
                 if parameter_format == 'sparse_parameters':
-                    return SparseHierarchicalMotion._load_sparse_parameter_pose(packet, xyz, rotation)
+                    return cls._load_sparse_parameter_pose(packet, xyz, rotation)
                 raise ValueError('Unsupported motion parameter format')
             decoded_layout = decode_layout(path, packet)
             counts = decoded_layout['counts'].tolist()
+            if len(counts) != cls.num_motion_levels:
+                raise ValueError('Export layout depth does not match its representation')
             if decoded_layout['index'].shape[1] != len(xyz):
                 raise ValueError('Sparse layout GS count differs from the motion base')
             index = torch.as_tensor(decoded_layout['index'], device=xyz.device)
@@ -1491,7 +1524,7 @@ class SparseHierarchicalMotion(nn.Module):
     def capture(self):
         if self.index is None:
             return None
-        return dict(layout_version=LAYOUT_VERSION, config=asdict(self.config),
+        return dict(layout_version=self.layout_version, config=asdict(self.config),
             tree_probe_complete=self.tree_probe_complete,
             probe_seen_views={name: value.detach().cpu().clone()
                               for name, value in self.probe_seen_views.items()},
@@ -1515,10 +1548,10 @@ class SparseHierarchicalMotion(nn.Module):
     def restore(self, packet):
         if packet is None:
             return
-        if packet.get('layout_version') != LAYOUT_VERSION:
+        if packet.get('layout_version') != self.layout_version:
             raise ValueError('Sparse hierarchical checkpoint version mismatch')
         self._export_layout_record = None
-        saved = SparseHierarchicalConfig(**packet['config'])
+        saved = self.config_class(**packet['config'])
         saved.validate()
         if asdict(saved) != asdict(self.config):
             raise ValueError('Sparse hierarchical resume requires identical settings')

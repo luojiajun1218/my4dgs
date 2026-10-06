@@ -219,3 +219,38 @@ def cluster_motion_layout(xyz, base_rotation, target_xyz, target_rotation,
         semantics='Current training-view probe; local shared-SE3 fitting with '
             'orientation consistency. Unobserved rows keep their spatial seed; '
             'each child remains inside its selected parent. Region budgets are unchanged.')
+
+
+def cluster_flat_motion_layout(xyz, base_rotation, target_xyz, target_rotation,
+                               seed_owner, count, observations, *, extent,
+                               neighbors, iterations, orientation_extent,
+                               min_observations):
+    """Assign one motion group per GS, using shared-SE3 error without a spatial cost.
+
+    Spatial neighbours bound the candidate search only. There are no parents,
+    per-depth fits, or future-frame observations.
+    """
+    xyz = np.asarray(xyz, dtype=np.float64)
+    target_xyz = np.asarray(target_xyz, dtype=np.float64)
+    owner = np.asarray(seed_owner, dtype=np.int64)
+    observations = np.asarray(observations, dtype=np.float64)
+    if (xyz.ndim != 2 or xyz.shape[1] != 3 or not len(xyz)
+            or target_xyz.shape != xyz.shape or owner.shape != (len(xyz),)
+            or observations.shape != (len(xyz),) or count < 1
+            or np.any(owner < 0) or np.any(owner >= count)
+            or not np.isfinite(extent) or extent <= 0
+            or neighbors < 1 or iterations < 1 or min_observations < 1
+            or not np.isfinite(orientation_extent) or orientation_extent <= 0
+            or not np.isfinite(observations).all() or np.any(observations < 0)):
+        raise ValueError('Invalid flat motion clustering parameters')
+    qualified = observations >= min_observations
+    weights = np.where(qualified, observations, 0.)
+    weights /= max(float(weights.max()), 1.)
+    relative_rotation = relative_matrices(base_rotation, target_rotation)
+    owner, metrics = _refine(xyz, target_xyz, relative_rotation, owner, count,
+        weights, extent, neighbors, iterations, 0., orientation_extent)
+    return owner[None, :], dict(qualified_rows=int(qualified.sum()),
+        unqualified_rows=int((~qualified).sum()), levels=[dict(level=0, **metrics)],
+        semantics='One motion group per GS. Shared-SE3 fitting error determines '
+            'assignment; spatial neighbours only limit candidates. Unqualified '
+            'rows retain their seed group. No parent links or motion hierarchy.')

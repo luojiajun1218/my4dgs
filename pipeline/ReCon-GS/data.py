@@ -1,6 +1,7 @@
 import json
 import random
 from itertools import cycle
+from functools import partial
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,8 +20,14 @@ from libgs.data.utils.fetch import Fetcher
 SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS = 30
 
 
-def _collate_single_view(batch):
-    return batch[0]
+def _collate_single_view(batch, expected_image_size=None):
+    view = batch[0]
+    if expected_image_size is not None:
+        width, height = expected_image_size
+        if tuple(view.image.shape[-2:]) != (height, width):
+            raise ValueError(f'Loaded image size {tuple(view.image.shape[-2:])} '
+                             f'does not match expected height/width {(height, width)}')
+    return view
 
 
 class PairedFetcher(Fetcher):
@@ -47,6 +54,7 @@ class PairedFetcher(Fetcher):
 class DataConfig(BaseDataConfig):
     root: str = ""
     resolution: int = -1
+    expected_image_size: Optional[List[int]] = None  # [width, height] after loading
     white_background: bool = False
     split_train_test: bool = True
     shuffle: bool = True
@@ -67,6 +75,11 @@ class DataModule(BaseDataModule):
 
     def __init__(self, config: DataConfig):
         super().__init__(config)
+        expected = config.expected_image_size
+        if expected is not None and (len(expected) != 2 or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in expected)):
+            raise ValueError('expected_image_size must contain positive integer width/height')
 
         args = (Path(config.root), config.resolution)
         kwargs = {
@@ -170,6 +183,10 @@ class DataModule(BaseDataModule):
         if overlap:
             raise ValueError(f'Training and validation camera splits overlap: {sorted(overlap)}')
 
+    def _view_collate(self):
+        return partial(_collate_single_view,
+                       expected_image_size=getattr(self.config, 'expected_image_size', None))
+
     def selective_training_pairs(self, names, device, camera_atol):
         """Explicit filename selection is stable across dataset shuffling/resume."""
         if self.current_frame <= 0:
@@ -201,7 +218,7 @@ class DataModule(BaseDataModule):
         # libgs full-resolution downsampling expects get_worker_info().id.
         # Keep reading inside workers, using the same worker settings as training.
         kwargs.update(batch_size=1, shuffle=False, drop_last=False,
-                      sampler=SequentialSampler(dataset), collate_fn=_collate_single_view,
+                      sampler=SequentialSampler(dataset), collate_fn=self._view_collate(),
                       timeout=SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS)
         loader = DataLoader(dataset, **kwargs)
         loader_iter = iter(loader)
@@ -237,7 +254,7 @@ class DataModule(BaseDataModule):
                 dataset, getattr(self.config, 'training_camera_names', None))
         if indices:
             dataset = Subset(dataset, indices)
-        collate_fn = lambda batch: batch[0]
+        collate_fn = self._view_collate()
         kwargs = dict(num_workers=8, pin_memory=True, collate_fn=collate_fn)
         seed = self.config.training_view_seed
         generator = (torch.Generator().manual_seed(seed + max(self.current_frame, 0))
@@ -253,7 +270,7 @@ class DataModule(BaseDataModule):
 
     def test_dataloader(self, scale: float = 1.0) -> Optional[DataLoader]:
         if dataset := self.get_test_dataset(scale):
-            collate_fn = lambda batch: batch[0]
+            collate_fn = self._view_collate()
             kwargs = dict(num_workers=8, pin_memory=True, collate_fn=collate_fn)
             kwargs = {**kwargs, **self.config.extra_dataloader_kwargs}
             return DataLoader(dataset, **kwargs)
@@ -266,7 +283,7 @@ class DataModule(BaseDataModule):
             raise ValueError('validation_camera_names must be set for a validation loader')
         indices = self._camera_indices(dataset, validation_names)
         dataset = Subset(dataset, indices)
-        kwargs = dict(num_workers=8, pin_memory=True, collate_fn=lambda batch: batch[0])
+        kwargs = dict(num_workers=8, pin_memory=True, collate_fn=self._view_collate())
         kwargs = {**kwargs, **self.config.extra_dataloader_kwargs}
         kwargs.pop('shuffle', None)
         kwargs['sampler'] = SequentialSampler(dataset)

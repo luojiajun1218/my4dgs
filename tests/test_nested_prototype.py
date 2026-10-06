@@ -35,6 +35,8 @@ DATA = importlib.import_module('pipeline.ReCon-GS.data')
 Q = importlib.import_module('pipeline.ReCon-GS.model.residual_motion')
 GR = importlib.import_module('pipeline.ReCon-GS.model.gated_residual')
 SH = importlib.import_module('pipeline.ReCon-GS.model.sparse_hierarchical')
+FC = importlib.import_module('pipeline.ReCon-GS.model.flat_cluster')
+BR = importlib.import_module('pipeline.ReCon-GS.model.binary_refinement')
 MC = importlib.import_module('pipeline.ReCon-GS.model.motion_clustering')
 SL_CODEC = importlib.import_module('pipeline.ReCon-GS.model.sparse_layout_codec')
 GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
@@ -747,6 +749,7 @@ def test_sparse_motion_export_is_connected_to_renderer():
                         rotation=self.gaussians.get_rotation.clone())
 
     scope.update(GaussianModel=PlaybackGaussian, MergedGaussianModel=PlaybackMerged)
+    scope.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
     exec(compile(ast.Module(body=methods, type_ignores=[]), str(source_path), 'exec'), scope)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / 'sparse.npz'
@@ -1712,6 +1715,7 @@ def test_frame_preparation_uses_keep_protection_and_reports_history():
     namespace = dict(torch=torch, time=time, model_raw=Q.model_raw,
                      reference_digest=Q.reference_digest, survivor_rows=Q.survivor_rows,
                      GaussianModel=lambda degree: SimpleNamespace())
+    namespace.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(module_path), 'exec'), namespace)
     raw, motion = gated_fixture(motion_init_decay=0., tree_rebuild_interval=5)
     set_gates(motion, {0: GR.SPLIT, 1: GR.SHARE, 2: GR.KEEP})
@@ -1906,6 +1910,7 @@ def test_finalization_budget_updates_storage_tree_and_next_frame_count():
                  materialize_quantized_gaussians=Q.materialize_quantized_gaussians,
                  model_raw=Q.model_raw, reference_digest=Q.reference_digest,
                  GaussianModel=lambda degree: SimpleNamespace())
+    scope.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
     exec(compile(ast.Module(body=methods, type_ignores=[]), str(source_path), 'exec'), scope)
     with tempfile.TemporaryDirectory() as directory:
         fake = SimpleNamespace(
@@ -2271,6 +2276,7 @@ def test_quality_snapshot_restores_rng_renderer_and_rigid_overrides():
                  psnr=lambda image, gt: -10 * (image - gt).square().mean().log10(),
                  ssim=lambda image, gt: 1 - (image - gt).abs().mean(),
                  MergedGaussianModel=lambda models: tuple(models))
+    scope.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), 'exec'), scope)
     def loader():
         torch.rand(5)  # Emulate DataLoader's global worker-seed consumption.
@@ -2420,6 +2426,7 @@ def test_trainer_restore_maps_cpu_checkpoint_to_training_device():
     method = next(node for node in trainer.body
                   if isinstance(node, ast.FunctionDef) and node.name == 'setup')
     scope = dict(torch=torch)
+    scope.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), 'exec'), scope)
     xyz = torch.tensor([[1., 2., 3.]])
     with tempfile.TemporaryDirectory() as directory:
@@ -2525,6 +2532,7 @@ def test_gs_activity_training_cost_skips_zero_and_caches_post_commit_value():
                      self=SimpleNamespace(residual_motion=motion,
                                           config=SimpleNamespace(motion_mode='quantized_residual')),
                      current_step=step)
+        scope.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
         exec(block, scope)
         return initial, scope
     initial, disabled = calculate(0., 133)
@@ -2770,6 +2778,7 @@ def test_candidate_render_audit_samples_before_image_outcomes():
     function = next(node for node in parsed.body
                     if isinstance(node, ast.FunctionDef) and node.name == 'sample_keep_nodes')
     namespace = {'torch': torch, 'np': np}
+    namespace.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), 'exec'), namespace)
     counts = torch.arange(1, 19)
     index = torch.repeat_interleave(torch.arange(18), counts)
@@ -3309,6 +3318,7 @@ def test_sparse_hierarchical_disabled_storage_has_no_backward_graph():
             quant_first_frame_gs_count=1, quantized_storage=count_storage)
         namespace = dict(torch=torch, self=fake, render_pkg={}, current_step=101,
                          loss=image_parameter.square(), loss_rgb=image_parameter.square())
+        namespace.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
         exec(code, namespace)
         namespace['loss'].backward()
         assert grad_enabled == []  # Sparse storage diagnostics are disabled too.
@@ -3387,6 +3397,7 @@ def test_sparse_hierarchical_regularizers_reach_gates_and_newborns_in_correct_ph
                                quantized_storage=storage)
         namespace = dict(self=fake, torch=torch, render_pkg={}, current_step=step,
             loss=image_parameter.square(), loss_rgb=image_parameter.square(), metrics={})
+        namespace.setdefault('SPARSE_MOTION_MODES', {'sparse_hierarchical', 'flat_cluster'})
         exec(code, namespace)
         namespace['loss'].backward()
         if step == 3:
@@ -3990,6 +4001,507 @@ def test_tree_probe_parameters_are_explicit_and_full_configs_have_equal_budgets(
             pass
         else:
             raise AssertionError(f'Invalid probe options accepted: {overrides}')
+
+
+def flat_cluster_fixture(**overrides):
+    values = dict(residual_test_config().__dict__)
+    values.update(motion_steps=10, tree_probe_steps=4, shared_warmup_steps=0,
+        dense_fit_steps=2, gate_compress_steps=2, gate_refine_steps=2,
+        enable_learned_gates=True, gate_policy='learned', gate_lr=.05,
+        gate_temperature_start=1., gate_temperature_end=1.,
+        initial_gate_logit=2., m_initial_gate_logit=2., gate_hard_threshold=.51,
+        storage_loss_weight=.001, motion_init_decay=0., cluster_gs=6,
+        tree_builder='rigid_cluster', tree_cluster_neighbors=8,
+        tree_cluster_iterations=3, tree_cluster_spatial_weight=0.,
+        tree_cluster_orientation_extent=.01, tree_probe_min_observations=2,
+        motion_xyz_step_extent=1e-6, motion_rotation_step_rad=1e-5,
+        motion_export_format='sparse_parameters', tree_rebuild_interval=5)
+    values.update(overrides)
+    raw = residual_raw_fixture(18)
+    motion = FC.FlatClusterMotion(FC.FlatClusterConfig(**values))
+    motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    return raw, motion
+
+
+def test_flat_cluster_seed_is_deterministic_and_has_no_parents():
+    for count, budget in [(1, 24), (18, 6), (64, 7), (64, 1)]:
+        xyz = torch.zeros(count, 3)  # Coordinate ties must use stable GS IDs.
+        left = FC.stable_flat_layout(xyz, budget)
+        right = FC.stable_flat_layout(xyz, budget)
+        torch.testing.assert_close(left[0], right[0], rtol=0, atol=0)
+        assert left[0].shape == (1, count) and left[1] == [(count + budget - 1) // budget]
+        assert left[2] == right[2] == []
+        assert len(torch.unique(left[0])) == left[1][0]
+        layout = GR._layout(*left, xyz)
+        arrays = SL_CODEC.numpy_layout(layout)
+        SL_CODEC.validate_layout(arrays)
+        assert SL_CODEC.layout_digest(arrays) == SL_CODEC.layout_digest(SL_CODEC.numpy_layout(layout))
+
+
+def test_flat_clustering_uses_shared_motion_and_preserves_unobserved_rows():
+    rng = np.random.default_rng(3)
+    source = rng.normal(size=(120, 3)) * .04
+    seed = np.repeat(np.arange(2), 60)
+    moving = np.r_[np.zeros(45), np.ones(15), np.ones(45), np.zeros(15)].astype(bool)
+    base_q = np.tile([1., 0., 0., 0.], (120, 1))
+    target_q = base_q.copy()
+    target_q[moving] = [np.cos(.1), 0., 0., np.sin(.1)]
+    target = np.einsum('nij,nj->ni', MC.relative_matrices(base_q, target_q), source)
+    target[moving, 0] += .05
+    observations = np.full(120, 2)
+    observations[0] = 1
+    options = dict(extent=1., neighbors=8, iterations=3,
+                   orientation_extent=.01, min_observations=2)
+    owner, report = MC.cluster_flat_motion_layout(source, base_q, target, target_q,
+        seed, 2, observations, **options)
+    repeated, repeated_report = MC.cluster_flat_motion_layout(source, base_q, target,
+        target_q, seed, 2, observations, **options)
+    np.testing.assert_array_equal(owner, repeated)
+    assert report == repeated_report and owner.shape == (1, 120)
+    assert owner[0, 0] == seed[0]
+    assert report['levels'][0]['after']['objective'] < report['levels'][0]['before']['objective'] * .2
+    unknown, unknown_report = MC.cluster_flat_motion_layout(source, base_q, target,
+        target_q, seed, 2, np.zeros(120), **options)
+    np.testing.assert_array_equal(unknown[0], seed)
+    assert unknown_report['qualified_rows'] == 0
+    assert np.isfinite(unknown_report['levels'][0]['after']['objective'])
+
+
+def test_flat_probe_projection_and_resume_preserve_teacher_pose():
+    raw, motion = flat_cluster_fixture(m_fine_sharing=True, m_fine_gate_lr=.02)
+    motion(4, training=True)
+    with torch.no_grad():
+        motion.gs_translation[:, 0] = .01
+        motion.gs_rotation[:, 2] = .02
+    visibility = torch.ones(len(raw['xyz']), dtype=torch.bool)
+    motion.observe_tree_probe(visibility, 'cam01.png')
+    motion.observe_tree_probe(visibility, 'cam01.png')
+    torch.testing.assert_close(motion.probe_observations, torch.ones(18), rtol=0, atol=0)
+    motion.observe_tree_probe(visibility, 'cam02.png')
+    teacher = motion(4)
+    restored = FC.FlatClusterMotion(copy.deepcopy(motion.config))
+    restored.restore(copy.deepcopy(motion.capture()))
+    actual, resumed = motion(5, training=True), restored(5, training=True)
+    assert motion.index.shape == (1, 18) and motion.parents == []
+    assert len(motion.region_translation) == len(motion.region_rotation) == 1
+    assert len(motion.z_region_logits) == 1 and len(motion.statistics()['levels']) == 1
+    assert motion.tree_setup['probe']['qualified_rows'] == 18
+    for expected, observed, continued in zip(teacher, actual, resumed):
+        torch.testing.assert_close(observed, expected, rtol=0, atol=2e-5)
+        torch.testing.assert_close(continued, observed, rtol=0, atol=0)
+
+
+def test_flat_shared_motion_local_residual_and_closed_m_are_independent():
+    raw, motion = flat_cluster_fixture()
+    motion(5, training=True)
+    with torch.no_grad():
+        motion.region_translation[0][:, 0] = .1
+        motion.gs_translation[:, 1] = .02
+        motion.m_logits.fill_(20.)
+        motion.m_logits[0] = -20.
+        motion.z_region_logits[0].fill_(20.)
+        motion.z_region_logits[0][motion.index[0, 1]] = -20.
+        motion.z_local_logits.fill_(-20.)
+        motion.z_local_logits[1] = 20.
+    xyz, rotation = motion(9, training=True)
+    torch.testing.assert_close(xyz[0], raw['xyz'][0], rtol=0, atol=0)
+    torch.testing.assert_close(rotation[0], raw['rotation'][0], rtol=0, atol=0)
+    torch.testing.assert_close(xyz[1] - raw['xyz'][1], torch.tensor([0., .02, 0.]),
+                               rtol=0, atol=1e-6)
+    masks = motion._hard_masks_for_step(9)
+    encoded = SH.encode_m_tree(masks['m'], motion.active_layout)
+    torch.testing.assert_close(SH.decode_m_tree(*encoded, motion.active_layout),
+                               masks['m'], rtol=0, atol=0)
+    assert torch.isfinite(motion.storage_bit_counts(9)['m_bits'])
+
+
+def test_flat_parameter_storage_export_and_checkpoint_roundtrip():
+    torch.manual_seed(41)
+    for parameter_format, all_closed in itertools.product(
+            ['raw_parameters', 'sparse_parameters'], [False, True]):
+        raw, motion = flat_cluster_fixture(motion_export_format=parameter_format,
+            rebase_on_hardening=True, m_fine_sharing=True, m_fine_gate_lr=.02)
+        motion(5, training=True)
+        with torch.no_grad():
+            for value in motion.motion_parameters():
+                value.copy_(torch.randn_like(value) * .01)
+            motion.m_logits.fill_(-20. if all_closed else 20.)
+            if not all_closed:
+                motion.m_logits[::2] = -20.
+            motion.z_region_logits[0][1] = -20.
+            motion.z_local_logits[1::3] = -20.
+        expected = motion(9, training=True)
+        masks = motion._hard_masks_for_step(9)
+        restored = FC.FlatClusterMotion(copy.deepcopy(motion.config))
+        restored.restore(copy.deepcopy(motion.capture()))
+        for left, right in zip(expected, restored(9)):
+            torch.testing.assert_close(left, right, rtol=0, atol=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'flat.npz'
+            exported = motion.export_motion(path)
+            with np.load(path, allow_pickle=False) as packet:
+                assert packet['counts'].shape == (1,)
+                assert not any(name.startswith('parents_l') or name.endswith('_l1')
+                               or name.endswith('_l2') for name in packet.files)
+                arrays = {name: packet[name] for name in packet.files}
+            actual_bytes = motion.raw_parameter_bytes(arrays)
+            assert exported['parameter_bytes'] == actual_bytes
+            torch.testing.assert_close(sum(motion.storage_parts(9, hard=True).values()),
+                                       torch.tensor(float(actual_bytes)), rtol=0, atol=0)
+            decoded = FC.FlatClusterMotion.decode_export_motion(path, raw['xyz'], raw['rotation'])
+            for left, right in zip(expected, decoded):
+                torch.testing.assert_close(left, torch.from_numpy(right), rtol=1e-6, atol=1e-6)
+            torch.testing.assert_close(torch.from_numpy(decoded[0])[~masks['m']],
+                                       raw['xyz'][~masks['m']], rtol=0, atol=0)
+            try:
+                SH.SparseHierarchicalMotion.decode_export_motion(path, raw['xyz'], raw['rotation'])
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Hierarchy decoder must reject flat representation')
+
+
+def test_flat_survivor_and_birth_memberships_reuse_without_parent_tables():
+    raw, motion = flat_cluster_fixture()
+    xyz, rotation = motion(9, training=True)
+    motion.committed = True
+    sources = torch.tensor([0, 4])
+    materialized_xyz = torch.cat((xyz, xyz[sources]))
+    materialized_rotation = torch.cat((rotation, rotation[sources]))
+    old_index = motion.index.clone()
+    motion.register_materialized_layout(materialized_xyz, sources)
+    rows = torch.tensor([0, 2, 4, 7, 12, 18, 19])
+    expected = torch.cat((old_index, old_index[:, sources]), dim=1)[:, rows]
+    motion.setup(materialized_xyz[rows], materialized_rotation[rows], 1.,
+                 previous_rows=rows, previous_new_count=2, frame_index=2)
+    torch.testing.assert_close(motion.index, expected, rtol=0, atol=0)
+    assert motion.parents == [] and motion.tree_setup['action'] == 'reuse'
+    assert motion.tree_setup['region_counts'] == [3]
+    motion.setup(materialized_xyz[rows], materialized_rotation[rows], 1., frame_index=5)
+    assert motion.parents == [] and motion.index.shape == (1, 7)
+    assert motion.tree_setup['action'] == 'rebuild' and motion.counts == [2]
+
+
+def test_flat_gate_phase_losses_have_finite_gradients_and_freeze_motion():
+    _, motion = flat_cluster_fixture(gs_activity_loss_weight=.001,
+                                     m_fine_sharing=True, m_fine_gate_lr=.02)
+    motion(7, training=True)
+    storage = sum(motion.storage_parts(7).values())
+    loss = storage / motion.reference_storage_bytes(18) + motion.gs_activity_fraction(7)
+    loss.backward()
+    assert all(value.grad is None for value in motion.motion_parameters())
+    assert all(value.grad is not None and torch.isfinite(value.grad).all()
+               for value in motion.gate_parameters())
+    motion.optimizer_step()
+    assert len(motion.region_translation) == 1
+
+
+def test_flat_fullres_candidate_budget_and_actual_image_size_guard():
+    import yaml
+    path = project_root / 'config' / 'fs_flat_cluster_p40_fullres_300.yaml'
+    config = yaml.safe_load(path.read_text())
+    parameters = FC.FlatClusterConfig(**config['module']['flat_cluster'])
+    parameters.validate()
+    assert parameters.cluster_gs == 24 and parameters.tree_cluster_spatial_weight == 0.
+    assert parameters.motion_steps == config['module']['deformation']['num_stage1_steps'] == 240
+    assert parameters.total_steps == config['trainer']['num_incr_steps'] == 340
+    assert config['data']['extra_dataset_kwargs']['num_frames'] == 300
+    assert config['data']['resolution'] == 1
+    assert config['data']['expected_image_size'] == [2689, 2016]
+    view = SimpleNamespace(image=torch.zeros(3, 4, 6))
+    assert DATA._collate_single_view([view], [6, 4]) is view
+    assert DATA._collate_single_view([view]) is view
+    try:
+        DATA._collate_single_view([view], [3, 2])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Actual tensor size must reject unexpected downsampling')
+    for changes in [dict(cluster_gs=0), dict(tree_cluster_spatial_weight=.001),
+                    dict(motion_export_format='legacy')]:
+        invalid = copy.deepcopy(config['module']['flat_cluster'])
+        invalid.update(changes)
+        try:
+            FC.FlatClusterConfig(**invalid).validate()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'Invalid flat settings accepted: {changes}')
+
+
+def test_module_setup_selects_flat_model_and_shared_birth_config():
+    _, fixture = flat_cluster_fixture()
+    path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    module_class = next(node for node in ast.parse(path.read_text()).body
+                        if isinstance(node, ast.ClassDef) and node.name == 'Module')
+    method = next(node for node in module_class.body
+                  if isinstance(node, ast.FunctionDef) and node.name == 'setup')
+
+    class SetupGaussian:
+        def __init__(self, degree):
+            self.degree = degree
+
+        def create_from_pcd(self, point_cloud, extent):
+            self.extent = extent
+
+        def training_setup(self, config):
+            self.config = config
+
+    scope = dict(torch=torch, SPARSE_MOTION_MODES={'sparse_hierarchical', 'flat_cluster'},
+        QUANTIZED_MOTION_MODES={'quantized_residual', 'sparse_hierarchical', 'flat_cluster'},
+        FlatClusterMotion=FC.FlatClusterMotion, SparseHierarchicalMotion=SH.SparseHierarchicalMotion,
+        GaussianModel=SetupGaussian, Renderer=lambda config, model: SimpleNamespace(gaussians=model),
+        Deformation=lambda config: SimpleNamespace(), Timer=lambda: SimpleNamespace())
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), 'exec'), scope)
+    subject = SimpleNamespace(device='cpu',
+        config=SimpleNamespace(motion_mode='flat_cluster', sparse_export_index_encoding='per_row',
+            flat_cluster=copy.deepcopy(fixture.config), random_background=False,
+            selective_diagnostics_config=None, sh_degree=1, renderer=None, gaussian=None,
+            quantized_diagnostics=SimpleNamespace(validate=lambda: None),
+            deformation=SimpleNamespace(hierarchy_mode='legacy', num_grid_levels=3, num_stage1_steps=10)),
+        trainer=SimpleNamespace(config=SimpleNamespace(num_incr_steps=fixture.config.total_steps)),
+        datamodule=SimpleNamespace(config=SimpleNamespace(white_background=False),
+            scene=SimpleNamespace(point_cloud=None), cameras_extent=1.))
+    subject.register_buffer = lambda name, value: setattr(subject, name, value)
+    scope['setup'](subject)
+    assert isinstance(subject.residual_motion, FC.FlatClusterMotion)
+    assert subject.config.quantized_residual is subject.config.flat_cluster
+    assert subject.residual_motion.num_motion_levels == 1
+
+
+def binary_refinement_fixture(**overrides):
+    import yaml
+    path = project_root / 'config' / 'fs_binary_quantized_refine_24f_20261006.yaml'
+    values = yaml.safe_load(path.read_text(encoding='utf-8'))['module']['binary_refinement']
+    # Synthetic budgets and units, not experiment parameter changes.
+    values.update(coarse_region_gs=12, min_child_gs=2, coarse_fit_steps=2,
+                  dense_fit_steps=4, gate_compress_steps=4, gate_refine_steps=2,
+                  motion_steps=10, incremental_steps=2, storage_warmup_steps=4,
+                  storage_ramp_steps=1, motion_xyz_step_extent=.1,
+                  motion_rotation_step_rad=.1, densification_stats_steps=2)
+    values.update(overrides)
+    raw = residual_raw_fixture(18)
+    motion = BR.BinaryRefinementMotion(BR.BinaryRefinementConfig(**values))
+    motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    return raw, motion
+
+
+def test_binary_spatial_tree_is_deterministic_and_has_only_real_children():
+    for count in (1, 3, 18, 49):
+        xyz = torch.zeros(count, 3)
+        left = BR.stable_binary_forest(xyz, 12, 2, 3)
+        right = BR.stable_binary_forest(xyz, 12, 2, 3)
+        torch.testing.assert_close(left['index'], right['index'], rtol=0, atol=0)
+        assert left['counts'] == right['counts']
+        for level, parents in enumerate(left['parents']):
+            children = torch.bincount(parents, minlength=left['counts'][level])
+            assert bool(((children == 0) | (children == 2)).all())
+            owner = left['index'][level + 1]
+            sizes = torch.bincount(owner[owner >= 0], minlength=left['counts'][level + 1])
+            assert bool((sizes >= 2).all())
+            valid = owner >= 0
+            torch.testing.assert_close(parents[owner[valid]], left['index'][level, valid],
+                                       rtol=0, atol=0)
+    terminal = BR.stable_binary_forest(torch.zeros(3, 3), 12, 2, 3)
+    assert terminal['counts'] == [1, 0, 0]
+    assert not bool((terminal['index'][1:] >= 0).any())
+
+
+def test_binary_stop_inherits_parent_and_closes_all_descendants():
+    raw, motion = binary_refinement_fixture()
+    with torch.no_grad():
+        motion.region_translation[0][:, 0] = .2
+        motion.region_translation[1][:, 1] = .3
+        motion.region_translation[2][:, 2] = .4
+        motion.refine_logits[0].fill_(-20.)
+        motion.refine_logits[1].fill_(20.)
+    xyz, rotation = motion(9, training=True)
+    torch.testing.assert_close(xyz, raw['xyz'] + torch.tensor([.2, 0., 0.]),
+                               rtol=0, atol=1e-6)
+    torch.testing.assert_close(rotation, raw['rotation'], rtol=0, atol=0)
+    assert [row['reachable_nodes'] for row in motion.statistics()['levels']][1:] == [0, 0]
+    assert motion.statistics()['gs']['terminal_depth_counts'] == [len(raw['xyz']), 0, 0]
+
+
+def test_binary_zero_parent_can_refine_and_quantization_zero_reuses_exact_pose():
+    raw, motion = binary_refinement_fixture()
+    with torch.no_grad():
+        for gate in motion.refine_logits:
+            gate.fill_(20.)
+        motion.region_translation[1][:, 0] = .3
+    xyz, _ = motion(9, training=True)
+    torch.testing.assert_close(xyz, raw['xyz'] + torch.tensor([.3, 0., 0.]),
+                               rtol=0, atol=1e-6)
+    assert motion.statistics()['levels'][0]['nonzero_motion_records'] == 0
+    assert motion.statistics()['levels'][1]['nonzero_motion_records'] > 0
+    raw, zero = binary_refinement_fixture()
+    raw['rotation'] = raw['rotation'] * 2.3
+    # Shared checkpoints contain raw, non-unit quaternions. Identity motion
+    # must not normalize them and thereby create an unencoded pose update.
+    zero.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    with torch.no_grad():
+        for value in zero.motion_parameters():
+            value.fill_(.049)  # Less than half the synthetic 0.1 bin.
+    for actual, expected in zip(zero(9, training=True), (raw['xyz'], raw['rotation'])):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'zero.npz'
+        zero.export_motion(path)
+        decoded = BR.BinaryRefinementMotion.decode_export_motion(path, raw['xyz'], raw['rotation'])
+        for actual, expected in zip(decoded, (raw['xyz'], raw['rotation'])):
+            torch.testing.assert_close(torch.from_numpy(actual), expected, rtol=0, atol=0)
+
+
+def test_binary_closed_ste_gate_has_image_gradient_and_joint_motion_updates():
+    raw, motion = binary_refinement_fixture()
+    with torch.no_grad():
+        motion.region_translation[1][:, 0] = .3
+        motion.refine_logits[0].fill_(-.1)
+    xyz, _ = motion(5, training=True)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    (-xyz[:, 0].sum()).backward()
+    assert bool((motion.refine_logits[0].grad < 0).all())
+    assert torch.isfinite(motion.region_translation[0].grad).all()
+    assert motion.region_translation[0].requires_grad
+    assert motion.refine_logits[0].requires_grad
+    before = motion.refine_logits[0].detach().clone()
+    motion.optimizer_step()
+    assert bool((motion.refine_logits[0].detach() > before).all())
+    assert motion.gate_optimizer.defaults['eps'] == 1e-15
+    assert motion.motion_optimizer.defaults['eps'] == 1e-8
+    _, coarse = binary_refinement_fixture()
+    coarse(1, training=True)
+    assert coarse.region_translation[0].requires_grad
+    assert not coarse.region_translation[1].requires_grad
+    assert not coarse.refine_logits[0].requires_grad
+    coarse(3, training=True)
+    assert coarse.region_translation[1].requires_grad
+    assert not coarse.refine_logits[0].requires_grad
+
+
+def test_binary_sparse_export_cost_decode_and_checkpoint_roundtrip():
+    torch.manual_seed(63)
+    for closed in (False, True):
+        raw, motion = binary_refinement_fixture()
+        with torch.no_grad():
+            for value in motion.motion_parameters():
+                value.copy_(torch.randn_like(value) * .13)
+            motion.refine_logits[0].fill_(-20. if closed else 20.)
+            motion.refine_logits[1][::2] = -20.
+        expected = motion(9, training=True)
+        restored = BR.BinaryRefinementMotion(copy.deepcopy(motion.config))
+        restored.restore(copy.deepcopy(motion.capture()))
+        for actual, target in zip(restored(9), expected):
+            torch.testing.assert_close(actual, target, rtol=0, atol=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'binary.npz'
+            report = motion.export_motion(path)
+            with np.load(path, allow_pickle=False) as packet:
+                arrays = {name: packet[name] for name in packet.files}
+            cost = BR.BinaryRefinementMotion.raw_parameter_bytes(arrays)
+            assert cost == report['parameter_bytes']
+            torch.testing.assert_close(sum(motion.storage_parts(9, hard=True).values()),
+                                       torch.tensor(float(cost)), rtol=0, atol=0)
+            decoded = BR.BinaryRefinementMotion.decode_export_motion(path, raw['xyz'], raw['rotation'])
+            for actual, target in zip(decoded, expected):
+                torch.testing.assert_close(torch.from_numpy(actual), target,
+                                           rtol=0, atol=0)
+            if closed:
+                assert arrays['node_rows_l1'].size == arrays['motion_rows_l1'].size == 0
+                assert arrays['node_rows_l2'].size == arrays['motion_rows_l2'].size == 0
+            try:
+                BR.BinaryRefinementMotion.decode_export_motion(path, raw['xyz'] + 1., raw['rotation'])
+            except ValueError as error:
+                assert 'digest' in str(error)
+            else:
+                raise AssertionError('Wrong motion base must be rejected')
+
+
+def test_binary_small_terminal_tree_and_expected_storage_gradients_are_finite():
+    _, motion = binary_refinement_fixture(coarse_region_gs=100, min_child_gs=12)
+    assert motion.counts == [1, 0, 0]
+    xyz, rotation = motion(5, training=True)
+    loss = xyz.sum() + rotation.sum() + sum(motion.storage_parts(5).values()) / 1000
+    loss.backward()
+    motion.optimizer_step()
+    assert torch.isfinite(motion.region_translation[0]).all()
+    _, joint = binary_refinement_fixture()
+    with torch.no_grad():
+        joint.region_translation[1][:, 0] = .3
+    joint(5, training=True)
+    sum(joint.storage_parts(5).values()).backward()
+    for gate in joint.refine_logits:
+        assert gate.grad is not None and torch.isfinite(gate.grad).all()
+    assert bool((joint.refine_logits[0].grad > 0).all())
+
+
+def test_binary_joint_optimizer_resume_and_readonly_eval_are_exact():
+    raw, motion = binary_refinement_fixture()
+    with torch.no_grad():
+        motion.region_translation[0][:, 0] = .1
+        motion.region_translation[1][:, 1] = .2
+
+    def train_one(subject, step):
+        xyz, _ = subject(step, training=True)
+        target = raw['xyz'] + torch.tensor([.2, .1, 0.])
+        loss = (xyz - target).square().mean() + 1e-6 * sum(subject.storage_parts(step).values())
+        loss.backward()
+        subject.optimizer_step()
+
+    train_one(motion, 5)
+    packet = copy.deepcopy(motion.capture())
+    restored = BR.BinaryRefinementMotion(copy.deepcopy(motion.config))
+    restored.restore(packet)
+    phase, optimizer = restored.current_phase, restored.optimizer
+    restored(9, training=False)
+    assert restored.current_phase == phase and restored.optimizer is optimizer
+    assert restored.hard_masks is None
+    train_one(motion, 6)
+    train_one(restored, 6)
+    for left, right in zip(motion.parameters(), restored.parameters()):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
+
+
+def test_binary_decoder_rejects_child_under_stopped_parent():
+    raw, motion = binary_refinement_fixture()
+    with torch.no_grad():
+        for gate in motion.refine_logits:
+            gate.fill_(20.)
+        motion.region_translation[2][:, 0] = .2
+    motion(9, training=True)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'binary.npz'
+        motion.export_motion(path)
+        with np.load(path, allow_pickle=False) as packet:
+            arrays = {name: packet[name] for name in packet.files}
+        arrays['refine_mask_l0'][0] = False
+        damaged = Path(directory) / 'damaged.npz'
+        np.savez(damaged, **arrays)
+        try:
+            BR.BinaryRefinementMotion.decode_export_motion(damaged, raw['xyz'], raw['rotation'])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('A stopped parent cannot own a reachable child')
+
+
+def test_binary_experiment_config_matches_confirmed_parameters():
+    import yaml
+    path = project_root / 'config' / 'fs_binary_quantized_refine_24f_20261006.yaml'
+    config = yaml.safe_load(path.read_text(encoding='utf-8'))
+    parameters = BR.BinaryRefinementConfig(**config['module']['binary_refinement'])
+    parameters.validate()
+    assert config['data']['extra_dataset_kwargs']['num_frames'] == 25
+    assert config['data']['resolution'] == -1
+    assert config['data']['expected_image_size'] == [1600, 1199]
+    assert parameters.coarse_fit_steps == 50 and parameters.dense_fit_steps == 100
+    assert parameters.gate_compress_steps == 80 and parameters.gate_refine_steps == 20
+    assert parameters.total_steps == config['trainer']['num_incr_steps'] == 300
+    assert parameters.motion_steps == config['module']['deformation']['num_stage1_steps'] == 200
+    assert parameters.coarse_region_gs == 96 and parameters.min_child_gs == 12
+    assert parameters.max_motion_levels == 3
+    assert parameters.motion_xyz_step_extent == 1e-4
+    assert parameters.motion_rotation_step_rad == 1e-3
 
 
 if __name__ == '__main__':

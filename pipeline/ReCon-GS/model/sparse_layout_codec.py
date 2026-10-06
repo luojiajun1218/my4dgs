@@ -82,15 +82,18 @@ def numpy_layout(layout):
 
 def validate_layout(layout):
     counts, index = layout['counts'], layout['index']
-    if counts.shape != (3,) or (counts < 1).any() or index.ndim != 2 or index.shape[0] != 3:
-        raise ValueError('Invalid three-level layout dimensions')
-    for level in range(3):
+    depth = len(counts)
+    if (counts.shape != (depth,) or depth not in (1, 3) or (counts < 1).any()
+            or index.ndim != 2 or index.shape[0] != depth
+            or len(layout['parents']) != depth - 1 or len(layout['pivots']) != depth):
+        raise ValueError('Invalid motion layout dimensions')
+    for level in range(depth):
         if (index[level] < 0).any() or (index[level] >= counts[level]).any():
             raise ValueError('Layout owner outside its region range')
         pivots = layout['pivots'][level]
         if pivots.shape != (counts[level], 3) or not np.isfinite(pivots).all():
             raise ValueError('Invalid layout pivots')
-    for level in range(2):
+    for level in range(depth - 1):
         parent = layout['parents'][level]
         if (parent.shape != (counts[level + 1],) or (parent < 0).any()
                 or (parent >= counts[level]).any()):
@@ -101,9 +104,10 @@ def validate_layout(layout):
 
 def layout_digest(layout):
     digest = hashlib.sha256()
-    values = [layout['counts'], layout['index'][2], *layout['parents'], *layout['pivots']]
-    for position, value in enumerate(values):
-        dtype = '<f4' if position >= 4 else '<u8'
+    values = [(layout['counts'], '<u8'), (layout['index'][-1], '<u8')]
+    values.extend((value, '<u8') for value in layout['parents'])
+    values.extend((value, '<f4') for value in layout['pivots'])
+    for value, dtype in values:
         value = np.ascontiguousarray(value, dtype=dtype)
         digest.update(str(value.shape).encode())
         digest.update(value.tobytes())
@@ -125,6 +129,8 @@ def _same_structure(left, right):
 
 def encode_layout(layout, path, previous=None, previous_layout=None, survivor_rows=None):
     """Reuse only when the predecessor and exact survivor identities are known."""
+    if len(layout['counts']) != 3:
+        raise ValueError('Legacy grouped layout codec requires three levels')
     path = Path(path).resolve()
     header = dict(layout_row_count=np.array(layout['index'].shape[1], dtype=np.int64),
                   layout_digest=np.array(layout_digest(layout)))

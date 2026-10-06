@@ -27,8 +27,9 @@ KEEP, SHARE, SPLIT = 0, 1, 2
 def _layout(index, counts, parents, xyz, previous_pivots=None):
     """The index records identity; pivots are recomputed from surviving base rows."""
     index = index.long()
-    if index.shape != (3, len(xyz)) or not len(xyz):
-        raise ValueError('Persistent layout needs three owner rows and nonempty xyz')
+    depth = len(counts)
+    if depth not in (1, 3) or index.shape != (depth, len(xyz)) or not len(xyz):
+        raise ValueError('Persistent layout needs one or three owner rows and nonempty xyz')
     # Pivots are reference geometry. Ordered CPU float64 sums keep
     # persistent layout setup deterministic across devices and checkpoint resume.
     points = xyz.detach().cpu().to(torch.float64).numpy()
@@ -46,9 +47,10 @@ def _layout(index, counts, parents, xyz, previous_pivots=None):
             means = np.where(sizes > 0, means, fallback)
         pivots.append(torch.from_numpy(means).to(xyz))
     parent = [torch.as_tensor(row, device=index.device, dtype=torch.long) for row in parents]
-    if len(parent) != 2 or any(len(parent[n]) != counts[n + 1] for n in range(2)):
+    if len(parent) != depth - 1 or any(len(parent[n]) != counts[n + 1]
+                                     for n in range(depth - 1)):
         raise ValueError('Persistent parent array length mismatch')
-    for level in range(2):
+    for level in range(depth - 1):
         if bool(((parent[level] < 0) | (parent[level] >= counts[level])).any()):
             raise ValueError('Persistent parent index out of range')
         if bool((parent[level][index[level + 1]] != index[level]).any()):
@@ -67,7 +69,7 @@ def _layout_cpu(layout):
 
 def _occupancy(layout):
     return [torch.bincount(layout['index'][n], minlength=layout['counts'][n]) > 0
-            for n in range(3)]
+            for n in range(len(layout['counts']))]
 
 
 @torch.no_grad()

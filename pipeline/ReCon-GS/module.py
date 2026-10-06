@@ -31,6 +31,8 @@ from .model.residual_motion import (QuantizedResidualConfig, QuantizedResidualMo
     inverse_unit_quaternion)
 from .model.gated_residual import GatedResidualMotion, actual_motion_statistics
 from .model.sparse_hierarchical import SparseHierarchicalConfig, SparseHierarchicalMotion
+from .model.flat_cluster import FlatClusterConfig, FlatClusterMotion
+from .model.binary_refinement import BinaryRefinementConfig, BinaryRefinementMotion
 
 import json
 import csv
@@ -38,7 +40,8 @@ import numpy as np
 import time
 import math
 
-QUANTIZED_MOTION_MODES = {'quantized_residual', 'sparse_hierarchical'}
+SPARSE_MOTION_MODES = {'sparse_hierarchical', 'flat_cluster', 'binary_refinement'}
+QUANTIZED_MOTION_MODES = {'quantized_residual', *SPARSE_MOTION_MODES}
 
 @dataclass
 class GaussianConfig:
@@ -125,6 +128,8 @@ class ModuleConfig(BaseModuleConfig):
     learned_selective_motion: LearnedSelectiveConfig = field(default_factory=LearnedSelectiveConfig)
     quantized_residual: QuantizedResidualConfig = field(default_factory=QuantizedResidualConfig)
     sparse_hierarchical: SparseHierarchicalConfig = field(default_factory=SparseHierarchicalConfig)
+    flat_cluster: FlatClusterConfig = field(default_factory=FlatClusterConfig)
+    binary_refinement: BinaryRefinementConfig = field(default_factory=BinaryRefinementConfig)
     quantized_diagnostics: QuantizedDiagnosticsConfig = field(default_factory=QuantizedDiagnosticsConfig)
     selective_diagnostics_config: Optional[str] = 'config/diagnostics/selective_motion.yaml'
 
@@ -166,9 +171,14 @@ class Module(BaseModule):
                               else SelectiveMotion(self.motion_config))
             self.change_reference = {}
         if self.config.motion_mode in QUANTIZED_MOTION_MODES:
-            cfg = (self.config.sparse_hierarchical
-                   if self.config.motion_mode == 'sparse_hierarchical'
-                   else self.config.quantized_residual)
+            if self.config.motion_mode == 'binary_refinement':
+                cfg = self.config.binary_refinement
+            elif self.config.motion_mode == 'flat_cluster':
+                cfg = self.config.flat_cluster
+            elif self.config.motion_mode == 'sparse_hierarchical':
+                cfg = self.config.sparse_hierarchical
+            else:
+                cfg = self.config.quantized_residual
             # Shared post-processing and birth code consumes one residual-config
             # alias. Keep old quantized mode pointed at its original config.
             self.config.quantized_residual = cfg
@@ -178,11 +188,14 @@ class Module(BaseModule):
                 raise ValueError('Quantized residual budgets must agree with trainer and deformation stage boundary')
             if self.config.random_background:
                 raise ValueError('Quantized residual comparisons require a fixed background')
-            if self.config.motion_mode == 'sparse_hierarchical':
+            if self.config.motion_mode in SPARSE_MOTION_MODES:
                 if self.config.selective_diagnostics_config is not None:
-                    raise ValueError('sparse_hierarchical does not support legacy selective overlays; '
+                    raise ValueError('Sparse motion does not support legacy selective overlays; '
                                      'set selective_diagnostics_config: null')
-                self.residual_motion = SparseHierarchicalMotion(cfg)
+                motion_cls = (BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
+                              else FlatClusterMotion if self.config.motion_mode == 'flat_cluster'
+                              else SparseHierarchicalMotion)
+                self.residual_motion = motion_cls(cfg)
             else:
                 self.residual_motion = (GatedResidualMotion(cfg) if cfg.enable_learned_gates
                                         else QuantizedResidualMotion(cfg))
@@ -309,8 +322,11 @@ class Module(BaseModule):
         frame. The optional PLY contains only this frame's newly added points.
         """
         base = self.gaussians.get_xyz_ori
-        if getattr(self.config, 'motion_mode', 'legacy') == 'sparse_hierarchical':
-            moved_xyz, moved_rotation = SparseHierarchicalMotion.decode_export_motion(
+        if getattr(self.config, 'motion_mode', 'legacy') in SPARSE_MOTION_MODES:
+            motion_cls = (BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
+                          else FlatClusterMotion if self.config.motion_mode == 'flat_cluster'
+                          else SparseHierarchicalMotion)
+            moved_xyz, moved_rotation = motion_cls.decode_export_motion(
                 motion_path, base, self.gaussians._rotation)
             moved_xyz = torch.as_tensor(moved_xyz, device=base.device, dtype=base.dtype)
             moved_rotation = torch.as_tensor(moved_rotation, device=base.device, dtype=base.dtype)
@@ -453,10 +469,10 @@ class Module(BaseModule):
             self.timer.clock("frame").start()
 
         if (not self.trainer.is_first_frame and
-                self.config.motion_mode == 'sparse_hierarchical' and
-                self.global_step == (self.config.sparse_hierarchical.tree_probe_steps +
-                                     self.config.sparse_hierarchical.dense_fit_steps +
-                                     self.config.sparse_hierarchical.gate_compress_steps + 1)):
+                self.config.motion_mode in SPARSE_MOTION_MODES and
+                self.global_step == (self.config.quantized_residual.tree_probe_steps +
+                                     self.config.quantized_residual.dense_fit_steps +
+                                     self.config.quantized_residual.gate_compress_steps + 1)):
             # Finish the training phase transition before its read-only probe.
             self.residual_motion._configure_phase(self.global_step)
             self.quantized_quality_snapshot('after_gate_hardening')
@@ -626,12 +642,12 @@ class Module(BaseModule):
         if self.config.motion_mode in QUANTIZED_MOTION_MODES and not self.trainer.is_first_frame:
             render_pkg['quantized_started'] = selective_started
             cfg = self.config.quantized_residual
-            storage_active = (self.config.motion_mode != 'sparse_hierarchical' or
+            storage_active = (self.config.motion_mode not in SPARSE_MOTION_MODES or
                               self.residual_motion.stage(current_step) in
                               {'gate_compress', 'incremental'})
             storage_weight = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
                               if storage_active else 0.)
-            if self.config.motion_mode == 'sparse_hierarchical' and storage_weight <= 0:
+            if self.config.motion_mode in SPARSE_MOTION_MODES and storage_weight <= 0:
                 # Disabled/frozen sparse phases build no storage backward graph.
                 storage = loss_rgb.new_zeros(())
                 storage_details = {}
@@ -645,7 +661,7 @@ class Module(BaseModule):
                 loss_storage = storage_weight * storage / reference_bytes
                 loss = loss + loss_storage
             loss_activity = loss_storage.new_zeros(())
-            activity_active = (self.config.motion_mode != 'sparse_hierarchical' or
+            activity_active = (self.config.motion_mode not in SPARSE_MOTION_MODES or
                                self.residual_motion.stage(current_step) == 'gate_compress')
             if cfg.gs_activity_loss_weight > 0 and activity_active:
                 if self.residual_motion.committed:
@@ -669,7 +685,7 @@ class Module(BaseModule):
             metrics['storage/reference_bytes'] = loss_rgb.new_tensor(reference_bytes)
             metrics['loss/storage'] = loss_storage
             loss_candidate = loss_storage.new_zeros(())
-            if (self.config.motion_mode != 'sparse_hierarchical' and
+            if (self.config.motion_mode not in SPARSE_MOTION_MODES and
                     not self.residual_motion.committed and cfg.keep_candidate_fit_due(current_step)):
                 candidate = self.keep_candidate_image_loss(viewpoint)
                 if candidate is not None:
@@ -1043,7 +1059,7 @@ class Module(BaseModule):
             mode = getattr(self.config, 'motion_mode', 'legacy')
             motion = getattr(self, 'residual_motion', None)
             can_probe_sparse_motion = (
-                mode == 'sparse_hierarchical' and
+                mode in SPARSE_MOTION_MODES and
                 stage not in {'before_deletion', 'after_deletion'} and
                 motion is not None and getattr(motion, 'index', None) is not None and
                 not getattr(motion, 'committed', True))
@@ -1104,10 +1120,14 @@ class Module(BaseModule):
         path = self.output_dir / 'frame_summary' / f'control_{self.current_frame:03d}.json'
         path.parent.mkdir(parents=True, exist_ok=True)
         mode = getattr(self.config, 'motion_mode', 'legacy')
-        semantics = ('Sparse hierarchical snapshots use direct soft-gated image forwards in dense/compress '
+        semantics = ('Binary refinement uses quantized parent/child residuals and hard-forward STE '
+                     'stop/refine choices. A stopped branch inherits its parent pose; parent zero '
+                     'motion does not prohibit children. Compression jointly learns motion and gates.'
+                     if mode == 'binary_refinement' else
+                     'Sparse motion snapshots use direct soft-gated image forwards in dense/compress '
                      'and the fixed binary gates in refine. The m/z diagnostics are independent binary gates; '
                      'they are not KEEP/SHARE/SPLIT states.'
-                     if mode == 'sparse_hierarchical' else
+                     if mode in SPARSE_MOTION_MODES else
                      'Quality snapshots use all train/test cameras. Image objective is the unclamped training '
                      'L1/DSSIM objective without storage; PSNR/SSIM/L1 use clamped images. Gradient summaries '
                      'are combined-loss gradients before optimizer.step at sampled steps; gate changes are '
@@ -1124,14 +1144,17 @@ class Module(BaseModule):
         motion = self.residual_motion
         groups = {f'region_translation_{i}': p for i, p in enumerate(motion.region_translation)}
         groups.update({f'region_rotation_{i}': p for i, p in enumerate(motion.region_rotation)})
-        if self.config.motion_mode == 'sparse_hierarchical':
+        if self.config.motion_mode == 'binary_refinement':
+            groups.update({f'refine_gate_{i}': p for i, p in enumerate(motion.refine_logits)})
+        elif self.config.motion_mode in SPARSE_MOTION_MODES:
             groups.update(m_gate=motion.m_logits, z_local=motion.z_local_logits)
             if motion.config.m_fine_sharing:
                 groups['m_fine_gate'] = motion.m_fine_logits
             groups.update({f'z_region_{i}': p for i, p in enumerate(motion.z_region_logits)})
         else:
             groups.update({f'gate_{i}': p for i, p in enumerate(motion.gate_logits)})
-        groups.update(gs_translation=motion.gs_translation, gs_rotation=motion.gs_rotation)
+        if self.config.motion_mode != 'binary_refinement':
+            groups.update(gs_translation=motion.gs_translation, gs_rotation=motion.gs_rotation)
         gradients = {}
         for name, parameter in groups.items():
             grad = parameter.grad
@@ -1142,9 +1165,11 @@ class Module(BaseModule):
             else:
                 nonzero_rows = int((grad.abs().sum(-1) > 0).sum())
             gradients[name] = (None if grad is None else dict(
-                l2=float(grad.norm()), max_abs=float(grad.abs().max()),
+                l2=float(grad.norm()), max_abs=float(grad.abs().max()) if grad.numel() else 0.,
                 nonzero_rows=nonzero_rows, rows=len(grad)))
-        if self.config.motion_mode == 'sparse_hierarchical':
+        if self.config.motion_mode == 'binary_refinement':
+            states = [value.detach().cpu().clone() for value in motion.refinement_masks(self.global_step)]
+        elif self.config.motion_mode in SPARSE_MOTION_MODES:
             masks = motion._hard_masks_for_step(self.global_step)
             states = [masks['m'].cpu().clone(),
                       *[value.cpu().clone() for value in masks['z_regions']],
@@ -1308,7 +1333,7 @@ class Module(BaseModule):
         zero = next(iter(parts.values())) * 0
         # Raw sparse motion stores ownership directly, so a birth source used
         # only during training is not an inference parameter in this mode.
-        birth_bytes_per_row = 0 if self.config.motion_mode == 'sparse_hierarchical' else 4
+        birth_bytes_per_row = 0 if self.config.motion_mode in SPARSE_MOTION_MODES else 4
         for attr in RAW_ATTRIBUTES:
             value = getattr(self.gaussians, attr)
             birth_bytes_per_row += int(np.prod(value.shape[1:])) * value.element_size()
@@ -1326,7 +1351,7 @@ class Module(BaseModule):
         cfg = self.config.quantized_residual
         motion = self.residual_motion
         if not motion.committed:
-            if self.config.motion_mode == 'sparse_hierarchical':
+            if self.config.motion_mode in SPARSE_MOTION_MODES:
                 if 'tree_probe_view_name' in render_pkg:
                     motion.observe_tree_probe(render_pkg['visibility_filter'],
                                               render_pkg['tree_probe_view_name'])
@@ -1344,9 +1369,12 @@ class Module(BaseModule):
             stage = render_pkg['quantized_stage']
             self.trainer.synchronize()
             motion.stage_seconds[stage] = motion.stage_seconds.get(stage, 0.) + time.perf_counter() - render_pkg['quantized_started']
-            if self.config.motion_mode == 'sparse_hierarchical':
+            if self.config.motion_mode in SPARSE_MOTION_MODES:
                 probe_steps = getattr(cfg, 'tree_probe_steps', 0)
-                if probe_steps and self.global_step == probe_steps:
+                if (self.config.motion_mode == 'binary_refinement' and
+                        self.global_step == cfg.coarse_fit_steps):
+                    self.quantized_quality_snapshot('after_coarse_fit')
+                elif probe_steps and self.global_step == probe_steps:
                     self.quantized_quality_snapshot('after_tree_probe')
                 elif self.global_step == probe_steps + cfg.dense_fit_steps:
                     self.quantized_quality_snapshot('after_dense_fit')
@@ -1431,8 +1459,8 @@ class Module(BaseModule):
         motion_export = None
         incremental_export = None
         frame_manifest = None
-        if self.config.motion_mode == 'sparse_hierarchical':
-            storage_dir = self.output_dir / 'frame_storage' / 'sparse_hierarchical'
+        if self.config.motion_mode in SPARSE_MOTION_MODES:
+            storage_dir = self.output_dir / 'frame_storage' / self.config.motion_mode
             motion_path = storage_dir / f'motion_{self.current_frame:03d}.npz'
             motion_export = self.residual_motion.export_motion(motion_path)
         self.quant_birth_control['final_candidate_count'] = (
@@ -1445,7 +1473,7 @@ class Module(BaseModule):
         if cfg.enable_learned_gates:
             self.residual_motion.register_materialized_layout(raw['xyz'], retained_sources)
         self.install_quantized_raw(raw)
-        if self.config.motion_mode == 'sparse_hierarchical' and retained_count:
+        if self.config.motion_mode in SPARSE_MOTION_MODES and retained_count:
             birth_model = GaussianModel(self.config.sh_degree)
             for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
                 setattr(birth_model, attr, torch.nn.Parameter(raw[name][-retained_count:].detach().clone()))
@@ -1455,10 +1483,10 @@ class Module(BaseModule):
             incremental_export = dict(path=str(incremental_path),
                                       archive_bytes=incremental_path.stat().st_size,
                                       rows=retained_count)
-        if self.config.motion_mode == 'sparse_hierarchical':
+        if self.config.motion_mode in SPARSE_MOTION_MODES:
             manifest_path = storage_dir / f'frame_{self.current_frame:03d}.json'
             manifest = dict(
-                layout_version='independent_binary_hierarchical_motion_v1',
+                layout_version=self.residual_motion.layout_version,
                 frame=self.current_frame,
                 playback_scope=('Single-frame post-deletion motion override plus this frame\'s birth PLY. '
                     'First confirm previous_reference_sha256 against the previous materialized Gaussian state; '
@@ -1504,7 +1532,7 @@ class Module(BaseModule):
                 raise ValueError('Actual motion diagnostics require gated motion')
             xyz, rotation = self.residual_motion(cfg.motion_steps)
             terminal = (self.residual_motion._hard_masks_for_step(cfg.motion_steps)['m'].long()
-                        if self.config.motion_mode == 'sparse_hierarchical'
+                        if self.config.motion_mode in SPARSE_MOTION_MODES
                         else self.residual_motion.gate_state_arrays()['gs_terminal'])
             actual_motion = actual_motion_statistics(
                 self.residual_motion.base_xyz, self.residual_motion.base_rotation,
@@ -1512,13 +1540,13 @@ class Module(BaseModule):
                 diagnostics.translation_extent_thresholds,
                 diagnostics.rotation_radian_thresholds,
                 terminal)
-            if self.config.motion_mode == 'sparse_hierarchical':
+            if self.config.motion_mode in SPARSE_MOTION_MODES:
                 actual_motion['semantics'] = ('m=0 rows are exact previous poses; m=1 rows use the '
-                    'quantized hierarchical candidate. This is binary m reporting, not a KEEP/SHARE/SPLIT cut.')
-        sparse_mode = self.config.motion_mode == 'sparse_hierarchical'
+                    'quantized shared/local candidate. This is binary m reporting, not a KEEP/SHARE/SPLIT cut.')
+        sparse_mode = self.config.motion_mode in SPARSE_MOTION_MODES
         if sparse_mode:
             candidate_fit_report = dict(enabled=False, extra_renders=0,
-                semantics='Disabled in sparse_hierarchical v1. Gate compression receives its image loss '
+                semantics='Sparse motion gate compression receives its image loss '
                           'through the same direct soft-gated rendering graph.')
             motion_gradient_report = dict(
                 stages=dict(dense_fit='all m/z forced open; optimize motion only',
@@ -1534,6 +1562,13 @@ class Module(BaseModule):
                 'then the per-GS residual is applied. Storage counts selected float32 motion plus plain masks '
                 'and routing arrays. A selected identity/canceled transform still costs a motion row; '
                 'the m-open activity objective is recorded separately.' )
+            if self.config.motion_mode == 'flat_cluster':
+                method_semantics = (
+                    'Single-level motion clusters with one shared rigid transform per group. '
+                    'No parent transforms or octree. Spatial neighbours limit assignment candidates; '
+                    'shared-SE3 fitting error determines membership. Group z enables shared motion, '
+                    'local z enables a per-GS residual, and final m=0 preserves the exact previous '
+                    'pose. Storage counts selected float32 motion and necessary routing/masks/pivots.')
         else:
             candidate_fit_report = dict(mode=cfg.motion_gradient_mode,
                 interval=cfg.keep_candidate_fit_interval, weight=cfg.keep_candidate_fit_weight,
@@ -1576,11 +1611,11 @@ class Module(BaseModule):
             incremental_export=incremental_export,
             frame_manifest=frame_manifest,
             dense_motion_training_parameter_bytes=(self.residual_motion.dense_training_parameter_bytes()
-                if self.config.motion_mode == 'sparse_hierarchical' else None),
+                if self.config.motion_mode in SPARSE_MOTION_MODES else None),
             storage_accounting=('sparse_inference_arrays_v1'
                 if sparse_mode and cfg.motion_export_format == 'sparse_parameters' else
                 'uncompressed_inference_arrays_v1'
-                if self.config.motion_mode == 'sparse_hierarchical' else None),
+                if self.config.motion_mode in SPARSE_MOTION_MODES else None),
             inference_file_bytes=(sum(item['archive_bytes'] for item in
                 (motion_export, incremental_export, frame_manifest) if item is not None)
                 if sparse_mode else None),
@@ -1590,7 +1625,7 @@ class Module(BaseModule):
                 if sparse_mode else None),
             storage_gate_bits=(self.residual_motion.storage_bit_counts(
                 self.global_step, hard=True)
-                if self.config.motion_mode == 'sparse_hierarchical' and cfg.motion_export_format == 'legacy' else None),
+                if self.config.motion_mode in SPARSE_MOTION_MODES and cfg.motion_export_format == 'legacy' else None),
             gs_activity_cost=(dict(
                 weight=cfg.gs_activity_loss_weight,
                 expected_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step)),
@@ -1598,7 +1633,7 @@ class Module(BaseModule):
                 semantics='Old-GS m-open fraction. Selected zero or canceled motion still counts; '
                           'actual pose changes are reported separately. This cost selects m gates only '
                           'during gate_compress; frozen phases report the committed hard mask.')
-                if self.config.motion_mode == 'sparse_hierarchical' else dict(
+                if self.config.motion_mode in SPARSE_MOTION_MODES else dict(
                 weight=cfg.gs_activity_loss_weight,
                 expected_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step)),
                 hard_fraction=float(self.residual_motion.gs_activity_fraction(self.global_step, hard=True)),
@@ -1609,8 +1644,8 @@ class Module(BaseModule):
                           'only gate probabilities receive this cost gradient. No masks or visibility oracle.')
                 if cfg.enable_learned_gates else None),
             storage_semantics=('Sparse necessary inference arrays: six float32 motion values for relevant '
-                'z=1 regions and m=1/z=1 local rows; uint32 m-open GS IDs; uint16/uint32 fine owners '
-                'and parent tables; bool local z on m-open GSs; bool regional z and float32 pivots '
+                'z=1 regions and m=1/z=1 local rows; uint32 m-open GS IDs; uint16/uint32 group/leaf owners '
+                'and any parent tables; bool local z on m-open GSs; bool regional z and float32 pivots '
                 'on relevant regions; counts/source row count; retained newborn raw attributes and '
                 'int32 deletion IDs. Soft loss charges expected selected rows and relevant paths. '
                 'Parameter bytes exclude file headers and verification metadata; inference_file_bytes '
@@ -1618,12 +1653,12 @@ class Module(BaseModule):
                 'Images, checkpoints, gradients and optimizer state are excluded.'
                 if sparse_mode and cfg.motion_export_format == 'sparse_parameters' else
                 'Uncompressed necessary inference arrays: six float32 motion values for '
-                'each relevant z=1 region and m=1/z=1 local row; full bool m/z masks; int32 fine ownership, '
-                'parent tables and counts; float32 regional pivots; retained newborn raw attributes and '
+                'each relevant z=1 region and m=1/z=1 local row; full bool m/z masks; int32 group/leaf ownership, '
+                'any parent tables and counts; float32 regional pivots; retained newborn raw attributes and '
                 'int32 deletion identities. Soft loss uses expected selected rows. First-frame GS is counted '
                 'once separately. File headers, diagnostic manifests, dense training tensors, gradients and '
                 'optimizer state are excluded. Dense motion/gate training parameter bytes are a separate field.'
-                if self.config.motion_mode == 'sparse_hierarchical' else
+                if self.config.motion_mode in SPARSE_MOTION_MODES else
                 'Estimated effective parameter bytes: reachable gate states, SHARE/SPLIT region motion, '
                 'open GS residuals, retained newborn raw attributes and int32 source, and int32 deletions. '
                 'Hierarchy membership is deterministically reconstructed from the previous materialized GS, '
@@ -1655,6 +1690,36 @@ class Module(BaseModule):
                 'Reported pure training excludes frame_prepare and finalize; rendering/backward/data/storage '
                 'and optimizer remain included. Frame summary JSON writing is measured under saving.'),
             reference_sha256=reference_sha256)
+        if self.config.motion_mode == 'binary_refinement':
+            semantics = (
+                'Deterministic binary spatial candidates, quantized shared root motion and '
+                'parent-relative child residuals. A hard-forward STE stop/refine gate controls '
+                'descent. Stop inherits the parent prediction and closes every descendant. '
+                'A zero parent transform can still refine. There are no per-GS m/z gates or '
+                'local motion parameters. Only reachable nonzero integer motion records are exported.')
+            self.quant_report.update(
+                method_semantics=semantics,
+                storage_accounting='binary_quantized_sparse_arrays_v1',
+                storage_semantics=(
+                    'Integer motion symbols and necessary sparse memberships/pivots/ancestor '
+                    'routing, stop/refine decisions and decoder metadata; retained birth raw '
+                    'attributes and deletion IDs. Hard parameter cost equals exported array '
+                    'bytes. Soft cost estimates reachable nonzero records and necessary routing; '
+                    'file container/verification overhead is reported in inference_file_bytes.'),
+                gs_activity_cost=dict(weight=0., semantics=(
+                    'No independent GS activity gate. Zero quantized path motion reuses the '
+                    'previous pose; actual changes are measured separately.')),
+                candidate_fit=dict(enabled=False, extra_renders=0, semantics=(
+                    'Child residuals learn through the normal quantized image forward.')),
+                motion_gradient_schedule=dict(stages=dict(
+                    dense_fit='fit shared roots first, then open candidate child residuals',
+                    gate_compress='jointly optimize quantized motion and STE stop/refine gates',
+                    gate_refine='fix path choices and optimize selected quantized motion',
+                    incremental='freeze old motion and fit newborn Gaussians'),
+                    semantics=semantics))
+            if actual_motion is not None:
+                actual_motion['semantics'] = (
+                    'Actual quantized old-GS pose changes, without an independent m gate.')
         self.trainer.synchronize()
         self.residual_motion.stage_seconds['finalize'] = time.perf_counter() - finalize_started
         self.quant_report['stage_seconds'] = dict(self.residual_motion.stage_seconds)
@@ -1988,6 +2053,10 @@ class Module(BaseModule):
     def validation_step(
         self, viewpoint: TensorSpace, idx: int, loader_idx: int
     ) -> dict:
+        if not hasattr(self.trainer, 'frame_image_sizes'):
+            self.trainer.frame_image_sizes = set()
+        self.trainer.frame_image_sizes.add(
+            (int(viewpoint.image.shape[-1]), int(viewpoint.image.shape[-2])))
         if viewpoint.image.is_cuda:
             torch.cuda.synchronize(viewpoint.image.device)
         t0 = time.perf_counter()
