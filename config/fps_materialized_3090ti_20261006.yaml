@@ -1,0 +1,16 @@
+# 独占3090Ti，cam00，同尺寸、预热和重复次数；两个范围分开计时。
+checkpoint_frames:
+- 5
+- 10
+- 24
+checkpoint_step: 300
+image_size:
+- 1600
+- 1199
+warmup_renders: 10
+timed_renders: 100
+rounds: 5
+metric_absolute_tolerance: 0.0005
+scopes:
+- forward_clamp
+- rasterizer

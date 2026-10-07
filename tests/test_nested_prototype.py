@@ -38,6 +38,7 @@ SH = importlib.import_module('pipeline.ReCon-GS.model.sparse_hierarchical')
 FC = importlib.import_module('pipeline.ReCon-GS.model.flat_cluster')
 BR = importlib.import_module('pipeline.ReCon-GS.model.binary_refinement')
 SAB = importlib.import_module('pipeline.ReCon-GS.model.storage_aware_binary')
+NM = importlib.import_module('pipeline.ReCon-GS.model.node_motion')
 MC = importlib.import_module('pipeline.ReCon-GS.model.motion_clustering')
 SL_CODEC = importlib.import_module('pipeline.ReCon-GS.model.sparse_layout_codec')
 GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
@@ -4638,7 +4639,16 @@ def test_storage_aware_binary_tree_rebuilds_every_fifth_frame():
 
 
 def test_storage_aware_binary_sequence_recreates_births_deletions_and_cached_tree():
-    raw, motion = storage_aware_binary_fixture()
+    check_storage_aware_binary_sequence()
+
+
+def test_node_motion_sequence_recreates_exact_states():
+    check_storage_aware_binary_sequence(coarse_region_gs=24, motion_compute='node', cache_static_layout=True,
+        selected_precision_only=True, cache_frozen_storage=True)
+
+
+def check_storage_aware_binary_sequence(**overrides):
+    raw, motion = storage_aware_binary_fixture(**overrides)
     decoder = SAB.StorageAwareBinaryDecoder(copy.deepcopy(motion.config))
     with torch.no_grad():
         for value in motion.region_translation:
@@ -4700,6 +4710,272 @@ def test_storage_aware_binary_sequence_recreates_births_deletions_and_cached_tre
         assert second['deleted_rows'] == deleted.tolist()
         assert not second['tree_rebuilt']
         assert Q.reference_digest(decoded2) == Q.reference_digest(expected2)
+
+
+def test_strict_initial_gs_budget_selects_clone_split_by_gradient_and_still_prunes():
+    class BudgetModel:
+        def __init__(self, prune=False):
+            self._xyz = torch.zeros(4, 3)
+            self.xyz_gradient_accum = torch.tensor([[5.], [9.], [9.], [1.]])
+            self.denom = torch.ones(4, 1)
+            self.clone_rows = self.split_rows = None
+            self.remove_one = prune
+
+        @property
+        def get_opacity(self):
+            values = torch.ones(len(self._xyz), 1)
+            if self.remove_one:
+                values[0] = 0
+            return values
+
+        def densify_and_clone(self, grads, threshold, extent):
+            self.clone_rows = torch.where((grads[:, 0] >= threshold) &
+                                          torch.tensor([True, True, False, False]))[0]
+            self._xyz = torch.cat((self._xyz, torch.zeros(len(self.clone_rows), 3)))
+
+        def densify_and_split(self, grads, threshold, extent):
+            self.split_rows = torch.where((grads[:, 0] >= threshold) &
+                                          torch.tensor([False, False, True, True]))[0]
+            self._xyz = torch.cat((self._xyz, torch.zeros(len(self.split_rows), 3)))
+
+        def prune_points(self, mask):
+            self._xyz = self._xyz[~mask]
+
+    model = BudgetModel()
+    result = GAUSS.GaussianModel.densify_and_prune(model, .5, .005, 1., None, max_points=6)
+    assert model.clone_rows.tolist() == [1] and model.split_rows.tolist() == [2]
+    assert result['after'] == 6 and result['selected'] == 2
+    full = BudgetModel(prune=True)
+    result = GAUSS.GaussianModel.densify_and_prune(full, .5, .005, 1., None, max_points=4)
+    assert result['selected'] == 0 and result['after'] == 3
+
+
+def test_render_attribute_cache_tracks_inplace_replacement_override_and_gradients():
+    raw = residual_raw_fixture(8)
+    model = GAUSS.GaussianModel(1)
+    for name, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(model, attr, torch.nn.Parameter(raw[name].clone()))
+    model.render_attribute_cache = True
+    with torch.no_grad():
+        old = model.get_opacity
+        assert old is model.get_opacity
+        model._opacity.add_(.3)
+        changed = model.get_opacity
+        assert changed is not old
+        torch.testing.assert_close(changed, torch.sigmoid(model._opacity), rtol=0, atol=0)
+        model._opacity = torch.nn.Parameter(model._opacity.clone() + .2)
+        replaced = model.get_opacity
+        assert replaced is not changed
+        assert model._render_cache['opacity'][1][0] is model._opacity
+        model.rigid_rotation = raw['rotation'].clone()
+        first = model.get_rotation
+        model.rigid_rotation = torch.flip(raw['rotation'], dims=[0]).clone()
+        second = model.get_rotation
+        assert second is not first
+        torch.testing.assert_close(second, F.normalize(model.rigid_rotation, dim=-1), rtol=0, atol=0)
+        model.rigid_rotation = None
+        model.get_scaling
+        model.get_features
+    model.get_scaling.sum().backward()
+    assert model._scaling.grad is not None and model._scaling.grad.abs().sum() > 0
+    model.get_features.sum().backward()
+    assert model._features_dc.grad is not None
+    model._scaling.requires_grad_(False)
+    assert model.get_scaling is model.get_scaling
+    model.rigid_rotation = raw['rotation'].clone().requires_grad_()
+    assert model.get_rotation.requires_grad
+    assert model.get_rotation is not model.get_rotation
+
+
+def test_node_motion_values_and_ste_gradients_match_reference():
+    torch.manual_seed(17)
+    raw = residual_raw_fixture(48)
+    for dtype, atol, rtol in ((torch.float64, 2e-10, 2e-8),
+                             (torch.float32, 3e-5, 3e-4)):
+        xyz, rotation = raw['xyz'].to(dtype), raw['rotation'].to(dtype)
+        layout = BR.stable_binary_forest(xyz, 24, 2, 4)
+        assert all(layout['counts'])
+        source = [torch.randn(count, 6, dtype=dtype) * .04 for count in layout['counts']]
+        logits = [torch.linspace(-1., 1., len(rows), dtype=dtype)
+                  for rows in layout['refine_rows']]
+        xyz_weight = torch.randn_like(xyz)
+        rotation_weight = torch.randn_like(rotation)
+
+        def evaluate(transform):
+            regions = [value.clone().requires_grad_() for value in source]
+            gates = [value.clone().requires_grad_() for value in logits]
+            paths = [xyz.new_ones(layout['counts'][0])]
+            for level, parent in enumerate(layout['parents']):
+                prob = gates[level].sigmoid()
+                weight = (prob >= .5).to(prob) + (prob - prob.detach())
+                node_gate = xyz.new_zeros(layout['counts'][level]).index_copy(
+                    0, layout['refine_rows'][level], weight)
+                paths.append(paths[level][parent] * node_gate[parent])
+            result = transform(xyz, rotation, layout, regions, paths)
+            loss = (result[0] * xyz_weight).sum() + (result[1] * rotation_weight).sum()
+            inputs = regions + gates
+            gradients = torch.autograd.grad(loss, inputs, allow_unused=True)
+            gradients = [torch.zeros_like(value) if gradient is None else gradient
+                         for value, gradient in zip(inputs, gradients)]
+            return result, gradients
+
+        reference, reference_grad = evaluate(BR._conditional_transform)
+        actual, actual_grad = evaluate(NM.node_conditional_transform)
+        for left, right in zip(actual, reference):
+            torch.testing.assert_close(left, right, atol=atol, rtol=rtol)
+        for left, right in zip(actual_grad, reference_grad):
+            torch.testing.assert_close(left, right, atol=atol, rtol=rtol)
+
+
+def test_inference_attribute_read_does_not_poison_frozen_training_cache():
+    model = GAUSS.GaussianModel(1)
+    model.render_attribute_cache = True
+    model._scaling = torch.nn.Parameter(torch.zeros(8, 3), requires_grad=False)
+    with torch.inference_mode():
+        inference_scales = model.get_scaling
+        assert torch.is_inference(inference_scales)
+    scales = model.get_scaling
+    assert not torch.is_inference(scales)
+    probe = torch.ones_like(scales, requires_grad=True)
+    (probe * scales).sum().backward()
+    torch.testing.assert_close(probe.grad, scales, rtol=0, atol=0)
+
+
+def test_node_motion_exact_zero_paths_keep_raw_pose_and_opening_gradient():
+    raw = residual_raw_fixture(48)
+    raw['rotation'] = raw['rotation'] * 3
+    layout = BR.stable_binary_forest(raw['xyz'], 24, 2, 4)
+    regions = [raw['xyz'].new_zeros(count, 6) for count in layout['counts']]
+    regions[1][:, 0] = .03
+    gate = torch.zeros(layout['counts'][0], requires_grad=True)
+    paths = [torch.ones_like(gate), gate[layout['parents'][0]]]
+    for level in range(2, 4):
+        paths.append(paths[level - 1][layout['parents'][level - 1]])
+    xyz, rotation = NM.node_conditional_transform(raw['xyz'], raw['rotation'], layout, regions, paths)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    torch.testing.assert_close(rotation, raw['rotation'], rtol=0, atol=0)
+    xyz[:, 0].sum().backward()
+    assert gate.grad is not None and gate.grad.abs().sum() > 0
+
+
+def test_cached_storage_and_selected_precision_preserve_costs_and_gradients():
+    _, reference = storage_aware_binary_fixture()
+    optimized = copy.deepcopy(reference)
+    optimized.config.cache_static_layout = True
+    optimized.config.selected_precision_only = True
+    optimized.config.cache_frozen_storage = True
+    torch.manual_seed(23)
+    with torch.no_grad():
+        for a, b in zip(reference.region_translation, optimized.region_translation):
+            a.copy_(torch.randn_like(a) * .2)
+            b.copy_(a)
+    for step in (1, 3, 5, 9, 11):
+        reference.prepare_step(step)
+        optimized.prepare_step(step)
+        for a, b in zip(reference(step), optimized(step)):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        for hard in (False, True):
+            left, right = reference.storage_parts(step, hard), optimized.storage_parts(step, hard)
+            for key in left:
+                torch.testing.assert_close(left[key], right[key], rtol=0, atol=0)
+        assert optimized._hard_rate_bits(step) == reference._hard_rate_bits(step)
+    assert optimized._frozen_storage_parts
+    assert all(not value.requires_grad for value in optimized.storage_parts(11).values())
+
+
+def test_reference_motion_preserves_original_call_order_and_diagnostics():
+    _, motion = storage_aware_binary_fixture()
+    motion.config.motion_compute = 'reference'
+    motion.config.selected_precision_only = False
+    motion.prepare_step(1)
+    events = []
+    original_regions, original_paths = motion._region_motion, motion._paths
+
+    def regions(step=None, **kwargs):
+        events.append(('regions', step))
+        return original_regions(step, **kwargs)
+
+    def paths(gates):
+        events.append(('paths', None))
+        return original_paths(gates)
+
+    motion._region_motion, motion._paths = regions, paths
+    motion(1)
+    assert events == [('regions', 1), ('paths', None)]
+    events.clear()
+    motion._hard_masks_for_step(3)
+    assert events == [('paths', None), ('regions', None)]
+
+    with torch.no_grad():
+        for logits in motion.precision_logits:
+            logits.fill_(-30.)
+            logits[:, 0] = 0.
+            logits[:, 1] = 2e-8
+    expected = [value.argmax(-1) for value in motion._precision_weights(
+        5, differentiable=False)]
+    for logits, reference in zip(motion.precision_logits, expected):
+        torch.testing.assert_close(logits.argmax(-1), torch.ones_like(reference),
+                                   rtol=0, atol=0)
+        torch.testing.assert_close(reference, torch.zeros_like(reference),
+                                   rtol=0, atol=0)
+
+    def direct_indices(step):
+        raise AssertionError('Reference diagnostics must keep the original softmax path')
+
+    motion._precision_indices = direct_indices
+    choices, _, _ = motion._selected_symbols(5)
+    for actual, reference in zip(choices, expected):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    motion._hard_rate_bits(5)
+
+
+def test_storage_aware_ste_is_exact_hard_forward_with_soft_gradients():
+    _, motion = storage_aware_binary_fixture(coarse_region_gs=24)
+    motion.prepare_step(5)
+    with torch.no_grad():
+        for logits in motion.precision_logits:
+            logits.fill_(-100.)
+            logits[:, 0] = 0.
+            logits[:, 1] = float(np.log(4.))
+        for logits in motion.refine_logits:
+            logits.fill_(float(np.log(4.)))
+
+    weights = motion._precision_weights(5)
+    probabilities = motion._precision_probabilities(5)
+    costs = torch.arange(len(motion.config.precision_bits), dtype=weights[0].dtype)
+    for actual, probability in zip(weights, probabilities):
+        expected = F.one_hot(probability.argmax(-1), probability.shape[-1]).to(actual)
+        torch.testing.assert_close(actual.detach(), expected, rtol=0, atol=0)
+    hard_loss = sum((value * costs).sum() for value in weights)
+    soft_loss = sum((value * costs).sum() for value in probabilities)
+    hard_grad = torch.autograd.grad(hard_loss, list(motion.precision_logits),
+                                    retain_graph=True)
+    soft_grad = torch.autograd.grad(soft_loss, list(motion.precision_logits))
+    for actual, expected in zip(hard_grad, soft_grad):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    captured = []
+    original_paths = motion._paths
+
+    def capture_paths(gates):
+        captured.extend(gates)
+        return original_paths(gates)
+
+    motion._paths = capture_paths
+    motion(5)
+    for value in captured:
+        torch.testing.assert_close(value.detach(), torch.ones_like(value), rtol=0, atol=0)
+    gate_grad = torch.autograd.grad(sum(value.sum() for value in captured),
+                                   list(motion.refine_logits))
+    assert all(torch.isfinite(value).all() and value.abs().sum() > 0 for value in gate_grad)
+
+    raw = torch.zeros(64, 6)
+    raw[:, 0] = torch.linspace(.051, .09, len(raw))
+    raw.requires_grad_()
+    support, hard_support = motion._support_by_precision(raw)
+    torch.testing.assert_close(support.detach(), hard_support.to(support), rtol=0, atol=0)
+    support.sum().backward()
+    assert raw.grad is not None and torch.isfinite(raw.grad).all() and raw.grad.abs().sum() > 0
 
 
 if __name__ == '__main__':

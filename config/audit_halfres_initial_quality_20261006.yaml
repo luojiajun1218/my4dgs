@@ -1,0 +1,8 @@
+# 同GT/相机/SH且清除noise，对缓存开关逐像素核验；只读两份首帧保存点。
+checkpoint_steps:
+- 10000
+- 15000
+resolution: -1
+image_size:
+- 1600
+- 1199

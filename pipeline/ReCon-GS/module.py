@@ -117,6 +117,7 @@ class ModuleConfig(BaseModuleConfig):
     num_saving_images: int = 5
     full_eval: bool = True
     lpips_required: bool = False
+    render_attribute_cache: bool = False
     merge_to_base: bool = True
     re_hierarchization: bool = True
     densify: DensifyConfig = field(default_factory=DensifyConfig)
@@ -221,6 +222,7 @@ class Module(BaseModule):
         self.register_buffer("background", bg_color_fn(3, device=self.device))
 
         self.gaussians = GaussianModel(self.config.sh_degree)
+        self.gaussians.render_attribute_cache = getattr(self.config, 'render_attribute_cache', False)
         self.gaussians.create_from_pcd(
             self.datamodule.scene.point_cloud, self.datamodule.cameras_extent
         )
@@ -2271,8 +2273,7 @@ class Module(BaseModule):
 
         densify_started = current_step > self.config.densify.from_step
         at_interval = current_step % self.config.densify.interval == 0
-        within_limit = self.gaussians.get_xyz.shape[0] < max_gaussians
-        if densify_started and at_interval and within_limit:
+        if densify_started and at_interval:
             exceed_reset_inverval = current_step > opacity_reset_interval
             size_threshold = 20 if exceed_reset_inverval else None
             self.gaussians.densify_and_prune(
@@ -2280,6 +2281,7 @@ class Module(BaseModule):
                 0.005,
                 self.datamodule.cameras_extent,
                 size_threshold,
+                max_points=max_gaussians,
             )
 
         white_background = self.datamodule.config.white_background

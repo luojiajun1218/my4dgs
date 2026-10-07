@@ -1,0 +1,15 @@
+# 原版已保存首帧和末帧；沿用当前版本的独立 FPS 测速参数。
+experiment_name: fps_recongs_same_protocol_20261007_103004
+source_root: /home/gamer-02/Documents/DeepLearning/ReCon-GS
+run: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf
+checkpoints:
+- frame: 0
+  step: 15000
+- frame: 299
+  step: 200
+image_size: [1600, 1199]
+warmup_renders: 10
+timed_renders: 100
+rounds: 5
+metric_absolute_tolerance: 0.0005
+scopes: [forward_clamp, rasterizer]

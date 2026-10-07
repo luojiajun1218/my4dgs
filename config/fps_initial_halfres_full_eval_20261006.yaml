@@ -1,0 +1,16 @@
+# 重新从原图读取1600x1199，评测半分辨率训练的首帧checkpoint。
+checkpoint_frames:
+- 0
+checkpoint_step: 15000
+image_size:
+- 1600
+- 1199
+warmup_renders: 10
+timed_renders: 100
+rounds: 5
+metric_absolute_tolerance: 0.0005
+scopes:
+- forward_clamp
+- rasterizer
+quality_reference: initial_checkpoint
+evaluation_resolution: -1

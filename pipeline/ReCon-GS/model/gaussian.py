@@ -23,6 +23,41 @@ class GaussianModel(BaseGaussianModel):
     delta_xyz: Optional[Tensor]
     delta_rot: Optional[Tensor]
     noise_scale: Optional[float]
+    render_attribute_cache = False
+
+    def _render_cached(self, name, tensors, function):
+        if (not self.render_attribute_cache or torch.is_inference_mode_enabled() or
+                (torch.is_grad_enabled() and any(value.requires_grad for value in tensors))):
+            return function()
+        try:
+            signature = tuple(value._version for value in tensors)
+        except RuntimeError:  # Inference tensors have no mutation version counter.
+            return function()
+        cache = getattr(self, '_render_cache', None)
+        if cache is None:
+            cache = self._render_cache = {}
+        cached = cache.get(name)
+        if (cached is None or cached[0] != signature or
+                any(previous is not current for previous, current in zip(cached[1], tensors))):
+            # Holding the sources prevents allocator/address or Python-id reuse
+            # from producing a false match after temporary motion or restore.
+            cache[name] = (signature, tuple(tensors), function())
+        return cache[name][2]
+
+    @property
+    def get_features(self):
+        return self._render_cached('features', (self._features_dc, self._features_rest),
+            lambda: torch.cat((self._features_dc, self._features_rest), dim=1))
+
+    @property
+    def get_scaling(self):
+        return self._render_cached('scaling', (self._scaling,),
+                                   lambda: self.scaling_activation(self._scaling))
+
+    @property
+    def get_opacity(self):
+        return self._render_cached('opacity', (self._opacity,),
+                                   lambda: self.opacity_activation(self._opacity))
 
     def initialize_incremental_optimizer(self, training_args) -> None:
         """Start newborn optimization with stage-two rates and fresh Adam moments.
@@ -46,10 +81,12 @@ class GaussianModel(BaseGaussianModel):
     @property
     def get_rotation(self) -> Float[Tensor, "n 3"]:
         if (override := getattr(self, "rigid_rotation", None)) is not None:
-            return self.rotation_activation(override)
+            return self._render_cached('rotation_override', (override,),
+                                       lambda: self.rotation_activation(override))
         if (delta_rot := getattr(self, "delta_rot", None)) is not None:
             return quaternion_multiply(super().get_rotation, delta_rot)
-        return super().get_rotation
+        return self._render_cached('rotation', (self._rotation,),
+                                   lambda: self.rotation_activation(self._rotation))
 
     @property
     def get_xyz_ori(self) -> Float[Tensor, "n 3"]:
@@ -57,7 +94,38 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_rotation_ori(self) -> Float[Tensor, "n 3"]:
-        return super().get_rotation
+        return self._render_cached('rotation', (self._rotation,),
+                                   lambda: self.rotation_activation(self._rotation))
+
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size,
+                          *, max_points=None):
+        if max_points is None:
+            return super().densify_and_prune(max_grad, min_opacity, extent,
+                                             max_screen_size)
+        before = len(self._xyz)
+        if isinstance(max_points, bool) or not isinstance(max_points, int) or max_points < before:
+            raise ValueError('The strict GS budget must cover the current Gaussian rows')
+        if max_grad <= 0:
+            raise ValueError('Budgeted densification needs a positive gradient threshold')
+        grads = torch.nan_to_num(self.xyz_gradient_accum / self.denom, nan=0.)
+        scores = grads.norm(dim=-1)
+        eligible = scores >= max_grad
+        selected = select_budget_mask(eligible, scores, max_points - before)
+        budget_grads = grads * selected[:, None]
+        # Preserve the initial-frame clone/split distributions. Both ordinary
+        # cloning and the standard two-child split have a net growth of one row.
+        self.densify_and_clone(budget_grads, max_grad, extent)
+        self.densify_and_split(budget_grads, max_grad, extent)
+        prune_mask = (self.get_opacity < min_opacity).reshape(-1)
+        if max_screen_size:
+            prune_mask |= ((self.max_radii2D > max_screen_size) |
+                           (self.get_scaling.max(dim=1).values > .1 * extent))
+        self.prune_points(prune_mask)
+        torch.cuda.empty_cache()
+        if len(self._xyz) > max_points:
+            raise AssertionError('Initial-frame densification exceeded its strict GS budget')
+        return dict(before=before, after=len(self._xyz), eligible=int(eligible.sum()),
+                    selected=int(selected.sum()), max_points=max_points)
 
     def get_covariance(self, scaling_modifier=1):
         if getattr(self, 'rigid_rotation', None) is not None:

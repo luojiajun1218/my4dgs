@@ -80,6 +80,7 @@ def main():
             hard_storage_bytes=stream['hard_storage_bytes'],
             expected_storage_bytes=stream['expected_storage_bytes'],
             training_seconds=packet['timing']['training'], wall_seconds=packet['timing']['wall'],
+            training_with_prepare_finalize_seconds=packet['timing']['training_loop_including_state_update'],
             new_count=stream['new_count'], deleted_count=stream['deleted_count'],
             tree_rebuilt=activities['tree_rebuilt'], precision_counts=precision_counts,
             terminal_depth_counts=activities['gs']['terminal_depth_counts'],
@@ -90,6 +91,7 @@ def main():
         raise ValueError(f'Run incomplete: expected dynamic frames 1..{expected_frames}')
     mean_keys = ('psnr', 'ssim', 'fps', 'inference_bytes', 'hard_storage_bytes',
                  'expected_storage_bytes', 'training_seconds', 'wall_seconds',
+                 'training_with_prepare_finalize_seconds',
                  'new_count', 'deleted_count', 'coded_payload_bits')
     means = {key: statistics.mean(row[key] for row in frames) for key in mean_keys}
     output.mkdir(parents=True)

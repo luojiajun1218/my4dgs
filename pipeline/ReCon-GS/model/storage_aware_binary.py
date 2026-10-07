@@ -15,6 +15,7 @@ from .binary_refinement import (BinaryRefinementConfig, BinaryRefinementMotion,
                                 _binary_layout, _conditional_transform,
                                 _copy_layout, stable_binary_forest)
 from .residual_motion import RAW_FIELDS, reference_digest, survivor_rows
+from .node_motion import node_conditional_transform, terminal_node_rows
 
 
 CODEC_VERSION = 'storage_aware_binary_preorder_v1'
@@ -31,9 +32,18 @@ class StorageAwareBinaryConfig(BinaryRefinementConfig):
     precision_lr: float = 0.02
     precision_initial_logits: list = None
     rate_support_temperature: float = 0.1
+    motion_compute: str = 'reference'
+    cache_static_layout: bool = False
+    selected_precision_only: bool = False
+    cache_frozen_storage: bool = False
 
     def validate(self):
         self._validate_binary_config(max_levels=4, rebuild_interval=5)
+        if self.motion_compute not in {'reference', 'node'}:
+            raise ValueError('motion_compute must be reference or node')
+        for name in ('cache_static_layout', 'selected_precision_only', 'cache_frozen_storage'):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f'{name} must be bool')
         if not self.precision_bits or len(self.precision_bits) < 2:
             raise ValueError('precision_bits must contain at least two coding choices')
         bits = list(self.precision_bits)
@@ -270,7 +280,28 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             dict(params=self.refine_logits, lr=self.config.gate_lr),
             dict(params=self.precision_logits, lr=self.config.precision_lr)], **optimizer_options)
         self.optimizer = self.motion_optimizer
+        self._cached_occupancy = _occupancy(self.active_layout)
+        self._cached_children = _children(self.active_layout)
+        self._cached_gate_positions = [dict((int(node), i) for i, node in enumerate(rows.tolist()))
+                                      for rows in self.active_layout['refine_rows']]
+        self._cached_active_gates = []
+        for level, parent in enumerate(self.parents):
+            counts = torch.zeros(self.counts[level], device=xyz.device, dtype=torch.int32)
+            counts.index_add_(0, parent, self._cached_occupancy[level + 1].to(torch.int32))
+            self._cached_active_gates.append(counts > 0)
+        self._cached_steps = self._make_candidate_steps()
+        self._cached_bits = xyz.new_tensor(self.config.precision_bits)
+        self._static_terminal = terminal_node_rows(self.active_layout,
+            [xyz.new_ones(count) for count in self.counts], selected_only=False)
+        self._fixed_paths = self._fixed_rows = self._fixed_terminal = None
+        self._frozen_storage_parts = {}
         return self.active_layout
+
+    def _occupancy_values(self):
+        return self._cached_occupancy if self.config.cache_static_layout else _occupancy(self.active_layout)
+
+    def _children_values(self):
+        return self._cached_children if self.config.cache_static_layout else _children(self.active_layout)
 
     def _configure_phase(self, step, restoring=False):
         phase = super()._configure_phase(step, restoring=restoring)
@@ -301,7 +332,7 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
                 probability = self._precision_probabilities(step)[level]
                 index = probability.detach().argmax(-1)
                 hard = torch.nn.functional.one_hot(index, probability.shape[-1]).to(probability)
-                result.append(hard + probability - probability.detach())
+                result.append(hard + (probability - probability.detach()))
             else:
                 if self.hard_masks is not None and phase in {'gate_refine', 'incremental'}:
                     index = self.hard_masks['precision'][level]
@@ -310,11 +341,23 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
                 result.append(torch.nn.functional.one_hot(index, len(self.config.precision_bits)).to(logits))
         return result
 
-    def _candidate_steps(self):
+    def _make_candidate_steps(self):
         translation = self.base_xyz.new_tensor(self.config.translation_steps_extent) * self.extent
         rotation = self.base_xyz.new_tensor(self.config.rotation_steps_rad)
         return torch.cat((translation[:, None].expand(-1, 3),
                           rotation[:, None].expand(-1, 3)), dim=1)
+
+    def _candidate_steps(self):
+        return self._cached_steps if self.config.cache_static_layout else self._make_candidate_steps()
+
+    def _precision_indices(self, step):
+        phase = self.stage(step)
+        if phase == 'dense_fit':
+            return [torch.full((count,), len(self.config.precision_bits) - 1,
+                               device=self.base_xyz.device, dtype=torch.long) for count in self.counts]
+        if self.hard_masks is not None and phase in {'gate_refine', 'incremental'}:
+            return self.hard_masks['precision']
+        return [value.detach().argmax(-1) for value in self.precision_logits]
 
     def _quantized_candidates(self, raw):
         steps = self._candidate_steps()
@@ -327,10 +370,28 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
         quantized = decoded + (raw - raw.detach())[None]
         return quantized, rounded, scaled
 
-    def _region_motion(self, step=None, *, hard=False):
+    def _region_motion(self, step=None, *, hard=False, active_rows=None):
         if step is None:
             step = self.config.motion_steps
         output = []
+        if self.config.selected_precision_only and (hard or self.stage(step) != 'gate_compress'):
+            choices = self._precision_indices(step)
+            steps = self._candidate_steps()
+            limit_levels = (1 if self.stage(step) == 'dense_fit' and
+                            step <= self.config.coarse_fit_steps else len(self.counts))
+            for level in range(limit_levels):
+                rows = (active_rows[level] if active_rows is not None else
+                        torch.arange(self.counts[level], device=self.base_xyz.device))
+                raw = torch.cat((self.region_translation[level][rows],
+                                 self.region_rotation[level][rows]), dim=-1)
+                selected_steps = steps[choices[level][rows]]
+                bits = self._cached_bits[choices[level][rows]]
+                limit = 2. ** (bits - 1)
+                symbols = torch.minimum(torch.maximum(torch.round(raw / selected_steps),
+                    -limit[:, None]), limit[:, None] - 1)
+                quantized = symbols * selected_steps + (raw - raw.detach())
+                output.append(raw.new_zeros((self.counts[level], 6)).index_copy(0, rows, quantized))
+            return output
         weights = self._precision_weights(step, differentiable=not hard)
         for level, (translation, rotation) in enumerate(zip(self.region_translation,
                                                             self.region_rotation)):
@@ -340,7 +401,9 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
         return output
 
     def _selected_symbols(self, step):
-        selections = [value.argmax(-1) for value in self._precision_weights(step, differentiable=False)]
+        selections = ([value.argmax(-1) for value in self._precision_weights(
+            step, differentiable=False)] if self.config.motion_compute == 'reference'
+            else self._precision_indices(step))
         steps = self._candidate_steps()
         symbols = []
         saturation = []
@@ -368,11 +431,35 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             gates = []
             for probability in self.gate_probabilities(step):
                 hard = (probability >= self.config.gate_hard_threshold).to(probability)
-                gates.append(hard + probability - probability.detach())
+                gates.append(hard + (probability - probability.detach()))
         else:
             gates = self.refinement_masks(step)
-        return _conditional_transform(self.base_xyz, self.base_rotation,
-            self.active_layout, self._region_motion(step), self._paths(gates))
+        if self.config.motion_compute == 'reference':
+            # Build the region and path graphs in their original order.
+            return _conditional_transform(self.base_xyz, self.base_rotation,
+                self.active_layout, self._region_motion(step), self._paths(gates))
+        paths = self._paths(gates)
+        selected = phase in {'gate_refine', 'incremental'}
+        rows = terminal = None
+        if self.config.motion_compute == 'node' and selected:
+            if self._fixed_paths is None:
+                self._fixed_paths = [value.detach() for value in paths]
+                self._fixed_rows = [torch.where(value > 0)[0] for value in paths]
+                self._fixed_terminal = terminal_node_rows(self.active_layout, paths, selected_only=True)
+            paths, rows, terminal = self._fixed_paths, self._fixed_rows, self._fixed_terminal
+        regions = self._region_motion(step, active_rows=rows)
+        if not selected:
+            terminal = self.active_layout['index'][0] if len(regions) == 1 else self._static_terminal
+        return node_conditional_transform(self.base_xyz, self.base_rotation,
+            self.active_layout, regions, paths[:len(regions)], selected_only=selected,
+            terminal=terminal, active_rows=rows)
+
+    def _hard_masks_for_step(self, step):
+        if self.config.motion_compute == 'reference':
+            return super()._hard_masks_for_step(step)
+        xyz, rotation = self(step)
+        changed = ((xyz != self.base_xyz).any(-1) | (rotation != self.base_rotation).any(-1))
+        return dict(refine=self.refinement_masks(step), m=changed.detach())
 
     def optimizer_step(self):
         if self.stage(self.last_step) == 'gate_compress':
@@ -389,7 +476,7 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
         distance = scaled.abs()
         smooth_zero = torch.sigmoid((0.5 - distance) / self.config.rate_support_temperature)
         soft = 1 - smooth_zero.prod(-1)
-        return (hard + soft - soft.detach()).transpose(0, 1), hard.transpose(0, 1).bool()
+        return (hard + (soft - soft.detach())).transpose(0, 1), hard.transpose(0, 1).bool()
 
     def _hard_node_choices(self, step):
         selections, symbols, saturation = self._selected_symbols(step)
@@ -398,14 +485,30 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
 
     def _hard_rate_bits(self, step):
         gates = self.refinement_masks(step)
-        occupancy = _occupancy(self.active_layout)
-        children = _children(self.active_layout)
+        occupancy = self._occupancy_values()
+        children = self._children_values()
         _, symbols, _, _ = self._hard_node_choices(step)
-        precision = [value.argmax(-1) for value in self._precision_weights(step, differentiable=False)]
+        precision = ([value.argmax(-1) for value in self._precision_weights(
+            step, differentiable=False)] if self.config.motion_compute == 'reference'
+            else self._precision_indices(step))
+        if self.config.cache_static_layout:
+            paths = self._paths(gates)
+            total = self.base_xyz.new_zeros(())
+            for level in range(len(self.counts)):
+                reached = paths[level].bool() & occupancy[level]
+                nonzero = symbols[level].ne(0).any(-1)
+                costs = 1 + nonzero.to(self.base_xyz) * (
+                    self.selector_bits + 6 * self._cached_bits[precision[level]])
+                if level < len(gates):
+                    costs = costs + self._cached_active_gates[level].to(costs)
+                total = total + (reached.to(costs) * costs).sum()
+            return int(total.item())
         return sum(self._hard_rate_bits_node(0, root, None, occupancy, children,
             gates, symbols, precision) for root in torch.where(occupancy[0])[0].tolist())
 
     def _refine_position(self, level, node):
+        if self.config.cache_static_layout:
+            return self._cached_gate_positions[level][node]
         rows = self.active_layout['refine_rows'][level]
         matches = torch.where(rows == node)[0]
         if len(matches) != 1:
@@ -433,8 +536,10 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
 
     def storage_parts(self, step, hard=False):
         phase = self.stage(step)
-        occupancy = _occupancy(self.active_layout)
-        children = _children(self.active_layout)
+        frozen = self.config.cache_frozen_storage and phase == 'incremental'
+        if frozen and hard in self._frozen_storage_parts:
+            return dict(self._frozen_storage_parts[hard])
+        occupancy = self._occupancy_values()
         gates = (self.refinement_masks(step) if hard or phase != 'gate_compress'
                  else self.gate_probabilities(step))
         gate_prob = [value.to(self.base_xyz) for value in gates]
@@ -442,10 +547,13 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
         active_gate_masks = []
         for level, parent in enumerate(self.parents):
             child_has_members = occupancy[level + 1]
-            mask = torch.zeros(self.counts[level], device=self.base_xyz.device, dtype=torch.int32)
-            if len(parent):
-                mask.index_add_(0, parent, child_has_members.to(torch.int32))
-            mask = mask > 0
+            if self.config.cache_static_layout:
+                mask = self._cached_active_gates[level]
+            else:
+                mask = torch.zeros(self.counts[level], device=self.base_xyz.device, dtype=torch.int32)
+                if len(parent):
+                    mask.index_add_(0, parent, child_has_members.to(torch.int32))
+                mask = mask > 0
             active_gate_masks.append(mask)
             node_gate = self.base_xyz.new_zeros(self.counts[level])
             node_gate = node_gate.index_copy(0, self.active_layout['refine_rows'][level], gate_prob[level])
@@ -472,17 +580,21 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             padding = self.base_xyz.new_tensor(float((-hard_bits) % 8))
         else:
             padding = self.base_xyz.new_zeros(())
-        return dict(codec_header_bytes=self.base_xyz.new_tensor(float(CODEC_HEADER_BYTES)),
+        result = dict(codec_header_bytes=self.base_xyz.new_tensor(float(CODEC_HEADER_BYTES)),
                     payload_padding_bytes=padding / 8,
                     stop_refine_flag_bytes=expected_gates / 8,
                     motion_presence_flag_bytes=expected_presence / 8,
                     precision_and_symbol_bytes=expected_payload / 8)
+        if frozen:
+            self._frozen_storage_parts[hard] = {key: value.detach() for key, value in result.items()}
+            return dict(self._frozen_storage_parts[hard])
+        return result
 
     def _write_node(self, writer, level, node, occupancy, children, gates,
                     precision, symbols):
         if not bool(occupancy[level][node]):
             return
-        symbol = symbols[level][node].detach().cpu().tolist()
+        symbol = symbols[level][node]
         present = any(value != 0 for value in symbol)
         writer.write(int(present))
         if present:
@@ -495,7 +607,7 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             child_nodes = [child for child in children[level][node]
                            if bool(occupancy[level + 1][child])]
             if child_nodes:
-                row = self._refine_position(level, node)
+                row = self._cached_gate_positions[level][node]
                 opened = bool(gates[level][row])
                 writer.write(int(opened))
                 if opened:
@@ -505,12 +617,20 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
 
     def _encode_payload(self, step):
         writer = _BitWriter()
-        occupancy = _occupancy(self.active_layout)
-        children = _children(self.active_layout)
+        occupancy = self._occupancy_values()
+        children = self._children_values()
         gates = self.refinement_masks(step)
         precision, symbols, _ = self._selected_symbols(step)
-        for root in torch.where(occupancy[0])[0].tolist():
-            self._write_node(writer, 0, root, occupancy, children, gates, precision, symbols)
+        # One transfer per tensor, rather than thousands of scalar CUDA reads
+        # while traversing nodes. The serialized bit order is unchanged.
+        cpu_occupancy = [value.detach().cpu().tolist() for value in occupancy]
+        cpu_gates = [value.detach().cpu().tolist() for value in gates]
+        cpu_precision = [value.detach().cpu().tolist() for value in precision]
+        cpu_symbols = [value.detach().cpu().tolist() for value in symbols]
+        for root, present in enumerate(cpu_occupancy[0]):
+            if present:
+                self._write_node(writer, 0, root, cpu_occupancy, children,
+                                 cpu_gates, cpu_precision, cpu_symbols)
         bit_count = writer.bit_count
         payload = writer.finish()
         return payload, bit_count, precision, symbols
@@ -619,7 +739,10 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             node_gate = base_xyz.new_zeros(counts[level])
             node_gate = node_gate.index_copy(0, layout['refine_rows'][level], gates[level].to(base_xyz))
             paths.append(paths[level][parent] * node_gate[parent])
-        xyz, rotation = _conditional_transform(base_xyz, base_rotation, layout, regions, paths)
+        transform = (node_conditional_transform if config.motion_compute == 'node'
+                     else _conditional_transform)
+        transform_options = dict(selected_only=True) if config.motion_compute == 'node' else {}
+        xyz, rotation = transform(base_xyz, base_rotation, layout, regions, paths, **transform_options)
         return xyz, rotation, gates, regions, header
 
     @torch.no_grad()
