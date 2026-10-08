@@ -1,0 +1,31 @@
+# CPU-only geometry and production-writer audit. No training or rendering.
+experiment_name: fs_parent_precision_compensation_codec_audit_36open
+source_run: output/fs_joint_precision_mechanism_100f/20261007T235547_f9a241
+output_root: output/fs_parent_precision_compensation_codec_audit_36open
+device: cpu
+
+# These are the twelve immutable diagnostic snapshots and their original
+# image-blind reachable-open samples: 6 frames x 2 steps x 3 levels = 36 nodes.
+frames: [1, 5, 25, 50, 75, 99]
+snapshot_steps: [120, 180]
+sample_stratum: reachable_open
+expected_snapshot_count: 12
+expected_node_count: 36
+expected_precision_bits: [8, 12, 16, 24, 32]
+
+# Every configured precision except the source hard choice is tested. Each
+# naive and compensated arm is restored independently from the source snapshot.
+alternate_parent_bits: all_except_source
+compensation_scope: occupied_immediate_children
+recursive_pushdown: false
+candidate_modes: [naive, compensated]
+writer: storage_aware_binary_preorder_v1
+birth_bytes_in_delta: false
+
+# Continuous preservation is a correctness check before child re-quantization.
+# Encoded candidates are evaluated only after the unchanged child bit choices
+# round and clamp the rebased residuals.
+continuous_position_atol: 1.0e-6
+continuous_rotation_atol_rad: 1.0e-6
+codec_position_atol: 1.0e-7
+codec_rotation_atol_rad: 1.0e-6

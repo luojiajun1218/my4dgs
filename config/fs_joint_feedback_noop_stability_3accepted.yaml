@@ -1,0 +1,25 @@
+# 三个已接纳节点的无干预独立重复，用来估计成对续训协议的数值底噪。
+experiment_name: fs_joint_feedback_noop_stability_3accepted
+source_transaction_run: output/fs_joint_feedback_prehardening_transaction_6nodes/20261008T104500
+output_root: output/fs_joint_feedback_noop_stability_3accepted
+device: cuda
+
+# 两个臂从同一个 source runtime deepcopy；不施加 feedback，也不镜像计算结果。
+nodes:
+  - {frame: 1,  step: 180, level: 0, node: 1160}
+  - {frame: 25, step: 180, level: 1, node: 618}
+  - {frame: 99, step: 180, level: 2, node: 1010}
+
+ordinary_camera_names: [cam01.png, cam02.png, cam03.png, cam04.png, cam05.png,
+                        cam06.png, cam07.png, cam08.png, cam09.png, cam10.png,
+                        cam11.png, cam12.png, cam13.png, cam14.png, cam15.png,
+                        cam16.png, cam17.png, cam18.png, cam19.png, cam20.png]
+validation_camera_name: cam00.png
+seed: 0
+end_step: 200
+future_view_sequence: seeded_balanced_cycle
+final_validation_step: 200
+
+# 与既有成对续训一致：arm_a 后计算 arm_b，不在两臂间重置全局 RNG。
+arm_order: [arm_a, arm_b]
+rng_reset_between_arms: false

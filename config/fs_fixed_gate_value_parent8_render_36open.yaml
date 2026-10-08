@@ -1,0 +1,40 @@
+# Fixed-state gate-value diagnostic. No fitting, training, or parameter writeback.
+experiment_name: fs_fixed_gate_value_parent8_render_36open
+source_run: output/fs_joint_precision_mechanism_100f/20261007T235547_f9a241
+output_root: output/fs_fixed_gate_value_parent8_render_36open
+device: cuda
+
+frames: [1, 5, 25, 50, 75, 99]
+snapshot_steps: [120, 180]
+sample_stratum: reachable_open
+expected_snapshot_count: 12
+expected_node_count: 36
+expected_states: 156       # 12 shared A + 36 x (B, C, D, E)
+expected_view_renders: 3120
+
+camera_names: [cam01.png, cam02.png, cam03.png, cam04.png, cam05.png,
+               cam06.png, cam07.png, cam08.png, cam09.png, cam10.png,
+               cam11.png, cam12.png, cam13.png, cam14.png, cam15.png,
+               cam16.png, cam17.png, cam18.png, cam19.png, cam20.png]
+forbidden_camera_name: cam00.png
+resolution: -1
+equal_view_weight: true
+no_grad: true
+fit_steps: 0
+
+rate_weight: 0.01
+rate_reference: source_first_frame_gs_count_times_24_bytes
+actual_cost: storage_aware_binary_preorder_v1_whole_motion_bin
+birth_bytes_in_delta: false
+target_parent_bits: 8
+allowed_source_parent_bits: [12, 32]
+
+states:
+  A: {gate: REFINE, parent_bits: source, compensation: false}
+  B: {gate: STOP,   parent_bits: source, compensation: false}
+  C: {gate: STOP,   parent_bits: 8,      compensation: false}
+  D: {gate: REFINE, parent_bits: 8,      compensation: false}
+  E: {gate: REFINE, parent_bits: 8,      compensation: immediate_children}
+
+codec_position_atol: 1.0e-7
+codec_rotation_atol_rad: 1.0e-6

@@ -1,0 +1,42 @@
+# 仅回放历史只读快照，验证“候选训练后的联合价值”是否能跨视角成立。
+# 这不是生产训练配置，也不会把候选写回主模型。
+experiment_name: fs_joint_feedback_crossfold_3nodes
+source_run: output/fs_joint_precision_mechanism_100f/20261007T235547_f9a241
+output_root: output/fs_joint_feedback_crossfold_3nodes
+device: cuda
+
+# 三个已知性质不同的调试节点；不能据此估计整段误选率。
+nodes:
+  - {frame: 5, step: 120, level: 1, node: 2552}
+  - {frame: 75, step: 180, level: 0, node: 926}
+  - {frame: 99, step: 180, level: 0, node: 43}
+
+# cam00继续只用于原实验最终评测。两折交换拟合与检查角色。
+folds:
+  - name: odd_fit
+    fit_camera_names: [cam01.png, cam03.png, cam05.png, cam07.png, cam09.png,
+                       cam11.png, cam13.png, cam15.png, cam17.png, cam19.png]
+    check_camera_names: [cam02.png, cam04.png, cam06.png, cam08.png, cam10.png,
+                         cam12.png, cam14.png, cam16.png, cam18.png, cam20.png]
+  - name: even_fit
+    fit_camera_names: [cam02.png, cam04.png, cam06.png, cam08.png, cam10.png,
+                       cam12.png, cam14.png, cam16.png, cam18.png, cam20.png]
+    check_camera_names: [cam01.png, cam03.png, cam05.png, cam07.png, cam09.png,
+                         cam11.png, cam13.png, cam15.png, cam17.png, cam19.png]
+
+# 每个拟合视角恰好出现两次；每个候选共享同一私有顺序。
+seed: 0
+fit_steps: 20
+fit_lr_scale: 1.0
+view_sequence: seeded_balanced_cycle
+expected_candidate_count: 32
+
+# 防止误用别的快照或静默改变原实验的率失真定义/学习预算。
+expected_source:
+  storage_loss_weight: 0.01
+  region_translation_lr: 0.0005
+  region_rotation_lr: 0.00005
+  precision_lr: 0.02
+  gate_lr: 0.02
+  gate_adam_eps: 1.0e-15
+  precision_bits: [8, 12, 16, 24, 32]

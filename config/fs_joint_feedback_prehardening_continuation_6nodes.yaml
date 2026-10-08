@@ -1,0 +1,33 @@
+# 六个step180节点从同状态成对续训到硬化和motion refine结束。
+experiment_name: fs_joint_feedback_prehardening_continuation_6nodes
+source_transaction_run: output/fs_joint_feedback_prehardening_transaction_6nodes/20261008T104500
+output_root: output/fs_joint_feedback_prehardening_continuation_6nodes
+device: cuda
+
+# 若transaction选择source或rollback，脚本把feedback臂构造成source的精确no-op clone。
+nodes:
+  - {frame: 1,  step: 180, level: 0, node: 1160,
+     deployed_packet: deployed_frame_001_step_0180.pth}
+  - {frame: 5,  step: 180, level: 0, node: 1279,
+     deployed_packet: deployed_frame_005_step_0180.pth}
+  - {frame: 25, step: 180, level: 1, node: 618,
+     deployed_packet: deployed_frame_025_step_0180.pth}
+  - {frame: 50, step: 180, level: 1, node: 2919,
+     deployed_packet: deployed_frame_050_step_0180.pth}
+  - {frame: 75, step: 180, level: 2, node: 934,
+     deployed_packet: deployed_frame_075_step_0180.pth}
+  - {frame: 99, step: 180, level: 2, node: 1010,
+     deployed_packet: deployed_frame_099_step_0180.pth}
+
+ordinary_camera_names: [cam01.png, cam02.png, cam03.png, cam04.png, cam05.png,
+                        cam06.png, cam07.png, cam08.png, cam09.png, cam10.png,
+                        cam11.png, cam12.png, cam13.png, cam14.png, cam15.png,
+                        cam16.png, cam17.png, cam18.png, cam19.png, cam20.png]
+validation_camera_name: cam00.png
+seed: 0
+end_step: 200
+current_camera_from_snapshot: true
+future_view_sequence: seeded_balanced_cycle
+evaluation_steps: [180, 181, 200]
+actual_cost: true
+final_validation_step: 200

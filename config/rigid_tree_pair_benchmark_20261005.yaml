@@ -1,7 +1,0 @@
-# 只读恢复两组checkpoint，在空闲GPU上交替计时。不是训练参数。
-checkpoint_frames: [5, 24, 50, 100, 200, 299]
-checkpoint_step: 340
-warmup_renders: 5
-timed_renders: 30
-paired_rounds: 4
-metric_absolute_tolerance: 0.0001

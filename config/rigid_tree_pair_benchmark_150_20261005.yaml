@@ -1,7 +1,0 @@
-# 用户停止后续训练；前150个动态帧内已有的四个checkpoint，只读配对测速。
-checkpoint_frames: [5, 24, 50, 100]
-checkpoint_step: 340
-warmup_renders: 5
-timed_renders: 30
-paired_rounds: 4
-metric_absolute_tolerance: 0.0001

@@ -1,0 +1,28 @@
+# 从同一阶段快照成对续训源状态和已通过真实 RD 校验的反馈状态。
+experiment_name: fs_joint_feedback_continuation_pair
+source_transaction_run: output/fs_joint_feedback_transaction_3nodes/20261008T101708
+output_root: output/fs_joint_feedback_continuation_pair
+device: cuda
+
+# 只续训已在独立 clone 中提交反馈的两个调试节点。
+nodes:
+  - {frame: 5, step: 120, level: 1, node: 2552,
+     deployed_packet: deployed_frame_005_step_0120.pth}
+  - {frame: 99, step: 180, level: 0, node: 43,
+     deployed_packet: deployed_frame_099_step_0180.pth}
+
+# 当前步重算快照记录的训练相机；后续普通训练相机按 seed=0 的均衡循环排列。
+ordinary_camera_names: [cam01.png, cam02.png, cam03.png, cam04.png, cam05.png,
+                        cam06.png, cam07.png, cam08.png, cam09.png, cam10.png,
+                        cam11.png, cam12.png, cam13.png, cam14.png, cam15.png,
+                        cam16.png, cam17.png, cam18.png, cam19.png, cam20.png]
+validation_camera_name: cam00.png
+seed: 0
+end_step: 200
+current_camera_from_snapshot: true
+future_view_sequence: seeded_balanced_cycle
+
+# 起点先评 pre-update 状态；以下检查点在对应训练更新后评估 all20 和真实码流。
+evaluation_steps: [120, 150, 180, 181, 200]
+actual_cost: true
+final_validation_step: 200

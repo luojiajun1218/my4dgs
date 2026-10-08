@@ -2,8 +2,10 @@
 import importlib
 import ast
 import copy
+from dataclasses import asdict, fields
 import itertools
 import json
+import math
 import multiprocessing
 import sys
 import tempfile
@@ -38,7 +40,12 @@ SH = importlib.import_module('pipeline.ReCon-GS.model.sparse_hierarchical')
 FC = importlib.import_module('pipeline.ReCon-GS.model.flat_cluster')
 BR = importlib.import_module('pipeline.ReCon-GS.model.binary_refinement')
 SAB = importlib.import_module('pipeline.ReCon-GS.model.storage_aware_binary')
+CC = importlib.import_module('pipeline.ReCon-GS.model.common_contrast')
+SHADOW = importlib.import_module('pipeline.ReCon-GS.model.shadow_exploration')
+GD = importlib.import_module('pipeline.ReCon-GS.model.gate_diagnostics')
+GPS = importlib.import_module('pipeline.ReCon-GS.model.gate_probe_snapshot')
 NM = importlib.import_module('pipeline.ReCon-GS.model.node_motion')
+PPC = importlib.import_module('pipeline.ReCon-GS.model.parent_precision_compensation')
 MC = importlib.import_module('pipeline.ReCon-GS.model.motion_clustering')
 SL_CODEC = importlib.import_module('pipeline.ReCon-GS.model.sparse_layout_codec')
 GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
@@ -3980,19 +3987,15 @@ def test_probe_projection_preserves_teacher_pose_and_resume_for_both_builders():
                                            motion.index[level], rtol=0, atol=0)
 
 
-def test_tree_probe_parameters_are_explicit_and_full_configs_have_equal_budgets():
-    import yaml
-    configs = [yaml.safe_load((project_root / 'config' / name).read_text()) for name in [
-        'fs_spatial_probe_p40_300_20261005.yaml', 'fs_rigid_cluster_p40_300_20261005.yaml']]
+def test_tree_probe_parameters_are_explicit_and_fixtures_have_equal_budgets():
+    configs = [asdict(motion_probe_fixture(builder)[1].config)
+               for builder in ('spatial', 'rigid_cluster')]
     for config in configs:
-        sparse = config['module']['sparse_hierarchical']
-        assert sparse['motion_steps'] + sparse['incremental_steps'] == config['trainer']['num_incr_steps'] == 340
-        assert config['data']['extra_dataset_kwargs']['num_frames'] == 300
-        assert sparse['storage_warmup_steps'] == sparse['tree_probe_steps'] + sparse['dense_fit_steps'] == 140
+        assert config['motion_steps'] == (config['tree_probe_steps'] + config['dense_fit_steps']
+                                         + config['gate_compress_steps'] + config['gate_refine_steps'])
     first, second = copy.deepcopy(configs)
-    first.pop('experiment_name'); second.pop('experiment_name')
-    first['module']['sparse_hierarchical'].pop('tree_builder')
-    second['module']['sparse_hierarchical'].pop('tree_builder')
+    first.pop('tree_builder')
+    second.pop('tree_builder')
     assert first == second
     for overrides in [dict(tree_cluster_neighbors=None), dict(tree_cluster_iterations=0),
                       dict(tree_probe_min_observations=5), dict(tree_cluster_spatial_weight=-1.),
@@ -4198,18 +4201,13 @@ def test_flat_gate_phase_losses_have_finite_gradients_and_freeze_motion():
     assert len(motion.region_translation) == 1
 
 
-def test_flat_fullres_candidate_budget_and_actual_image_size_guard():
-    import yaml
-    path = project_root / 'config' / 'fs_flat_cluster_p40_fullres_300.yaml'
-    config = yaml.safe_load(path.read_text())
-    parameters = FC.FlatClusterConfig(**config['module']['flat_cluster'])
+def test_flat_candidate_budget_and_actual_image_size_guard():
+    _, motion = flat_cluster_fixture()
+    parameters = motion.config
     parameters.validate()
-    assert parameters.cluster_gs == 24 and parameters.tree_cluster_spatial_weight == 0.
-    assert parameters.motion_steps == config['module']['deformation']['num_stage1_steps'] == 240
-    assert parameters.total_steps == config['trainer']['num_incr_steps'] == 340
-    assert config['data']['extra_dataset_kwargs']['num_frames'] == 300
-    assert config['data']['resolution'] == 1
-    assert config['data']['expected_image_size'] == [2689, 2016]
+    assert parameters.cluster_gs == 6 and parameters.tree_cluster_spatial_weight == 0.
+    assert parameters.motion_steps == 10
+    assert parameters.total_steps == parameters.motion_steps + parameters.incremental_steps
     view = SimpleNamespace(image=torch.zeros(3, 4, 6))
     assert DATA._collate_single_view([view], [6, 4]) is view
     assert DATA._collate_single_view([view]) is view
@@ -4221,7 +4219,7 @@ def test_flat_fullres_candidate_budget_and_actual_image_size_guard():
         raise AssertionError('Actual tensor size must reject unexpected downsampling')
     for changes in [dict(cluster_gs=0), dict(tree_cluster_spatial_weight=.001),
                     dict(motion_export_format='legacy')]:
-        invalid = copy.deepcopy(config['module']['flat_cluster'])
+        invalid = asdict(parameters)
         invalid.update(changes)
         try:
             FC.FlatClusterConfig(**invalid).validate()
@@ -4271,10 +4269,22 @@ def test_module_setup_selects_flat_model_and_shared_birth_config():
     assert subject.residual_motion.num_motion_levels == 1
 
 
-def binary_refinement_fixture(**overrides):
+def retained_experiment_config():
     import yaml
-    path = project_root / 'config' / 'fs_binary_quantized_refine_24f_20261006.yaml'
-    values = yaml.safe_load(path.read_text(encoding='utf-8'))['module']['binary_refinement']
+    path = project_root / 'config' / 'fs_storage_aware_polish03_24f_20261007.yaml'
+    return yaml.safe_load(path.read_text(encoding='utf-8'))
+
+
+def retained_binary_values():
+    values = retained_experiment_config()['module']['storage_aware_binary']
+    names = {item.name for item in fields(BR.BinaryRefinementConfig)}
+    values = {name: value for name, value in values.items() if name in names}
+    values.update(max_motion_levels=3, tree_rebuild_interval=1)
+    return values
+
+
+def binary_refinement_fixture(**overrides):
+    values = retained_binary_values()
     # Synthetic budgets and units, not experiment parameter changes.
     values.update(coarse_region_gs=12, min_child_gs=2, coarse_fit_steps=2,
                   dense_fit_steps=4, gate_compress_steps=4, gate_refine_steps=2,
@@ -4487,11 +4497,9 @@ def test_binary_decoder_rejects_child_under_stopped_parent():
             raise AssertionError('A stopped parent cannot own a reachable child')
 
 
-def test_binary_experiment_config_matches_confirmed_parameters():
-    import yaml
-    path = project_root / 'config' / 'fs_binary_quantized_refine_24f_20261006.yaml'
-    config = yaml.safe_load(path.read_text(encoding='utf-8'))
-    parameters = BR.BinaryRefinementConfig(**config['module']['binary_refinement'])
+def test_binary_config_uses_retained_experiment_budgets():
+    config = retained_experiment_config()
+    parameters = BR.BinaryRefinementConfig(**retained_binary_values())
     parameters.validate()
     assert config['data']['extra_dataset_kwargs']['num_frames'] == 25
     assert config['data']['resolution'] == -1
@@ -4502,14 +4510,12 @@ def test_binary_experiment_config_matches_confirmed_parameters():
     assert parameters.motion_steps == config['module']['deformation']['num_stage1_steps'] == 200
     assert parameters.coarse_region_gs == 96 and parameters.min_child_gs == 12
     assert parameters.max_motion_levels == 3
-    assert parameters.motion_xyz_step_extent == 1e-4
-    assert parameters.motion_rotation_step_rad == 1e-3
+    assert parameters.motion_xyz_step_extent == 1e-3
+    assert parameters.motion_rotation_step_rad == 1e-2
 
 
 def storage_aware_binary_fixture(**overrides):
-    import yaml
-    path = project_root / 'config' / 'fs_storage_aware_binary_24f_20261006.yaml'
-    values = yaml.safe_load(path.read_text(encoding='utf-8'))['module']['storage_aware_binary']
+    values = retained_experiment_config()['module']['storage_aware_binary']
     values.update(coarse_region_gs=12, min_child_gs=2, max_motion_levels=4,
         coarse_fit_steps=2, dense_fit_steps=4, gate_compress_steps=4,
         gate_refine_steps=2, motion_steps=10, incremental_steps=2,
@@ -4526,10 +4532,345 @@ def storage_aware_binary_fixture(**overrides):
     return raw, motion
 
 
-def test_storage_aware_binary_config_matches_confirmed_parameters():
+def common_contrast_fixture(**overrides):
     import yaml
-    path = project_root / 'config' / 'fs_storage_aware_binary_24f_20261006.yaml'
-    config = yaml.safe_load(path.read_text(encoding='utf-8'))
+    values = yaml.safe_load((project_root / 'config' /
+        'fs_common_contrast_fixed16_100f.yaml').read_text())['module']['common_contrast_binary']
+    values.update(coarse_region_gs=12, min_child_gs=2, max_motion_levels=4,
+        coarse_fit_steps=2, dense_fit_steps=4, gate_compress_steps=4,
+        gate_refine_steps=2, motion_steps=10, incremental_steps=2,
+        storage_warmup_steps=4, storage_ramp_steps=1,
+        translation_step_extent=.01, rotation_step_rad=.005,
+        motion_xyz_step_extent=.1, motion_rotation_step_rad=.1,
+        densification_stats_steps=2)
+    values.update(overrides)
+    raw = residual_raw_fixture(48)
+    config = CC.CommonContrastConfig(**values)
+    motion = CC.CommonContrastMotion(config)
+    motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    return raw, motion
+
+
+def test_common_contrast_config_matches_full_run_protocol():
+    import yaml
+    config = yaml.safe_load((project_root / 'config' /
+        'fs_common_contrast_fixed16_100f.yaml').read_text())
+    parameters = CC.CommonContrastConfig(**config['module']['common_contrast_binary'])
+    parameters.validate()
+    assert config['module']['motion_mode'] == 'common_contrast_binary'
+    assert config['data']['extra_dataset_kwargs']['num_frames'] == 100
+    assert config['data']['resolution'] == -1
+    assert config['trainer']['num_incr_steps'] == parameters.total_steps == 300
+    assert parameters.motion_steps == config['module']['deformation']['num_stage1_steps'] == 200
+    assert parameters.fixed_motion_bits == 16
+    assert parameters.translation_step_extent == 1e-5
+    assert parameters.rotation_step_rad == 1e-4
+    assert parameters.storage_loss_weight == .01
+
+
+def test_common_contrast_single_parameter_derives_weighted_zero_mean_children():
+    _, motion = common_contrast_fixture()
+    level = next(level for level, mask in enumerate(motion._cached_binary)
+                 if bool(mask.any()))
+    node = int(torch.where(motion._cached_binary[level])[0][0])
+    position = motion._cached_gate_positions[level][node]
+    contrast = torch.tensor([.02, -.03, .01, .04, -.02, .03])
+    with torch.no_grad():
+        motion.contrast_translation[level][position] = contrast[:3]
+        motion.contrast_rotation[level][position] = contrast[3:]
+    root, values, *_ = motion._quantized_parameters()
+    regions = motion._regions(root, values)
+    children = [child for child in motion._cached_children[level][node]
+                if bool(motion._cached_occupancy[level + 1][child])]
+    wl, wr = motion._cached_weights[level][position]
+    torch.testing.assert_close(wl * regions[level + 1][children[0]] +
+                               wr * regions[level + 1][children[1]],
+                               torch.zeros(6), rtol=0, atol=1e-8)
+    assert len(motion.contrast_translation[level]) == len(motion.active_layout['refine_rows'][level])
+
+
+def test_common_contrast_zero_parent_split_can_reach_nonzero_deeper_contrast():
+    raw, motion = common_contrast_fixture()
+    with torch.no_grad():
+        for value in motion.refine_logits:
+            value.fill_(20.)
+        for value in motion.contrast_translation:
+            value.zero_()
+        deep = next(level for level in reversed(range(len(motion._cached_binary)))
+                    if bool(motion._cached_binary[level].any()))
+        node = int(torch.where(motion._cached_binary[deep])[0][0])
+        motion.contrast_translation[deep][motion._cached_gate_positions[deep][node], 0] = .04
+    xyz, _ = motion(7)
+    assert bool((xyz != raw['xyz']).any())
+    if deep:
+        # The immediate shallower contrast can remain exactly zero while the
+        # open subtree exposes this deeper detail.
+        assert all(not bool(value.ne(0).any()) for value in motion.contrast_translation[:deep])
+
+
+def test_common_contrast_codec_roundtrip_matches_forward_and_exact_storage():
+    raw, motion = common_contrast_fixture()
+    with torch.no_grad():
+        motion.root_translation[0] = torch.tensor([.03, -.02, .01])
+        motion.root_rotation[0] = torch.tensor([.02, .01, -.03])
+        for logits in motion.refine_logits:
+            logits.fill_(20.)
+        for level, mask in enumerate(motion._cached_binary):
+            rows = motion.active_layout['refine_rows'][level]
+            valid = torch.where(mask[rows])[0]
+            if len(valid):
+                motion.contrast_translation[level][valid[0], 1] = .02
+                break
+    motion.hard_masks = motion._hard_gate_masks()
+    expected = motion(10)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'motion.bin'
+        export = motion.export_motion(path, frame_index=1,
+            previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest='00' * 32, previous_count=len(raw['xyz']),
+            deleted_count=0, birth_count=0)
+        actual = CC.CommonContrastMotion.decode_motion(path, raw['xyz'],
+            raw['rotation'], motion.config, motion.active_layout)
+        dispatched = SAB.decoder_for_binary_stream(path, motion.config,
+                                                    retain_frame_state=True)
+        assert isinstance(dispatched, CC.CommonContrastDecoder)
+        torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+        hard_bytes = sum(float(value) for value in motion.storage_parts(10, hard=True).values())
+        assert export['archive_bytes'] == hard_bytes
+        assert export['payload_bits'] == motion.statistics()['hard_coded_payload_bits']
+
+
+def test_common_contrast_checkpoint_restores_parameters_gates_and_optimizer():
+    raw, motion = common_contrast_fixture()
+    with torch.no_grad():
+        motion.root_translation[:, 0] = .02
+    for _ in range(2):
+        xyz, _ = motion(5, training=True)
+        loss = (xyz - raw['xyz'] - .03).square().mean()
+        loss.backward()
+        motion.optimizer_step()
+    packet = copy.deepcopy(motion.capture())
+    restored = CC.CommonContrastMotion(copy.deepcopy(motion.config))
+    restored.restore(packet)
+    for actual, expected in zip(restored.state_dict().values(), motion.state_dict().values()):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for actual, expected in zip(restored(5), motion(5)):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for candidate in (motion, restored):
+        xyz, _ = candidate(5, training=True)
+        (xyz - raw['xyz'] - .03).square().mean().backward()
+        candidate.optimizer_step()
+    for actual, expected in zip(restored.state_dict().values(), motion.state_dict().values()):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert motion.motion_optimizer.state[motion.root_translation]['step'] > 0
+    motion(9, training=True)
+    hardened = CC.CommonContrastMotion(copy.deepcopy(motion.config))
+    hardened.restore(copy.deepcopy(motion.capture()))
+    assert all(torch.equal(a, b) for a, b in zip(
+        hardened.hard_masks['refine'], motion.hard_masks['refine']))
+
+
+def test_common_contrast_empty_child_becomes_unary_without_gate_or_contrast_cost():
+    raw, source = common_contrast_fixture()
+    level = next(level for level, mask in enumerate(source._cached_binary)
+                 if bool(mask.any()))
+    node = int(torch.where(source._cached_binary[level])[0][0])
+    children = [child for child in source._cached_children[level][node]
+                if bool(source._cached_occupancy[level + 1][child])]
+    remove_child = children[1]
+    keep = source.active_layout['index'][level + 1] != remove_child
+    subset = torch.where(keep)[0]
+    override = dict(index=source.active_layout['index'][:, subset],
+        counts=source.counts, parents=source.parents,
+        pivots=source.active_layout['pivots'])
+    motion = CC.CommonContrastMotion(copy.deepcopy(source.config))
+    motion.setup(raw['xyz'][subset], raw['rotation'][subset], 1., frame_index=2,
+                 layout_override=override)
+    assert not bool(motion._cached_binary[level][node])
+    assert int(motion._cached_unary[level][node]) == children[0]
+    gates = [torch.zeros_like(value) for value in motion.refine_logits]
+    paths = motion._paths(gates)
+    assert bool(paths[level + 1][children[0]])
+    position = motion._cached_gate_positions[level][node]
+    with torch.no_grad():
+        motion.contrast_translation[level][position].fill_(1.)
+    root, contrasts, *_ = motion._quantized_parameters()
+    regions = motion._regions(root, contrasts)
+    torch.testing.assert_close(regions[level + 1][children[0]], torch.zeros(6), rtol=0, atol=0)
+    # Inverse factorization of a unary branch must remove the pivot-induced
+    # parent displacement even though the branch has no local parameter.
+    layout = copy.deepcopy(motion.active_layout)
+    for depth, pivot in enumerate(layout['pivots']):
+        layout['pivots'][depth] = pivot + torch.tensor([.01, -.006, .004]) * (depth + 1)
+    root_values = raw['xyz'].new_zeros(layout['counts'][0], 6)
+    root_values[:, 3:] = torch.tensor([.21, -.13, .08])
+    split_values = [raw['xyz'].new_zeros(len(rows), 6)
+                    for rows in layout['refine_rows']]
+    cumulative_q, cumulative_delta = CC.reconstruct_cumulative_transforms(
+        layout, root_values, split_values)
+    all_paths = [raw['xyz'].new_ones(count) for count in layout['counts']]
+    terminal = NM.terminal_node_rows(layout, all_paths, selected_only=False)
+    factored = CC.decompose_terminal_transforms(layout,
+        torch.cat(cumulative_q)[terminal], torch.cat(cumulative_delta)[terminal])
+    result_q, result_delta = CC.reconstruct_cumulative_transforms(layout, *factored)
+    equivalent = torch.minimum(
+        (torch.cat(result_q)[terminal] - torch.cat(cumulative_q)[terminal]).abs().amax(-1),
+        (torch.cat(result_q)[terminal] + torch.cat(cumulative_q)[terminal]).abs().amax(-1))
+    assert float(equivalent.max()) < 3e-6
+    torch.testing.assert_close(torch.cat(result_delta)[terminal],
+        torch.cat(cumulative_delta)[terminal], rtol=2e-5, atol=3e-6)
+
+
+def test_common_contrast_arbitrary_terminal_factorization_handles_general_pivots():
+    torch.manual_seed(7103)
+    raw, motion = common_contrast_fixture()
+    remove = None
+    for level, mask in enumerate(motion._cached_binary):
+        for node in torch.where(mask)[0].tolist():
+            child = [value for value in motion._cached_children[level][node]
+                     if bool(motion._cached_occupancy[level + 1][value])]
+            rows = torch.where(motion.active_layout['index'][level + 1] == child[0])[0]
+            if len(rows) > 1:
+                remove = int(rows[0])
+                break
+        if remove is not None:
+            break
+    assert remove is not None
+    keep = torch.arange(len(raw['xyz'])) != remove
+    raw = {name: value[keep] for name, value in raw.items()}
+    layout = BR._binary_layout(motion.active_layout['index'][:, keep], motion.counts,
+        motion.parents, raw['xyz'], motion.active_layout['pivots'])
+    # Deliberately violate centroid-pivot identities. The general delta formula
+    # must still invert and reconstruct the cumulative terminal transforms.
+    for level, pivot in enumerate(layout['pivots']):
+        layout['pivots'][level] = pivot + torch.randn_like(pivot) * (.01 + level * .003)
+    split_count = [len(rows) for rows in layout['refine_rows']]
+    roots = torch.randn(layout['counts'][0], 6) * .025
+    contrasts = [torch.randn(count, 6) * .02 for count in split_count]
+    rotations, deltas = CC.reconstruct_cumulative_transforms(layout, roots, contrasts)
+    paths = [raw['xyz'].new_ones(count) for count in layout['counts']]
+    terminal = NM.terminal_node_rows(layout, paths, selected_only=False)
+    flat_q, flat_delta = torch.cat(rotations), torch.cat(deltas)
+    terminal_q, terminal_delta = flat_q[terminal], flat_delta[terminal]
+    factored_roots, factored_contrasts = CC.decompose_terminal_transforms(
+        layout, terminal_q, terminal_delta)
+    actual_q, actual_delta = CC.reconstruct_cumulative_transforms(
+        layout, factored_roots, factored_contrasts)
+    actual_terminal_q = torch.cat(actual_q)[terminal]
+    equivalent = torch.minimum((actual_terminal_q - terminal_q).abs().amax(-1),
+                               (actual_terminal_q + terminal_q).abs().amax(-1))
+    assert float(equivalent.max()) < 3e-6
+    torch.testing.assert_close(torch.cat(actual_delta)[terminal], terminal_delta,
+                               rtol=2e-5, atol=3e-6)
+    effective = CC._effective_splits(layout)
+    weights = torch.cat([value[value.sum(-1) > 0] for value in effective[-1]])
+    assert bool(((weights[:, 0] - .5).abs() > 1e-3).any())
+    # Independent production pose check, rather than helper self-comparison.
+    root_q = CC.rotation_vector_quaternion(factored_roots[:, 3:])
+    regions = [factored_roots]
+    occupancy, children, _, positions, binary, _, split_weights = CC._effective_splits(layout)
+    for level in range(len(layout['parents'])):
+        local = roots.new_zeros(layout['counts'][level + 1], 6)
+        for node in torch.where(binary[level])[0].tolist():
+            position = positions[level][node]
+            child = [value for value in children[level][node]
+                     if bool(occupancy[level + 1][value])]
+            wl, wr = split_weights[level][position]
+            local[child[0]] = -wr * factored_contrasts[level][position]
+            local[child[1]] = wl * factored_contrasts[level][position]
+        regions.append(local)
+    production_xyz, production_rotation = NM.node_conditional_transform(
+        raw['xyz'], raw['rotation'], layout, regions, paths, selected_only=False,
+        terminal=terminal)
+    expected_xyz = (raw['xyz'] + NM.rotation_delta(terminal_q,
+        raw['xyz'] - torch.cat(layout['pivots'])[terminal]) + terminal_delta)
+    expected_rotation = Q.quaternion_multiply(terminal_q, raw['rotation'])
+    torch.testing.assert_close(production_xyz, expected_xyz, rtol=2e-5, atol=3e-6)
+    equivalent = torch.minimum((production_rotation - expected_rotation).abs().amax(-1),
+                               (production_rotation + expected_rotation).abs().amax(-1))
+    assert float(equivalent.max()) < 3e-6
+
+
+def test_common_contrast_common_world_rigid_has_zero_split_contrasts():
+    raw, motion = common_contrast_fixture()
+    layout = copy.deepcopy(motion.active_layout)
+    for level, pivot in enumerate(layout['pivots']):
+        layout['pivots'][level] = pivot + (level + 1) * torch.tensor([.011, -.007, .004])
+    omega = torch.tensor([[.31, -.17, .09]])
+    world_q = R.rotation_vector_quaternion(omega)[0]
+    world_b = torch.tensor([.04, -.03, .02])
+    paths = [raw['xyz'].new_ones(count) for count in layout['counts']]
+    terminal = NM.terminal_node_rows(layout, paths, selected_only=False)
+    pivot = torch.cat(layout['pivots'])[terminal]
+    terminal_q = world_q.expand(len(terminal), -1)
+    terminal_delta = NM.rotation_delta(terminal_q, pivot) + world_b
+    roots, contrasts = CC.decompose_terminal_transforms(layout, terminal_q, terminal_delta)
+    for value in contrasts:
+        torch.testing.assert_close(value, torch.zeros_like(value), rtol=0, atol=2e-6)
+
+
+def test_common_contrast_quaternion_sign_and_near_pi_branch_are_stable():
+    raw, motion = common_contrast_fixture()
+    layout = motion.active_layout
+    roots = raw['xyz'].new_zeros(layout['counts'][0], 6)
+    contrasts = [raw['xyz'].new_zeros(len(rows), 6) for rows in layout['refine_rows']]
+    level = next(level for level, value in enumerate(motion._cached_split_positions)
+                 if len(value))
+    position = int(motion._cached_split_positions[level][0])
+    contrasts[level][position, 3] = math.pi - 2e-4
+    rotations, deltas = CC.reconstruct_cumulative_transforms(layout, roots, contrasts)
+    paths = [raw['xyz'].new_ones(count) for count in layout['counts']]
+    terminal = NM.terminal_node_rows(layout, paths, selected_only=False)
+    q = torch.cat(rotations)[terminal]
+    q[::2].neg_()  # identical SO(3) representatives with alternating signs
+    factored = CC.decompose_terminal_transforms(layout, q, torch.cat(deltas)[terminal])
+    actual_q, actual_delta = CC.reconstruct_cumulative_transforms(layout, *factored)
+    result = torch.cat(actual_q)[terminal]
+    equivalent = torch.minimum((result - q).abs().amax(-1), (result + q).abs().amax(-1))
+    assert float(equivalent.max()) < 5e-5
+    torch.testing.assert_close(torch.cat(actual_delta)[terminal], torch.cat(deltas)[terminal],
+                               rtol=2e-5, atol=3e-6)
+
+
+def test_common_contrast_closed_ancestor_blocks_deep_motion_but_gate_gets_signal():
+    raw, motion = common_contrast_fixture(gate_hard_threshold=.5)
+    # Find an effective binary split with an effective binary descendant.
+    chosen = None
+    for level, rows in enumerate(motion.active_layout['refine_rows'][:-1]):
+        for position, node in enumerate(rows.tolist()):
+            if not bool(motion._cached_binary[level][node]):
+                continue
+            descendants = [child for child in motion._cached_children[level][node]
+                           if bool(motion._cached_binary[level + 1][child])]
+            if descendants:
+                chosen = level, position, descendants[0]
+                break
+        if chosen:
+            break
+    assert chosen is not None
+    level, position, deep_node = chosen
+    deep_position = motion._cached_gate_positions[level + 1][deep_node]
+    with torch.no_grad():
+        for value in motion.refine_logits:
+            value.fill_(20.)
+        motion.refine_logits[level][position] = -2.
+        motion.contrast_translation[level + 1][deep_position, 0] = .05
+    xyz, _ = motion(5, training=True)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    loss = (xyz[:, 0] * torch.linspace(.1, 1., len(xyz))).sum()
+    loss.backward()
+    deep_grad = motion.contrast_translation[level + 1].grad
+    assert deep_grad is None or float(deep_grad[deep_position].abs().max()) == 0.
+    gate_grad = motion.refine_logits[level].grad
+    assert gate_grad is not None and abs(float(gate_grad[position])) > 0
+    gates = motion._gate_values(5)
+    assert float(gates[level][position]) == 0.
+    assert all(bool(((value.detach() == 0) | (value.detach() == 1)).all()) for value in gates)
+
+
+def test_storage_aware_binary_config_matches_confirmed_parameters():
+    config = retained_experiment_config()
     assert config['module']['motion_mode'] == 'storage_aware_binary'
     parameters = SAB.StorageAwareBinaryConfig(**config['module']['storage_aware_binary'])
     parameters.validate()
@@ -4636,6 +4977,101 @@ def test_storage_aware_binary_tree_rebuilds_every_fifth_frame():
                          previous_new_count=0, frame_index=frame)
         assert motion.tree_rebuilt == ((frame - 1) % 5 == 0)
         motion.register_materialized_layout(raw['xyz'], torch.empty(0, dtype=torch.long))
+
+
+def test_storage_aware_newborn_quantization_can_change_nearest_source_without_breaking_decoder():
+    raw = residual_raw_fixture(2)
+    raw['xyz'] = torch.tensor([[0., 0., 0.], [.15, 0., 0.]])
+    _, motion = storage_aware_binary_fixture(coarse_region_gs=1, min_child_gs=1,
+                                            new_xyz_step_extent=.1)
+    motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    candidate = GAUSS.GaussianModel(1)
+    for name, attribute in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(candidate, attribute, torch.nn.Parameter(raw[name][:1].clone()))
+    with torch.no_grad():
+        candidate._xyz[0, 0] = .074  # Nearest old GS is row 0 before quantization.
+    view = Q.QuantizedNewGaussianView(candidate, motion.config, 1., raw)
+    materialized, predictors = Q.materialize_quantized_gaussians(raw, view)
+    assert predictors.tolist() == [0]
+    torch.testing.assert_close(materialized['xyz'][-1], torch.tensor([.1, 0., 0.]), rtol=0, atol=0)
+    decoded_source = SAB._nearest_source_rows(raw['xyz'], materialized['xyz'][2:])
+    assert decoded_source.tolist() == [1]
+    original_index = motion.index.clone()
+    motion.register_materialized_layout(materialized['xyz'], predictors)
+    torch.testing.assert_close(motion.materialized_layout['index'][:, -1], original_index[:, 1], rtol=0, atol=0)
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        birth = GAUSS.GaussianModel(1)
+        for name, attribute in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+            setattr(birth, attribute, torch.nn.Parameter(materialized[name][-1:].clone()))
+        birth_path = directory / 'birth.ply'
+        birth.save_ply(str(birth_path))
+        motion_path = directory / 'motion.bin'
+        motion.export_motion(motion_path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(raw), previous_count=2, deleted_count=0, birth_count=1)
+        decoder = SAB.StorageAwareBinaryDecoder(copy.deepcopy(motion.config), retain_frame_state=True)
+        decoded, _ = decoder.advance(motion_path, birth_path, raw)
+        assert Q.reference_digest(decoded) == Q.reference_digest(materialized)
+        torch.testing.assert_close(decoder.materialized_layout['index'],
+                                   motion.materialized_layout['index'], rtol=0, atol=0)
+        recovery = importlib.import_module('scripts.recover_storage_aware_checkpoint')
+        recovered = recovery.motion_from_decoded(motion.config, decoder.last_frame_state, decoder.materialized_layout)
+        decoded_motion = recovered(recovered.config.motion_steps)
+        torch.testing.assert_close(decoded_motion[0], raw['xyz'], rtol=0, atol=0)
+        torch.testing.assert_close(decoded_motion[1], raw['rotation'], rtol=0, atol=0)
+        restored = SAB.StorageAwareBinaryMotion(copy.deepcopy(motion.config))
+        restored.restore(recovered.capture())
+        deleted, _ = restored.compensation_deletions(decoded['opacity'], 1)
+        assert deleted.tolist() == [2]
+        rows = Q.survivor_rows(len(decoded['xyz']), deleted)
+        restored.setup(decoded['xyz'][rows], decoded['rotation'][rows], 1.,
+            previous_rows=rows, previous_new_count=1, frame_index=2)
+        torch.testing.assert_close(restored.index, original_index, rtol=0, atol=0)
+    before = motion.materialized_layout['index'].clone()
+    for invalid in ([2], [-1], [[0]]):
+        try:
+            motion.register_materialized_layout(materialized['xyz'], invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Malformed predictor rows must be rejected')
+        torch.testing.assert_close(motion.materialized_layout['index'], before, rtol=0, atol=0)
+
+
+def test_storage_aware_recovered_motion_matches_nonzero_mixed_precision_bitstream():
+    recovery = importlib.import_module('scripts.recover_storage_aware_checkpoint')
+    raw, motion = storage_aware_binary_fixture()
+    torch.manual_seed(59)
+    motion.prepare_step(5)
+    with torch.no_grad():
+        for level, (translation, rotation, logits) in enumerate(zip(
+                motion.region_translation, motion.region_rotation, motion.precision_logits)):
+            translation.copy_(torch.randn_like(translation) * .23)
+            rotation.copy_(torch.randn_like(rotation) * .11)
+            logits.fill_(-100.)
+            choices = torch.arange(len(logits)) % len(motion.config.precision_bits)
+            logits.scatter_(1, choices[:, None], 0.)
+        for gate in motion.refine_logits:
+            gate.fill_(3.)
+            gate[1::3] = -3.
+    motion.prepare_step(10)
+    xyz, rotation = motion(10)
+    materialized = {**raw, 'xyz': xyz.detach(), 'rotation': rotation.detach()}
+    motion.register_materialized_layout(xyz, [])
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'motion.bin'
+        motion.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(materialized), previous_count=len(raw['xyz']),
+            deleted_count=0, birth_count=0)
+        decoder = SAB.StorageAwareBinaryDecoder(copy.deepcopy(motion.config), retain_frame_state=True)
+        decoder.advance(path, None, raw)
+        recovered = recovery.motion_from_decoded(motion.config, decoder.last_frame_state, decoder.materialized_layout)
+        restored_xyz, restored_rotation = recovered(10)
+        assert Q.reference_digest({**raw, 'xyz': restored_xyz, 'rotation': restored_rotation}) == Q.reference_digest(materialized)
+        expected = motion._encode_payload(10)
+        actual = recovered._encode_payload(10)
+        assert actual[0] == expected[0] and actual[1] == expected[1]
+        assert recovered.committed and not any(p.requires_grad for p in recovered.parameters())
 
 
 def test_storage_aware_binary_sequence_recreates_births_deletions_and_cached_tree():
@@ -4976,6 +5412,1270 @@ def test_storage_aware_ste_is_exact_hard_forward_with_soft_gradients():
     torch.testing.assert_close(support.detach(), hard_support.to(support), rtol=0, atol=0)
     support.sum().backward()
     assert raw.grad is not None and torch.isfinite(raw.grad).all() and raw.grad.abs().sum() > 0
+
+
+def gate_diagnostic_fixture(**overrides):
+    values = dict(enabled=True, frames=[1], trace_steps=[5], probe_steps=[5],
+                  camera_names=['train_a.png', 'train_b.png'], fit_steps=3,
+                  fit_lr_scale=1., seed=37)
+    values.update(overrides)
+    config = GD.GateDiagnosticsConfig(**values)
+    _, motion = storage_aware_binary_fixture()
+    config.validate(motion.config)
+    motion.prepare_step(5)
+    with torch.no_grad():
+        for logits in motion.refine_logits:
+            logits.fill_(2.)
+        motion.refine_logits[0][0] = -2.
+        for translation in motion.region_translation:
+            translation.fill_(.03)
+    views = [SimpleNamespace(path=Path(name)) for name in config.camera_names]
+    target = motion.base_xyz + .1
+
+    def objective(view, xyz, rotation):
+        scale = 1. if view.path.name == config.camera_names[0] else 2.
+        return scale * (xyz - target).square().mean() + .01 * rotation.square().mean()
+
+    return motion, config, views, objective
+
+
+def assert_diagnostic_state_equal(left, right):
+    if torch.is_tensor(left):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
+    elif isinstance(left, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            assert_diagnostic_state_equal(left[key], right[key])
+    elif isinstance(left, (list, tuple)):
+        assert len(left) == len(right)
+        for a, b in zip(left, right):
+            assert_diagnostic_state_equal(a, b)
+    else:
+        assert left == right
+
+
+def test_gate_diagnostic_default_off_and_100_frame_candidate_preserves_algorithm():
+    import yaml
+    assert not GD.GateDiagnosticsConfig().enabled
+    GD.GateDiagnosticsConfig().validate()
+    config = yaml.safe_load((project_root / 'config' /
+        'fs_gate_mechanism_diagnostics_100f.yaml').read_text())
+    baseline = retained_experiment_config()
+    assert config['data']['extra_dataset_kwargs']['num_frames'] == 100
+    assert config['experiment_name'] != baseline['experiment_name']
+    assert config['module']['storage_aware_binary'] == baseline['module']['storage_aware_binary']
+    assert config['trainer']['num_incr_steps'] == 300
+    diagnostics = GD.GateDiagnosticsConfig(**config['module']['gate_diagnostics'])
+    diagnostics.validate(SAB.StorageAwareBinaryConfig(**config['module']['storage_aware_binary']))
+    assert diagnostics.frames[-1] == 99 and diagnostics.precision_policies == ['fixed']
+    for invalid in (dict(nodes_per_state=0), dict(fit_steps=True), dict(seed=-1),
+                    dict(fit_lr_scale=float('nan')), dict(frames=[1, 1]),
+                    dict(precision_policies=['learned']), dict(probe_steps=[301]),
+                    dict(camera_names=[]), dict(fixed_precision_bits=9)):
+        try:
+            gate_diagnostic_fixture(**invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'Invalid diagnostic config accepted: {invalid}')
+
+
+def test_gate_trace_separates_unreachable_closed_and_gate_motion_gradients():
+    motion, config, _, _ = gate_diagnostic_fixture()
+    xyz, rotation = motion(5)
+    (xyz.sum() + rotation.sum()).backward()
+    closed = GD.node_trace(motion, 5, 0, 0)
+    assert closed['reachable'] and not closed['gate_open']
+    assert closed['gate_gradient']['available'] and closed['gate_gradient']['l2'] > 0
+    children = [row for row in closed['descendants'] if row['level'] == 1]
+    assert children and all(not row['reachable'] for row in children)
+    assert all(row['translation_gradient']['available'] and
+               row['translation_gradient']['l2'] == 0 for row in children)
+    samples = GD.sample_nodes(motion, 5, 1, config)
+    assert samples == GD.sample_nodes(motion, 5, 1, config)
+    assert {'reachable_closed', 'reachable_open', 'unreachable'}.issubset(
+        {row['stratum'] for row in samples})
+    reachable = GD.sample_nodes(motion, 5, 1, config, reachable_only=True)
+    assert all(row['stratum'] != 'unreachable' for row in reachable)
+    unreachable = next(row for row in samples if row['stratum'] == 'unreachable')
+    try:
+        GD.DiagnosticCandidate(motion, 5, unreachable['level'], unreachable['node'], True, config, 'fixed')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('An unreachable gate cannot support a local stop/refine conclusion')
+
+
+def test_gate_candidates_freeze_ancestors_siblings_and_stop_descendants():
+    motion, config, views, objective = gate_diagnostic_fixture(precision_policies=['fixed', 'learned'])
+    for policy in config.precision_policies:
+        for opened in (False, True):
+            candidate = GD.DiagnosticCandidate(motion, 5, 0, 0, opened, config, policy)
+            source_state = {name: value.clone() for name, value in motion.state_dict().items()}
+            before_xyz, before_rotation = candidate()
+            before_xyz, before_rotation = before_xyz.detach(), before_rotation.detach()
+            mask = motion.index[0] == 0
+            for _ in range(3):
+                xyz, rotation = candidate()
+                candidate.fit_step(objective(views[0], xyz, rotation))
+            xyz, rotation = candidate()
+            torch.testing.assert_close(xyz[~mask], before_xyz[~mask], rtol=0, atol=0)
+            torch.testing.assert_close(rotation[~mask], before_rotation[~mask], rtol=0, atol=0)
+            for level, frozen in enumerate(candidate.train_masks):
+                for group in ('region_translation', 'region_rotation', 'precision_logits'):
+                    actual = getattr(candidate, group)[level]
+                    torch.testing.assert_close(actual[~frozen], source_state[f'{group}.{level}'][~frozen], rtol=0, atol=0)
+            if not opened:
+                assert all(not value.any() for value in candidate.train_masks[1:])
+            assert candidate.region_translation[0].data_ptr() != motion.region_translation[0].data_ptr()
+            assert candidate.base_xyz.data_ptr() != motion.base_xyz.data_ptr()
+    # A deeper comparison also keeps ancestors unchanged.
+    root = 1
+    child = int(torch.where(motion.parents[0] == root)[0][0])
+    candidate = GD.DiagnosticCandidate(motion, 5, 1, child, True, config, 'fixed')
+    xyz, rotation = candidate()
+    candidate.fit_step(objective(views[0], xyz, rotation))
+    torch.testing.assert_close(candidate.region_translation[0], motion.region_translation[0], rtol=0, atol=0)
+    torch.testing.assert_close(candidate.region_rotation[0], motion.region_rotation[0], rtol=0, atol=0)
+
+
+def test_gate_actual_cost_covers_reachable_subtree_flags_selectors_and_frame_padding():
+    motion, config, _, _ = gate_diagnostic_fixture()
+    counts = []
+    for opened in (False, True):
+        candidate = GD.DiagnosticCandidate(motion, 5, 0, 0, opened, config, 'fixed')
+        cost = GD.exact_cost(candidate, 5, birth_bytes=123, subtree=candidate.subtree_masks)
+        payload, bits, _, _ = candidate._encode_payload(5)
+        assert cost['payload_bits'] == bits == sum(cost['components'].values())
+        assert cost['motion_bytes'] == SAB.CODEC_HEADER_BYTES + len(payload)
+        assert cost['total_bytes'] == cost['motion_bytes'] + 123
+        assert cost['padding_bits'] == (-bits) % 8
+        assert bits + cost['padding_bits'] == len(payload) * 8
+        if not opened:
+            assert cost['subtree_components']['presence_bits'] == 1
+            assert cost['subtree_components']['refine_flag_bits'] == 1
+        else:
+            assert cost['subtree_components']['presence_bits'] > 1
+        counts.append(cost)
+    assert counts[1]['total_bytes'] > counts[0]['total_bytes']
+    local_delta = sum(counts[1]['subtree_components'].values()) - sum(counts[0]['subtree_components'].values())
+    assert local_delta == counts[1]['payload_bits'] - counts[0]['payload_bits']
+    # Stale production incremental-storage caches must not influence diagnostic bytes.
+    candidate.config.cache_frozen_storage = True
+    candidate._frozen_storage_parts[True] = {'wrong': candidate.base_xyz.new_tensor(1e9)}
+    assert GD.exact_cost(candidate, 11)['motion_bytes'] == counts[1]['motion_bytes']
+
+
+def test_gate_probe_preserves_source_state_gradients_rng_and_records_actual_gain():
+    import random
+    motion, config, views, objective = gate_diagnostic_fixture(precision_policies=['fixed', 'learned'])
+    xyz, rotation = motion(5)
+    objective(views[0], xyz, rotation).backward()
+    motion.motion_optimizer.step()  # Include nonempty momentum in the isolation check.
+    saved = copy.deepcopy(motion.capture())
+    grads = [None if p.grad is None else p.grad.clone() for p in motion.parameters()]
+    phase, last_step = motion.current_phase, motion.last_step
+    torch.manual_seed(43)
+    np.random.seed(43)
+    random.seed(43)
+    rng = torch.get_rng_state().clone()
+    numpy_rng, python_rng = copy.deepcopy(np.random.get_state()), random.getstate()
+    with GD.isolated_rng('cpu'):
+        torch.rand(2)
+        np.random.rand(2)
+        random.random()
+        record = GD.compare_node(motion, 5, 0, 0, views, objective, config,
+                                  reference_bytes=1000., rate_weight=.01, birth_bytes=12)
+    assert_diagnostic_state_equal(saved, motion.capture())
+    assert phase == motion.current_phase and last_step == motion.last_step
+    for parameter, gradient in zip(motion.parameters(), grads):
+        if gradient is None:
+            assert parameter.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, gradient, rtol=0, atol=0)
+    torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+    np.testing.assert_array_equal(np.random.get_state()[1], numpy_rng[1])
+    assert random.getstate() == python_rng
+    assert [row['precision_policy'] for row in record['comparisons']] == ['fixed', 'learned']
+    for row in record['comparisons']:
+        stop, refine = row['arms']['stop'], row['arms']['refine']
+        expected = (stop['after']['image_loss'] - refine['after']['image_loss'] - .01 *
+            (refine['after']['cost']['total_bytes'] - stop['after']['cost']['total_bytes']) / 1000.)
+        assert row['gain'] == expected and row['supports_refine'] == (expected > 0)
+        assert [r['camera'] for r in stop['fit_losses']] == [r['camera'] for r in refine['fit_losses']]
+        assert stop['first_fit_gradient']['gate_gradient']['available'] is False
+        assert stop['fit_seconds'] >= 0 and refine['fit_seconds'] >= 0
+        if row['precision_policy'] == 'fixed':
+            assert stop['first_fit_gradient']['descendants'][0]['precision_gradient']['available'] is False
+
+
+def test_gate_probe_report_is_node_addressable_and_refuses_overwrite():
+    from omegaconf import OmegaConf
+    from libgs.utils.config import to_structured
+    motion, config, views, objective = gate_diagnostic_fixture(fit_steps=1)
+    # Reproduce the production libgs conversion, which passes ListConfig fields through.
+    config, unused = to_structured(OmegaConf.create(asdict(config)), GD.GateDiagnosticsConfig)
+    assert not unused
+    with tempfile.TemporaryDirectory() as directory:
+        path = GD.run_probes(motion, frame=1, step=5, context='online_pre_update',
+            views=views, image_loss=objective, config=config, reference_bytes=1000.,
+            rate_weight=.01, output_dir=directory)
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert rows and all(row['frame'] == 1 and row['step'] == 5 for row in rows)
+        assert all(row['context'] == 'online_pre_update' and row['stage'] == 'gate_compress' for row in rows)
+        assert all(row['sample']['node'] == row['node'] for row in rows)
+        assert path.with_suffix('.plan.json').is_file()
+        plan = json.loads(path.with_suffix('.plan.json').read_text())
+        assert plan['precision_policies'] == ['fixed']
+        assert plan['camera_names'] == [view.path.name for view in views]
+        assert json.loads(json.dumps(asdict(config)))['precision_policies'] == ['fixed']
+        summary_module = importlib.import_module('scripts.summarize_gate_diagnostics')
+        summary = summary_module.summarize(Path(directory))
+        assert len(summary['rows']) == len(rows)
+        assert {row['context'] for row in summary['rows']} == {'online_pre_update'}
+        assert all(row['frame'] == 1 and row['step'] == 5 for row in summary['aggregates'])
+        try:
+            GD.run_probes(motion, frame=1, step=5, context='online_pre_update',
+                views=views, image_loss=objective, config=config, reference_bytes=1000.,
+                rate_weight=.01, output_dir=directory)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError('Completed probe results must not be overwritten')
+
+
+def test_gate_diagnostic_entry_loads_native_resolved_yaml_lists():
+    import yaml
+    from omegaconf import OmegaConf
+    from libgs.utils.config import to_structured
+    entry = importlib.import_module('scripts.diagnose_binary_gates')
+    path = project_root / 'config' / 'fs_gate_mechanism_diagnostics_100f.yaml'
+    values = OmegaConf.load(path).module.gate_diagnostics
+    direct, unused = to_structured(values, GD.GateDiagnosticsConfig)
+    assert not unused
+    for name in ('frames', 'trace_steps', 'probe_steps', 'camera_names', 'precision_policies'):
+        assert type(getattr(direct, name)) is list
+    with tempfile.TemporaryDirectory() as directory:
+        fixture = Path(directory) / 'diagnostic.yaml'
+        fixture.write_text(yaml.safe_dump(OmegaConf.to_container(values, resolve=True)))
+        loaded = entry.load_config(fixture, GD.GateDiagnosticsConfig)
+        assert asdict(loaded) == asdict(direct)
+        assert json.loads(json.dumps(dict(diagnostic=asdict(loaded))))['diagnostic']['fit_steps'] == 20
+        fixture.write_text('enabled: false\nseed: 7\nframes: ["${seed}"]\n')
+        resolved = entry.load_config(fixture, GD.GateDiagnosticsConfig)
+        assert resolved.frames == [7] and type(resolved.frames[0]) is int
+
+
+def test_gate_candidate_initial_pose_matches_source_at_all_phases_and_backends():
+    config = GD.GateDiagnosticsConfig(fit_steps=1)
+    for backend in ('reference', 'node'):
+        _, motion = storage_aware_binary_fixture(motion_compute=backend,
+            cache_static_layout=True, selected_precision_only=(backend == 'node'))
+        with torch.no_grad():
+            for values in motion.region_translation:
+                values.fill_(.03)
+            for values in motion.region_rotation:
+                values[:, 0] = .04
+        for step in (1, 3, 5, 9, 11):
+            motion.prepare_step(step)
+            opened = bool(motion.refinement_masks(step)[0][0])
+            candidate = GD.DiagnosticCandidate(motion, step, 0, 0, opened, config, 'fixed')
+            for actual, expected in zip(candidate(), motion(step)):
+                torch.testing.assert_close(actual, expected,
+                    rtol=0 if backend == 'reference' else 1e-6,
+                    atol=0 if backend == 'reference' else 1e-6)
+
+
+def test_gate_frozen_render_objective_keeps_source_attributes_and_pose_separate():
+    from libgs.metric import psnr, ssim
+    path = project_root / 'pipeline' / 'ReCon-GS' / 'gate_diagnostic_render.py'
+    tree = ast.parse(path.read_text())
+    definition = next(node for node in tree.body if isinstance(node, ast.ClassDef))
+
+    class FakeRenderer:
+        def __init__(self, config, model):
+            self.gaussians = model
+
+        def __call__(self, view, background):
+            image = self.gaussians.get_xyz.mean(0)[:, None, None].expand(3, 12, 12)
+            return dict(render=image)
+
+    scope = dict(torch=torch, copy=copy, RAW_ATTRIBUTES=Q.RAW_ATTRIBUTES,
+                 GaussianModel=GAUSS.GaussianModel, Renderer=FakeRenderer, ssim=ssim, psnr=psnr)
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(path), 'exec'), scope)
+    raw = residual_raw_fixture(4)
+    model = GAUSS.GaussianModel(1)
+    model.active_sh_degree = 1
+    for name, attribute in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(model, attribute, torch.nn.Parameter(raw[name].clone()))
+    original = {attribute: getattr(model, attribute).clone() for attribute in Q.RAW_ATTRIBUTES}
+    objective = scope['FrozenImageObjective'](model, SimpleNamespace(), torch.zeros(3), .2, 3)
+    xyz = model._xyz[:3].detach().clone().requires_grad_()
+    rotation = model._rotation[:3].detach().clone().requires_grad_()
+    view = SimpleNamespace(image=torch.zeros(3, 12, 12))
+    loss = objective(view, xyz, rotation)
+    loss.backward()
+    assert xyz.grad is not None and xyz.grad.abs().sum() > 0
+    assert objective.model.rigid_xyz is None and objective.model.rigid_rotation is None
+    assert objective.model.active_sh_degree == model.active_sh_degree
+    for attribute in Q.RAW_ATTRIBUTES:
+        assert getattr(model, attribute).grad is None
+        torch.testing.assert_close(getattr(model, attribute), original[attribute], rtol=0, atol=0)
+        assert not getattr(objective.model, attribute).requires_grad
+
+
+def test_online_gate_hook_is_read_only_and_keeps_tracing_nodes_after_gate_changes():
+    path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    tree = ast.parse(path.read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Module')
+    definition = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                      and node.name == 'record_gate_diagnostics')
+    scope = dict(__name__='pipeline.ReCon-GS.module', __package__='pipeline.ReCon-GS',
+        torch=torch, time=time, isolated_rng=GD.isolated_rng,
+        sample_nodes=GD.sample_nodes, node_trace=GD.node_trace, write_trace=GD.write_trace,
+        run_probes=GD.run_probes, private_view_plan=GD.private_view_plan)
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(path), 'exec'), scope)
+    motion, config, views, objective = gate_diagnostic_fixture(fit_steps=1, trace_steps=[5, 6])
+    fake_renderer_module = ModuleType('pipeline.ReCon-GS.gate_diagnostic_render')
+    fake_renderer_module.FrozenImageObjective = lambda *args: objective
+    with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {
+            'pipeline.ReCon-GS.gate_diagnostic_render': fake_renderer_module}):
+        owner = SimpleNamespace(current_frame=1, global_step=5, device='cpu', residual_motion=motion,
+            quant_first_frame_gs_count=48, gaussians=object(), background=torch.zeros(3),
+            config=SimpleNamespace(motion_mode='storage_aware_binary', gate_diagnostics=config,
+                                   renderer=SimpleNamespace(), lambda_dssim=.2),
+            trainer=SimpleNamespace(is_first_frame=False, output_dir=Path(directory), synchronize=lambda: None),
+            datamodule=SimpleNamespace(config=SimpleNamespace(training_camera_names=config.camera_names),
+                selective_training_pairs=lambda *args: [(view, view) for view in views]))
+        xyz, rotation = motion(5)
+        objective(views[0], xyz, rotation).backward()
+        original = copy.deepcopy(motion.capture())
+        seconds = scope['record_gate_diagnostics'](owner, views[0])
+        assert seconds > 0
+        assert_diagnostic_state_equal(motion.capture(), original)
+        first_nodes = set(owner._gate_trace_samples)
+        with torch.no_grad():
+            for logits in motion.refine_logits:
+                logits.fill_(-2.)
+        owner.global_step = 6
+        scope['record_gate_diagnostics'](owner, views[0])
+        assert first_nodes.issubset(owner._gate_trace_samples)
+        rows = [json.loads(line) for line in
+            (Path(directory) / 'gate_diagnostics' / 'frame_001_trace.jsonl').read_text().splitlines()]
+        second_nodes = {(row['level'], row['node']) for row in rows if row['step'] == 6}
+        assert first_nodes.issubset(second_nodes)
+        config.enabled = False
+        assert scope['record_gate_diagnostics'](owner, views[0]) == 0.
+
+
+def joint_diagnostic_fixture():
+    motion, config, views, objective = gate_diagnostic_fixture(fit_steps=2,
+        candidate_mode='joint_precision', stop_parent_precision_bits=[8, 32],
+        refine_parent_precision_bits=[8, 32], refine_descendant_precision_bits=[8, 32],
+        evaluation_camera_names=['check_a.png'], view_sequence='seeded_balanced_cycle')
+    for view in views:
+        view.image = torch.zeros(3, 4, 4)
+        view.full_proj_transform = torch.eye(4)
+    checks = [SimpleNamespace(path=Path('check_a.png'), image=torch.zeros(3, 4, 4),
+                              full_proj_transform=torch.eye(4))]
+    return motion, config, views, checks, objective
+
+
+def test_joint_precision_yaml_keeps_main_parameters_and_has_32_restricted_candidates():
+    import yaml
+    config = yaml.safe_load((project_root / 'config/fs_joint_precision_mechanism_100f.yaml').read_text())
+    original = yaml.safe_load((project_root / 'config/fs_gate_mechanism_diagnostics_100f.yaml').read_text())
+    assert config['data'] == original['data'] and config['trainer'] == original['trainer']
+    assert config['module']['storage_aware_binary'] == original['module']['storage_aware_binary']
+    diagnostics = GD.GateDiagnosticsConfig(**config['module']['gate_diagnostics'])
+    diagnostics.validate(SAB.StorageAwareBinaryConfig(**config['module']['storage_aware_binary']))
+    specs = GD.candidate_specs(diagnostics)
+    assert len(specs) == 32 and len({item['name'] for item in specs}) == 32
+    assert sum(item['opened'] and item['parent_bits'] is not None for item in specs) == 25
+    assert diagnostics.evaluation_camera_names == ['cam18.png', 'cam19.png', 'cam20.png']
+    assert diagnostics.fit_steps == 20 and diagnostics.save_probe_snapshots and diagnostics.record_component_gradients
+    for name in ('stop_parent_precision_bits', 'refine_parent_precision_bits', 'refine_descendant_precision_bits'):
+        assert getattr(diagnostics, name) == config['module']['storage_aware_binary']['precision_bits']
+
+
+def test_joint_parent_and_descendant_precision_assignments_are_distinct_and_local():
+    motion, config, _, _, _ = joint_diagnostic_fixture()
+    candidate = GD.DiagnosticCandidate(motion, 5, 0, 0, True, config, 'fixed', parent_bits=32, descendant_bits=8)
+    assert candidate.diagnostic_precision[0][0] == 4
+    assert all(bool((choice[mask] == 0).all()) for choice, mask in
+               zip(candidate.diagnostic_precision[1:], candidate.train_masks[1:]))
+    source_precision = motion._selected_symbols(5)[0]
+    for choice, original, mask in zip(candidate.diagnostic_precision, source_precision, candidate.subtree_masks):
+        torch.testing.assert_close(choice[~mask], original[~mask], rtol=0, atol=0)
+    gates = motion.refinement_masks(5)
+    torch.testing.assert_close(candidate.diagnostic_gates[0][1:], gates[0][1:], rtol=0, atol=0)
+    for actual, original in zip(candidate.diagnostic_gates[1:], gates[1:]):
+        torch.testing.assert_close(actual, original, rtol=0, atol=0)
+    stop = GD.DiagnosticCandidate(motion, 5, 0, 0, False, config, 'fixed', parent_bits=8)
+    assert stop.diagnostic_precision[0][0] == 0
+    assert all(not value.any() for value in stop.train_masks[1:])
+    for actual, original in zip(stop.diagnostic_precision[1:], source_precision[1:]):
+        torch.testing.assert_close(actual, original, rtol=0, atol=0)
+
+
+def test_joint_candidate_fits_share_private_views_and_check_views_do_not_fit():
+    motion, config, views, checks, objective = joint_diagnostic_fixture()
+    saved = copy.deepcopy(motion.capture())
+    plan = GD.private_view_plan(config, 1, 5, 0, 0)
+    assert plan == GD.private_view_plan(config, 1, 5, 0, 0)
+    record = GD.compare_node(motion, 5, 0, 0, views, objective, config,
+        reference_bytes=1152., rate_weight=.01, evaluation_views=checks, view_plan=plan)
+    assert len(record['candidates']) == 8 and record['schema'] == 'joint_precision_candidates_v1'
+    expected_order = [views[index].path.name for index in plan['indices']]
+    for candidate in record['candidates']:
+        assert [row['camera'] for row in candidate['fit_losses']] == expected_order
+        assert candidate['after']['evaluation_views'][0]['role'] == 'nonfitting_training_view'
+        assert candidate['after']['evaluation_views'][0]['camera'] == 'check_a.png'
+        assert all(row['camera'] != 'check_a.png' for row in candidate['fit_losses'])
+        delta = candidate['after']['cost']['total_bytes'] - record['baseline']['cost']['total_bytes']
+        image_gain = record['baseline']['image_loss'] - candidate['after']['image_loss']
+        assert candidate['gain'] == image_gain - .01 * delta / 1152.
+        assert len(candidate['per_view_gains']) == 3
+    assert_diagnostic_state_equal(motion.capture(), saved)
+
+
+def test_crossfold_feedback_protocol_and_summary_keep_check_views_held_out():
+    module = importlib.import_module('scripts.replay_joint_feedback_crossfold')
+    protocol = module.load_protocol(
+        project_root / 'config/fs_joint_feedback_crossfold_3nodes.yaml')
+    assert len(protocol['nodes']) == 3 and protocol['expected_candidate_count'] == 32
+    for fold in protocol['folds']:
+        assert len(fold['fit_camera_names']) == len(fold['check_camera_names']) == 10
+        assert not (set(fold['fit_camera_names']) & set(fold['check_camera_names']))
+        assert 'cam00.png' not in fold['fit_camera_names'] + fold['check_camera_names']
+
+    def candidate(name, fit_gain, check_gain):
+        parent = None if name in {'stop_original', 'refine_original'} else 12
+        return dict(spec=dict(name=name, parent_bits=parent),
+                    gain=fit_gain, evaluation_gain=check_gain)
+
+    # check favors refine_parent8_descendant8, but fitting selected parent16.
+    record = dict(
+        selected_by_fitting_rate_score='refine_parent16_descendant16',
+        selected_by_check_rate_score='refine_parent8_descendant8',
+        best_stop='stop_parent12', best_refine='refine_parent16_descendant16',
+        candidates=[
+            candidate('stop_original', .1, .3),
+            candidate('refine_original', .2, .1),
+            candidate('stop_parent12', .4, .25),
+            candidate('refine_parent16_descendant16', .5, .35),
+            candidate('refine_parent8_descendant8', .3, .9),
+        ])
+    summary = module.summarize_fold(record)
+    assert summary['fit_selected']['winner'] == 'refine_parent16_descendant16'
+    assert summary['selection_analysis_only']['check_selected_winner'] == 'refine_parent8_descendant8'
+    gains = summary['heldout_rate_distortion_gains']
+    assert gains['fit_winner_vs_source'] == .35
+    assert gains['fit_original_vs_source'] == .1  # original chosen by fitting, not by check.
+    torch.testing.assert_close(torch.tensor(gains['fit_winner_vs_fit_original']),
+                               torch.tensor(.25), rtol=0, atol=1e-7)
+    torch.testing.assert_close(torch.tensor(gains['fit_refine_minus_fit_stop']),
+                               torch.tensor(.1), rtol=0, atol=1e-7)
+    assert gains['fit_joint_vs_fit_original'] == gains['fit_winner_vs_fit_original']
+
+
+def test_crossfold_balanced_plans_use_each_fit_view_twice_and_swap_roles():
+    module = importlib.import_module('scripts.replay_joint_feedback_crossfold')
+    protocol = module.load_protocol(
+        project_root / 'config/fs_joint_feedback_crossfold_3nodes.yaml')
+    base = asdict(joint_diagnostic_fixture()[1])
+    base.update(stop_parent_precision_bits=[8, 12, 16, 24, 32],
+                refine_parent_precision_bits=[8, 12, 16, 24, 32],
+                refine_descendant_precision_bits=[8, 12, 16, 24, 32])
+    motion = storage_aware_binary_fixture()[1]
+    packet = dict(diagnostic_config=base, motion=dict(config=asdict(motion.config)))
+    for fold in protocol['folds']:
+        config = module.configure_fold(packet, fold, protocol, GD)
+        plan = GD.private_view_plan(config, 5, 120, 1, 2552)
+        counts = [plan['indices'].count(index) for index in range(10)]
+        assert counts == [2] * 10
+        assert set(config.camera_names).isdisjoint(config.evaluation_camera_names)
+    assert set(protocol['folds'][0]['fit_camera_names']) == set(
+        protocol['folds'][1]['check_camera_names'])
+
+
+def test_joint_feedback_selects_same_candidate_across_folds_with_source_fallback():
+    module = importlib.import_module('scripts.prototype_joint_feedback_transaction')
+
+    def fold(values):
+        return dict(candidates=[dict(spec=dict(name=name), evaluation_gain=gain)
+                                for name, gain in values.items()])
+
+    # Per-fold argmax differs, while candidate b is positive in both directions.
+    selected = module.select_crossfit_candidate([
+        fold(dict(a=3., b=2., c=-1.)), fold(dict(a=-2., b=1., c=4.))])
+    assert selected['selected']['name'] == 'b'
+    assert selected['selected']['directional_gains'] == [2., 1.]
+    rejected = module.select_crossfit_candidate([
+        fold(dict(a=3., b=-2.)), fold(dict(a=-1., b=4.))])
+    assert rejected['selected']['name'] == 'source'
+
+
+def test_joint_feedback_transaction_learns_hard_choices_and_rolls_back_exact_state():
+    module = importlib.import_module('scripts.prototype_joint_feedback_transaction')
+    motion, config, _, _, _ = joint_diagnostic_fixture()
+    config.stop_parent_precision_bits = [8, 32]
+    config.refine_parent_precision_bits = [8, 32]
+    config.refine_descendant_precision_bits = [8, 32]
+    candidate = GD.DiagnosticCandidate(motion, 5, 0, 0, True, config, 'fixed',
+                                       parent_bits=8, descendant_bits=8)
+    deployment = GD.clone_motion(motion)
+    for parameter in deployment.refine_logits:
+        parameter.grad = torch.arange(len(parameter), dtype=parameter.dtype) + 1
+    for parameter in deployment.precision_logits:
+        parameter.grad = torch.arange(parameter.numel(), dtype=parameter.dtype).reshape_as(parameter) + 1
+    with torch.no_grad():
+        candidate.region_translation[0][candidate.train_masks[0], 0] += .2
+    transaction = module.capture_transaction(deployment)
+    before_unrelated = deployment.region_translation[0][~candidate.train_masks[0]].clone()
+    changes, _ = module.apply_candidate_motion(deployment, candidate)
+    protocol = dict(feedback_lr=.02, feedback_betas=[.9, .999], feedback_eps=1e-15,
+                    max_feedback_logit_steps=128)
+    feedback, _ = module.optimize_feedback_logits(deployment, candidate, 5, 0, 0, protocol)
+    assert changes and feedback['final']['matches'] and feedback['steps'] <= 128
+    torch.testing.assert_close(deployment.region_translation[0][~candidate.train_masks[0]],
+                               before_unrelated, rtol=0, atol=0)
+    gate_position = deployment._refine_position(0, 0)
+    gate_expected = transaction['gradients']['refine_logits.0']
+    gate_actual = deployment.refine_logits[0].grad
+    torch.testing.assert_close(gate_actual[:gate_position], gate_expected[:gate_position], rtol=0, atol=0)
+    torch.testing.assert_close(gate_actual[gate_position + 1:], gate_expected[gate_position + 1:], rtol=0, atol=0)
+    assert gate_actual[gate_position] == 0
+    for depth, mask in enumerate(candidate.train_masks):
+        actual = deployment.precision_logits[depth].grad
+        expected = transaction['gradients'][f'precision_logits.{depth}']
+        torch.testing.assert_close(actual[~mask], expected[~mask], rtol=0, atol=0)
+        assert not actual[mask].any()
+    assert not module.accept_or_restore(deployment, transaction, -1., True)
+    assert module.transaction_matches(deployment, transaction)
+    assert_diagnostic_state_equal(deployment.capture(), transaction['motion'])
+    for name, parameter in deployment.named_parameters():
+        expected = transaction['gradients'][name]
+        if expected is None:
+            assert parameter.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, expected, rtol=0, atol=0)
+
+
+def test_joint_feedback_continuation_protocol_balances_future_views():
+    module = importlib.import_module('scripts.continue_joint_feedback_pair')
+    protocol = module.load_protocol(
+        project_root / 'config/fs_joint_feedback_continuation_pair.yaml')
+    assert [(row['frame'], row['step']) for row in protocol['nodes']] == [(5, 120), (99, 180)]
+    for frame, start, current, cycles in ((5, 120, 'cam06.png', 4),
+                                          (99, 180, 'cam13.png', 1)):
+        schedule = module.balanced_continuation_schedule(
+            protocol['ordinary_camera_names'], 0, frame, start, 200, current)
+        assert schedule[0] == dict(step=start, camera=current,
+                                   role='recomputed_snapshot_step')
+        assert schedule[-1]['step'] == 200 and len(schedule) == 201 - start
+        counts = {name: sum(row['camera'] == name for row in schedule[1:])
+                  for name in protocol['ordinary_camera_names']}
+        assert set(counts.values()) == {cycles}
+        assert schedule == module.balanced_continuation_schedule(
+            protocol['ordinary_camera_names'], 0, frame, start, 200, current)
+
+
+def test_joint_feedback_continuation_recomputes_and_hardens_with_native_stage():
+    module = importlib.import_module('scripts.continue_joint_feedback_pair')
+    raw, motion = storage_aware_binary_fixture()
+    # Simulate a saved post-backward/pre-update step-8 gate-compress snapshot.
+    xyz, rotation = motion(8, training=True)
+    (xyz.square().mean() + rotation.square().mean()).backward()
+    assert any(parameter.grad is not None for parameter in motion.parameters())
+    cleared = module.clear_saved_gradients(motion)
+    assert cleared and all(parameter.grad is None for parameter in motion.parameters())
+
+    class Objective:
+        def __call__(self, view, xyz, rotation):
+            return (xyz - raw['xyz']).square().mean() + (rotation - raw['rotation']).square().mean()
+
+    view = SimpleNamespace(path=Path('cam01.png'))
+    first = module.training_update(motion, 8, view, Objective(), 1152.)
+    assert first['phase'] == 'gate_compress' and not first['hardened_this_step']
+    assert first['storage_proxy_differentiable']
+    second = module.training_update(motion, 9, view, Objective(), 1152.)
+    assert second['phase'] == 'gate_refine' and second['hardened_this_step']
+    assert second['hard_masks_frozen'] and second['gate_precision_storage_frozen']
+    # Main training keeps the hard gate/precision choices fixed, while its
+    # symbol-support STE can still send storage gradients to motion rows.
+    assert second['storage_proxy_differentiable']
+    assert motion.hard_masks is not None and motion.last_step == 9
+    expected_lr = motion.config.region_translation_lr * motion.config.refine_lr_scale
+    assert second['motion_optimizer_lrs'][0] == expected_lr
+    torch.testing.assert_close(torch.tensor(motion.motion_optimizer.param_groups[0]['lr']),
+                               torch.tensor(expected_lr), rtol=0, atol=0)
+
+
+def test_joint_feedback_continuation_source_fallback_is_complete_noop_pair():
+    module = importlib.import_module('scripts.continue_joint_feedback_pair')
+    class Objective:
+        def __call__(self, view, xyz, rotation):
+            return (xyz - raw['xyz']).square().mean() + (rotation - raw['rotation']).square().mean()
+
+    view = SimpleNamespace(path=Path('cam01.png'))
+    analyzer = importlib.import_module('scripts.analyze_joint_feedback_continuation')
+    for status, with_feedback in (('source_retained', False), ('rolled_back', True)):
+        raw, source = storage_aware_binary_fixture()
+        # Populate optimizer state before cloning so equality covers Adam moments and steps.
+        xyz, rotation = source(8, training=True)
+        ((xyz - raw['xyz']).square().mean() + (rotation - raw['rotation']).square().mean()
+         + .01 * sum(source.storage_parts(8).values()) / 1152.).backward()
+        source.optimizer_step()
+        record = dict(status=status, accepted=False)
+        if with_feedback:
+            record['feedback'] = dict(changed_rows=dict(
+                precision=[dict(level=1, rows=[7, 8])]))
+        feedback, mode = module.initialize_feedback_motion(
+            source, record, Path('/does/not/exist.pth'), 'cpu', SAB)
+        assert mode == 'source_noop_after_' + status
+        assert module._exact_equal(module._motion_runtime_state(source),
+                                   module._motion_runtime_state(feedback))
+        for step in (8, 9, 10):
+            feedback, rows = module.paired_training_update(
+                source, feedback, mode, step, view, Objective(), 1152., SAB)
+            assert rows['source'] == rows['feedback']
+            assert module._exact_equal(module._motion_runtime_state(source),
+                                       module._motion_runtime_state(feedback))
+        zero = dict(feedback_minus_source_image_loss=0., feedback_minus_source_psnr=0.,
+                    feedback_minus_source_bytes=0, feedback_rd_gain=0.)
+        synthetic = dict(feedback_mode=mode, deployed_packet=None,
+            deployed_packet_sha256=None, no_op_final_state_equal=True,
+            evaluations=[dict(comparison=zero)], final_validation=dict(
+                comparison=dict(feedback_minus_source_image_loss=0.,
+                                feedback_minus_source_psnr=0.)))
+        assert analyzer.noop_consistency_issues(synthetic, 1) == []
+    assert module.tracked_precision_rows({}, 1, 7) == [dict(level=1, rows=[7])]
+    feedback_record = dict(feedback=dict(changed_rows=dict(
+        precision=[dict(level=1, rows=[7, 8])])))
+    assert module.tracked_precision_rows(feedback_record, 1, 7) == [
+        dict(level=1, rows=[7, 8])]
+
+
+def test_joint_feedback_continuation_analyzes_source_and_rollback_noops():
+    analyzer = importlib.import_module('scripts.analyze_joint_feedback_continuation')
+    with tempfile.TemporaryDirectory() as directory:
+        run = Path(directory)
+        snapshots = run / 'source_snapshot'
+        snapshots.mkdir()
+        live_source = run / 'live_source.py'
+        copied_source = snapshots / '00_live_source.py'
+        live_source.write_text('synthetic continuation source\n', encoding='utf-8')
+        copied_source.write_bytes(live_source.read_bytes())
+        code_hash = analyzer.digest(live_source)
+        (snapshots / 'manifest.json').write_text(json.dumps([dict(
+            source=str(live_source), snapshot=str(copied_source),
+            sha256=code_hash, bytes=live_source.stat().st_size)]), encoding='utf-8')
+
+        motion_packet = run / 'motion.pth'
+        torch.save(dict(motion=dict(config=dict(
+            region_translation_lr=.03, region_rotation_lr=.04,
+            refine_lr_scale=.3))), motion_packet)
+        packet_hash = analyzer.digest(motion_packet)
+        cameras = ['cam01.png']
+        schedule = [dict(step=180, camera='cam01.png', role='recomputed_snapshot_step'),
+                    dict(step=181, camera='cam01.png', role='seeded_balanced_future')]
+
+        def state(step):
+            return dict(level=0, node=1, position=0, phase='gate_refine',
+                hard_masks_frozen=step >= 181, gate_open=False, gate_logit=-2.,
+                gate_hard_margin=2., precision=[dict(
+                    level=0, row=1, choice=0, bits=8, logit_margin=1.)])
+
+        def update(step):
+            return dict(step=step, camera='cam01.png', phase='gate_refine',
+                image_loss=.1, storage_proxy_bytes=1., storage_weight=.01,
+                storage_loss=.001, total_loss=.101,
+                storage_proxy_differentiable=True,
+                gate_precision_storage_frozen=True,
+                motion_optimizer_lrs=[.009, .012], expected_refine_lr_scale=.3,
+                hardened_this_step=step == 181, hard_masks_frozen=step >= 181,
+                schedule_role=schedule[step - 180]['role'], target_state=state(step))
+
+        cost = dict(components=dict(motion=8), payload_bits=8,
+                    header_bytes=2, total_bytes=3)
+
+        def evaluation(step, timing):
+            arm = dict(step=step, image_loss=.1, psnr=20.,
+                views=[dict(camera='cam01.png', image_loss=.1, psnr=20.)],
+                cost=cost, rate_weight=.01, actual_rd_score=.101)
+            comparison = dict(step=step, feedback_minus_source_image_loss=0.,
+                feedback_minus_source_psnr=0., feedback_minus_source_bytes=0,
+                feedback_rd_gain=0.)
+            return dict(timing=timing, arms=dict(
+                source=copy.deepcopy(arm), feedback=copy.deepcopy(arm)),
+                comparison=comparison)
+
+        nodes = []
+        for frame, status in ((1, 'source_retained'), (2, 'rolled_back')):
+            updates = [update(180), update(181)]
+            nodes.append(dict(node=dict(frame=frame, step=180, level=0, node=1),
+                source_snapshot=str(motion_packet), source_snapshot_sha256=packet_hash,
+                transaction_status=status, selected='source',
+                feedback_mode='source_noop_after_' + status,
+                deployed_packet=None, deployed_packet_sha256=None,
+                no_op_final_state_equal=True,
+                actual_compute_budget=dict(training_updates=2,
+                    all20_evaluation_sets=3, final_validation_renders=1,
+                    no_op_feedback_reuses_source_compute=True),
+                snapshot_context='synthetic', snapshot_training_camera='cam01.png',
+                semantics='synthetic no-op mirror', cleared_saved_gradient_norms={},
+                schedule=schedule, future_camera_counts={'cam01.png': 1},
+                reference_bytes=100., dependencies={},
+                target_rows=dict(gate=dict(level=0, node=1),
+                                 precision=[dict(level=0, rows=[1])]),
+                objective=dict(image='synthetic', storage_loss_weight=.01,
+                    gs_activity_loss_weight=0.,
+                    gs_activity_omitted_because_source_weight_is_zero=True,
+                    keep_candidate_omitted_because_sparse_motion_path_disables_it=True),
+                initial_target_state=dict(source=state(180), feedback=state(180)),
+                updates=dict(source=copy.deepcopy(updates), feedback=copy.deepcopy(updates)),
+                evaluations=[evaluation(180, 'pre_update'),
+                             evaluation(180, 'post_update'),
+                             evaluation(181, 'post_update')],
+                final_validation=dict(source=dict(camera='cam00.png', image_loss=.2, psnr=15.),
+                    feedback=dict(camera='cam00.png', image_loss=.2, psnr=15.),
+                    comparison=dict(feedback_minus_source_image_loss=0.,
+                                    feedback_minus_source_psnr=0.)),
+                hardening=dict(source_steps=[181], feedback_steps=[181]),
+                immutable_sources_verified=True))
+        summary = dict(schema='joint_feedback_controlled_continuation_v1',
+            protocol=dict(expected_nodes=2, end_step=181,
+                ordinary_camera_names=cameras, evaluation_steps=[180, 181],
+                validation_camera_name='cam00.png'), nodes=nodes)
+        (run / 'summary.json').write_text(json.dumps(summary), encoding='utf-8')
+        result = analyzer.analyze(run)
+        assert result['issues'] == [] and result['completed_nodes'] == 2
+        assert result['actual_compute_budget'] == dict(
+            training_updates=4, all20_evaluation_sets=6,
+            all20_render_count=6, final_validation_renders=2)
+
+
+def test_independent_image_rate_gradients_explain_closed_motion_without_contamination():
+    motion, config, views, _, objective = joint_diagnostic_fixture()
+    with torch.no_grad():
+        for logits in motion.precision_logits:
+            logits.fill_(-100.)
+            logits[:, 0] = 0.  # Nonzero smooth support derivative despite zero coded motion.
+    xyz, rotation = motion(5)
+    image = objective(views[0], xyz, rotation)
+    rate = .01 * sum(motion.storage_parts(5).values()) / 1152.
+    (image + rate).backward()
+    saved = copy.deepcopy(motion.capture())
+    gradients = {name: None if parameter.grad is None else parameter.grad.clone()
+                 for name, parameter in motion.named_parameters()}
+    components = GD.collect_gradient_components(motion, 5, views[0], objective,
+                                                 reference_bytes=1152., rate_weight=.01)
+    children = torch.where(motion.parents[0] == 0)[0]
+    assert bool((components['image']['region_translation.1'][children] == 0).all())
+    assert components['rate_proxy']['region_translation.1'][children].abs().sum() > 0
+    for name, gradient in gradients.items():
+        parameter = dict(motion.named_parameters())[name]
+        if gradient is None:
+            assert parameter.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, gradient, rtol=0, atol=0)
+            a, b = components['image'][name], components['rate_proxy'][name]
+            expected = (torch.zeros_like(gradient) if a is None else a) + (torch.zeros_like(gradient) if b is None else b)
+            torch.testing.assert_close(gradient, expected, rtol=1e-5, atol=1e-8)
+    assert_diagnostic_state_equal(motion.capture(), saved)
+    row = GD.node_trace(motion, 5, 0, 0, components)
+    assert row['gate_gradient_components']['image']['available']
+    assert row['descendants'][1]['gradient_components']['translation']['image']['l2'] == 0.
+
+
+def test_stage_snapshot_restores_complete_source_and_replays_identical_candidates():
+    motion, config, views, checks, objective = joint_diagnostic_fixture()
+    xyz, rotation = motion(5)
+    objective(views[0], xyz, rotation).backward()
+    motion.motion_optimizer.step()  # Nonempty Adam state must also be isolated in the snapshot.
+    motion.motion_optimizer.zero_grad(set_to_none=True)
+    xyz, rotation = motion(5)
+    objective(views[0], xyz, rotation).backward()
+    samples = [dict(level=0, node=0, stratum='reachable_closed', population=1)]
+    plans = {'0:0': GD.private_view_plan(config, 1, 5, 0, 0)}
+    saved = copy.deepcopy(motion.capture())
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        snapshot = GPS.save_probe_snapshot(directory / 'stage.pth', motion=motion, frame=1, step=5,
+            diagnostic_config=config, render_state=dict(old_count=48, attributes=residual_raw_fixture(48)),
+            data_config=dict(root='fixture'), module_config=dict(lambda_dssim=.2), renderer_config={},
+            background=torch.zeros(3), first_frame_gs_count=48, samples=samples, view_plans=plans,
+            views=views + checks, training_camera=views[0].path.name, source_rng=GPS.capture_rng())
+        packet = torch.load(snapshot, map_location='cpu', weights_only=False)
+        restored = GPS.restore_probe_motion(packet, 'cpu')
+        assert_diagnostic_state_equal(saved, restored.capture())
+        for (name, parameter), (_, original) in zip(restored.named_parameters(), motion.named_parameters()):
+            assert parameter.requires_grad == original.requires_grad
+            if original.grad is not None:
+                torch.testing.assert_close(parameter.grad, original.grad, rtol=0, atol=0)
+        GPS.verify_snapshot_views(packet, views + checks)
+        a = GD.compare_node(motion, 5, 0, 0, views, objective, config, reference_bytes=1152.,
+                            rate_weight=.01, evaluation_views=checks, view_plan=plans['0:0'])
+        b = GD.compare_node(restored, 5, 0, 0, views, objective, config, reference_bytes=1152.,
+                            rate_weight=.01, evaluation_views=checks, view_plan=packet['view_plans']['0:0'])
+        for left, right in zip(a['candidates'], b['candidates']):
+            assert left['spec'] == right['spec'] and left['gain'] == right['gain']
+            assert left['before'] == right['before'] and left['after'] == right['after']
+            assert left['fit_losses'] == right['fit_losses']
+        motion.motion_optimizer.step()
+        assert_diagnostic_state_equal(saved, packet['motion'])
+        views[0].image.add_(1.)
+        try:
+            GPS.verify_snapshot_views(packet, views + checks)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Changed replay image dependencies must be rejected')
+
+
+def test_known_static_rigid_and_local_motion_are_representable_with_assigned_gates():
+    _, motion = storage_aware_binary_fixture(coarse_region_gs=1000)
+    motion.prepare_step(5)
+    with torch.no_grad():
+        for gates in motion.refine_logits:
+            gates.fill_(-100.)
+    xyz, rotation = motion(5)
+    torch.testing.assert_close(xyz, motion.base_xyz, rtol=0, atol=0)
+    torch.testing.assert_close(rotation, motion.base_rotation, rtol=0, atol=0)
+    with torch.no_grad():
+        motion.region_translation[0][0, 0] = .1
+        motion.region_rotation[0][0, 2] = .1
+    xyz, rotation = motion(5)
+    theta = torch.tensor(.1)
+    matrix = torch.tensor([[torch.cos(theta), -torch.sin(theta), 0.],
+                           [torch.sin(theta), torch.cos(theta), 0.], [0., 0., 1.]])
+    pivot = motion.active_layout['pivots'][0][0]
+    expected = (motion.base_xyz - pivot) @ matrix.T + pivot + torch.tensor([.1, 0., 0.])
+    torch.testing.assert_close(xyz, expected, rtol=1e-6, atol=1e-5)
+    expected_q = torch.tensor([torch.cos(theta / 2), 0., 0., torch.sin(theta / 2)])
+    torch.testing.assert_close(rotation, expected_q.expand_as(rotation), rtol=1e-6, atol=1e-6)
+    with torch.no_grad():
+        motion.region_translation[0].zero_()
+        motion.region_rotation[0].zero_()
+        motion.refine_logits[0].fill_(100.)
+        motion.region_translation[1][0, 0] = .1
+        motion.region_translation[1][1, 0] = -.1
+    xyz, rotation = motion(5)
+    expected = motion.base_xyz.clone()
+    expected[:, 0] += torch.where(motion.index[1] == 0, .1, -.1)
+    torch.testing.assert_close(xyz, expected, rtol=0, atol=1e-6)
+    torch.testing.assert_close(rotation, motion.base_rotation, rtol=0, atol=0)
+
+
+def test_full_online_joint_hook_saves_snapshot_components_and_joint_summary():
+    from dataclasses import dataclass, field
+    from typing import Optional
+    path = project_root / 'pipeline/ReCon-GS/module.py'
+    tree = ast.parse(path.read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Module')
+    definition = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                      and node.name == 'record_gate_diagnostics')
+    scope = dict(__name__='pipeline.ReCon-GS.module', __package__='pipeline.ReCon-GS',
+        torch=torch, time=time, isolated_rng=GD.isolated_rng, capture_rng=GPS.capture_rng,
+        sample_nodes=GD.sample_nodes, node_trace=GD.node_trace, write_trace=GD.write_trace,
+        run_probes=GD.run_probes, private_view_plan=GD.private_view_plan,
+        collect_gradient_components=GD.collect_gradient_components, save_probe_snapshot=GPS.save_probe_snapshot)
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(path), 'exec'), scope)
+    motion, config, views, checks, objective = joint_diagnostic_fixture()
+    config.save_probe_snapshots = True
+    config.record_component_gradients = True
+
+    @dataclass
+    class RenderConfig:
+        debug: bool = False
+
+    @dataclass
+    class ModelConfig:
+        gate_diagnostics: object = field(default_factory=lambda: config)
+        motion_mode: str = 'storage_aware_binary'
+        renderer: object = field(default_factory=RenderConfig)
+        lambda_dssim: float = .2
+
+    @dataclass
+    class DataConfig:
+        root: str = 'fixture'
+        training_camera_names: object = None
+
+    class Objective:
+        def __call__(self, view, xyz, rotation):
+            return objective(view, xyz, rotation)
+
+        def snapshot_state(self):
+            return dict(old_count=len(motion.base_xyz), attributes=residual_raw_fixture(48))
+
+    fake = ModuleType('pipeline.ReCon-GS.gate_diagnostic_render')
+    fake.FrozenImageObjective = lambda *args: Objective()
+    all_views = {view.path.name: view for view in views + checks}
+    with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {
+            'pipeline.ReCon-GS.gate_diagnostic_render': fake}):
+        directory = Path(directory)
+        owner = SimpleNamespace(current_frame=1, global_step=5, device='cpu', residual_motion=motion,
+            quant_first_frame_gs_count=48, gaussians=object(), background=torch.zeros(3), config=ModelConfig(),
+            trainer=SimpleNamespace(is_first_frame=False, output_dir=directory, synchronize=lambda: None),
+            datamodule=SimpleNamespace(config=DataConfig(training_camera_names=list(all_views)),
+                selective_training_pairs=lambda names, *args: [(all_views[name], all_views[name]) for name in names]))
+        xyz, rotation = motion(5)
+        (objective(views[0], xyz, rotation) + .01 * sum(motion.storage_parts(5).values()) / 1152.).backward()
+        original = copy.deepcopy(motion.capture())
+        gradients = {name: None if parameter.grad is None else parameter.grad.clone()
+                     for name, parameter in motion.named_parameters()}
+        rng = torch.get_rng_state().clone()
+        scope['record_gate_diagnostics'](owner, views[0])
+        assert_diagnostic_state_equal(motion.capture(), original)
+        torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+        for name, parameter in motion.named_parameters():
+            if gradients[name] is not None:
+                torch.testing.assert_close(parameter.grad, gradients[name], rtol=0, atol=0)
+        snapshot = directory / 'gate_diagnostics/snapshots/frame_001_step_0005.pth'
+        packet = torch.load(snapshot, map_location='cpu', weights_only=False)
+        assert packet['gradient_components']['context']['camera'] == views[0].path.name
+        assert len(packet['views']) == 3 and packet['purpose'] == 'training_probe'
+        summary = importlib.import_module('scripts.summarize_gate_diagnostics').summarize(directory)
+        assert len(summary['joint_nodes']) == len(packet['samples'])
+        assert len(summary['joint_candidates']) == 8 * len(packet['samples'])
+        assert not summary['rows']
+        assert all(row['after']['evaluation_views'][0]['role'] == 'nonfitting_training_view'
+                   for row in summary['joint_candidates'])
+
+
+def shadow_explorer_fixture(motion, **overrides):
+    values = dict(
+        start_step=5, end_step=5, interval=1, max_backward_per_frame=1,
+        levels=[0, 1, 2], seed=0, camera_policy='seeded_balanced_cycle',
+        frontier_policy='reachable_closed_same_level_all',
+        descendant_policy='preserve_source_hard',
+        precision_policy='current_argmax_detached', loss='image_only',
+        translation_lr=motion.config.region_translation_lr,
+        rotation_lr=motion.config.region_rotation_lr,
+        adam_betas=list(motion.config.adam_betas), adam_eps=motion.config.adam_eps,
+        fraction=1.)
+    values.update(overrides)
+    config = SHADOW.ShadowExplorationConfig(**values)
+    return SHADOW.ShadowMotionExplorer(motion, config)
+
+
+def test_shadow_frontier_preserves_deeper_gates_and_targets_occupied_new_rows():
+    _, motion = storage_aware_binary_fixture()
+    motion.prepare_step(5)
+    with torch.no_grad():
+        motion.refine_logits[0].fill_(-5.)
+        for logits in motion.refine_logits[1:]:
+            logits.fill_(5.)
+    plan = motion.shadow_frontier_plan(5, 0)
+    occupancy = motion._occupancy_values()
+    assert plan['step'] == 5 and len(plan['gate_nodes']) > 0
+    for level in range(1, len(plan['source_gates'])):
+        torch.testing.assert_close(plan['shadow_gates'][level],
+                                   plan['source_gates'][level], rtol=0, atol=0)
+    for actual, source, shadow, occupied in zip(
+            plan['target_rows'], plan['source_paths'], plan['shadow_paths'], occupancy):
+        expected = shadow.bool() & ~source.bool() & occupied.bool()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert not bool(plan['target_rows'][0].any())
+    assert bool(plan['target_rows'][1].any()) and bool(plan['target_rows'][2].any())
+    assert all(bool(occupancy[level][rows].all())
+               for level, rows in enumerate(plan['target_rows']) if bool(rows.any()))
+
+
+def test_shadow_step_isolates_rows_optimizers_and_main_hard_pose():
+    _, motion = storage_aware_binary_fixture()
+    motion.prepare_step(5)
+    with torch.no_grad():
+        motion.refine_logits[0].fill_(-5.)
+        for logits in motion.refine_logits[1:]:
+            logits.fill_(5.)
+        for value in motion.region_translation:
+            value.uniform_(-.03, .03)
+    explorer = shadow_explorer_fixture(motion)
+    plan = explorer.plan(5)
+    before_parameters = {name: value.detach().clone()
+                         for name, value in motion.named_parameters()}
+    before_main_optimizers = (copy.deepcopy(motion.motion_optimizer.state_dict()),
+                              copy.deepcopy(motion.gate_optimizer.state_dict()))
+    with torch.no_grad():
+        before_pose = tuple(value.clone() for value in motion(5))
+    xyz, rotation = explorer.pose(5, plan)
+    weights = torch.linspace(.1, 1., xyz.shape[0], device=xyz.device)[:, None]
+    loss = (xyz * weights).sum() + .01 * (rotation * weights).sum()
+    gradients = explorer.backward_and_step(5, loss, plan)
+    assert any(row['active_rows'] and row['gradients']['translation'] > 0
+               for row in gradients)
+    for name, value in motion.named_parameters():
+        old = before_parameters[name]
+        if name.startswith('region_translation.') or name.startswith('region_rotation.'):
+            level = int(name.split('.')[1])
+            changed = ((value.detach() != old).flatten(1).any(-1)
+                       if value.shape[0] else torch.zeros(0, dtype=torch.bool))
+            assert not bool((changed & ~plan['target_rows'][level]).any())
+        else:
+            torch.testing.assert_close(value, old, rtol=0, atol=0)
+    assert_diagnostic_state_equal(motion.motion_optimizer.state_dict(),
+                                  before_main_optimizers[0])
+    assert_diagnostic_state_equal(motion.gate_optimizer.state_dict(),
+                                  before_main_optimizers[1])
+    with torch.no_grad():
+        after_pose = motion(5)
+    for before, after in zip(before_pose, after_pose):
+        torch.testing.assert_close(before, after, rtol=0, atol=0)
+    assert explorer.completed_steps == [5]
+
+
+def test_fractional_shadow_frontier_is_deterministic_uniform_and_disjoint():
+    _, motion = storage_aware_binary_fixture(coarse_region_gs=4)
+    motion.prepare_step(5)
+    with torch.no_grad():
+        motion.refine_logits[0].fill_(-5.)
+        for logits in motion.refine_logits[1:]:
+            logits.fill_(5.)
+    explorer = shadow_explorer_fixture(motion,
+        frontier_policy='reachable_closed_same_level_uniform_without_replacement',
+        fraction=.25)
+    full = explorer.full_plan(5)
+    torch_rng = torch.get_rng_state().clone()
+    numpy_rng = copy.deepcopy(np.random.get_state())
+    first = explorer.plan(5, frame_index=7, full_plan=full)
+    second = explorer.plan(5, frame_index=7, full_plan=full)
+    assert torch.equal(torch_rng, torch.get_rng_state())
+    current_numpy = np.random.get_state()
+    assert numpy_rng[0] == current_numpy[0]
+    assert np.array_equal(numpy_rng[1], current_numpy[1])
+    assert numpy_rng[2:] == current_numpy[2:]
+    candidate_count = len(full['candidate_gate_positions'])
+    assert len(first['gate_positions']) == math.ceil(.25 * candidate_count)
+    torch.testing.assert_close(first['gate_positions'], second['gate_positions'], rtol=0, atol=0)
+    assert len(first['gate_positions']) == len(torch.unique(first['gate_positions']))
+    candidate = set(full['candidate_gate_positions'].tolist())
+    assert set(first['gate_positions'].tolist()) <= candidate
+    rng = np.random.default_rng(np.random.SeedSequence([0, 7, 5, 0, 0x53484144]))
+    offsets = np.sort(rng.choice(candidate_count, math.ceil(.25 * candidate_count),
+                                 replace=False))
+    expected = full['candidate_gate_positions'][torch.as_tensor(offsets)]
+    torch.testing.assert_close(first['gate_positions'], expected, rtol=0, atol=0)
+    selected_nodes = set(first['gate_nodes'].tolist())
+    for depth, mask in enumerate(first['target_rows']):
+        rows = torch.where(mask)[0]
+        for _ in range(depth):
+            rows = motion.active_layout['parents'][depth - 1][rows]
+            depth -= 1
+        assert set(rows.tolist()) <= selected_nodes
+
+
+def test_fractional_shadow_frontier_empty_selection_skips_cleanly():
+    _, motion = storage_aware_binary_fixture(coarse_region_gs=4)
+    motion.prepare_step(5)
+    with torch.no_grad():
+        for logits in motion.refine_logits:
+            logits.fill_(5.)
+    explorer = shadow_explorer_fixture(motion,
+        frontier_policy='reachable_closed_same_level_uniform_without_replacement',
+        fraction=.25)
+    full = explorer.full_plan(5)
+    plan = explorer.plan(5, frame_index=3, full_plan=full)
+    assert len(plan['candidate_gate_positions']) == len(plan['gate_positions']) == 0
+    assert not any(bool(mask.any()) for mask in plan['target_rows'])
+
+
+def test_parent_precision_compensation_preserves_continuous_child_pose():
+    _, motion = storage_aware_binary_fixture()
+    snapshot_step, evaluation_step, level = 5, 10, 0
+    with torch.no_grad():
+        for logits in motion.refine_logits:
+            logits.fill_(5.)
+        motion.region_translation[0][:] = torch.tensor([.037, -.021, .014])
+        motion.region_rotation[0][:] = torch.tensor([.081, -.027, .043])
+        motion.region_translation[1][:] = torch.tensor([-.018, .029, .011])
+        motion.region_rotation[1][:] = torch.tensor([-.052, .031, .047])
+    PPC.freeze_hard_choices(motion, snapshot_step)
+    node = int(motion.active_layout['refine_rows'][level][0])
+    children, parent_members = PPC.immediate_child_coverage(
+        motion.active_layout, level, node)
+    assert len(children) == 2 and int(parent_members.sum()) > 0
+    source_regions = motion._region_motion(evaluation_step, hard=True)
+    paths = motion._paths(motion.hard_masks['refine'])
+    source_rotation, source_displacement = PPC.cumulative_node_poses(
+        motion.active_layout, source_regions, paths)
+    report = PPC.rebase_immediate_children(motion, evaluation_step, level, node, 0)
+    assert report['children'].tolist() == children.tolist()
+    torch.testing.assert_close(report['continuous_position_error'],
+                               torch.zeros_like(report['continuous_position_error']),
+                               rtol=0, atol=2e-7)
+    torch.testing.assert_close(report['continuous_rotation_error'],
+                               torch.zeros_like(report['continuous_rotation_error']),
+                               rtol=0, atol=1e-6)
+
+    # Cross-check the analytic node calculation against the production
+    # reference transform over every Gaussian, before child re-quantization.
+    source_pose = BR._conditional_transform(
+        motion.base_xyz, motion.base_rotation, motion.active_layout,
+        source_regions, paths)
+    continuous_regions = [value.detach().clone() for value in source_regions]
+    alternate_regions = motion._region_motion(evaluation_step, hard=True)
+    continuous_regions[level][node] = alternate_regions[level][node]
+    continuous_regions[level + 1][children, :3] = report['target_translation']
+    continuous_regions[level + 1][children, 3:] = report['target_rotation_vector']
+    continuous_pose = BR._conditional_transform(
+        motion.base_xyz, motion.base_rotation, motion.active_layout,
+        continuous_regions, paths)
+    torch.testing.assert_close(continuous_pose[0], source_pose[0], rtol=0, atol=5e-7)
+    source_q = torch.nn.functional.normalize(source_pose[1], dim=-1)
+    continuous_q = torch.nn.functional.normalize(continuous_pose[1], dim=-1)
+    sign = torch.where((source_q * continuous_q).sum(-1, keepdim=True) < 0, -1., 1.)
+    torch.testing.assert_close(continuous_q * sign, source_q, rtol=0, atol=5e-7)
+
+    # Re-quantization is intentionally separate from the continuous identity.
+    requantized = motion._region_motion(evaluation_step, hard=True)
+    actual_rotation, actual_displacement = PPC.cumulative_node_poses(
+        motion.active_layout, requantized, paths)
+    assert torch.isfinite(actual_displacement[level + 1][children]).all()
+    assert torch.isfinite(actual_rotation[level + 1][children]).all()
+    assert not torch.equal(requantized[level + 1][children],
+                           torch.cat((report['target_translation'],
+                                      report['target_rotation_vector']), dim=-1))
+    assert source_displacement[level + 1][children].shape == (2, 3)
+    assert source_rotation[level + 1][children].shape == (2, 4)
+
+
+def test_parent_precision_compensation_rejects_stop_and_incomplete_coverage():
+    _, motion = storage_aware_binary_fixture()
+    snapshot_step, evaluation_step, level = 5, 10, 0
+    with torch.no_grad():
+        motion.refine_logits[0].fill_(-5.)
+    PPC.freeze_hard_choices(motion, snapshot_step)
+    node = int(motion.active_layout['refine_rows'][level][0])
+    try:
+        PPC.rebase_immediate_children(motion, evaluation_step, level, node, 0)
+    except ValueError as error:
+        assert 'STOP' in str(error)
+    else:
+        raise AssertionError('A STOP parent must not be compensated through children')
+
+    with torch.no_grad():
+        motion.refine_logits[0].fill_(5.)
+    PPC.freeze_hard_choices(motion, snapshot_step)
+    try:
+        PPC.rebase_immediate_children(motion, snapshot_step, level, node, 0)
+    except ValueError as error:
+        assert 'frozen hard choices' in str(error)
+    else:
+        raise AssertionError('Gate-compress step must not silently ignore frozen precision')
+
+    broken = copy.deepcopy(motion.active_layout)
+    children = torch.where(broken['parents'][level] == node)[0]
+    row = torch.where(broken['index'][level + 1] == children[0])[0][0]
+    broken['index'][level + 1][row] = -1
+    try:
+        PPC.immediate_child_coverage(broken, level, node)
+    except ValueError as error:
+        assert 'cover' in str(error)
+    else:
+        raise AssertionError('Incomplete child coverage must be rejected')
+
+
+def test_parent_precision_child_requantization_zero_and_saturation():
+    raw = torch.tensor([
+        [.049, 0., 0., 0., 0., 0.],
+        [.051, 0., 0., 0., 0., 0.],
+        [20., -20., 0., 0., 0., 0.],
+    ])
+    steps = torch.full_like(raw, .1)
+    decoded, symbols, saturated = PPC.quantize_rows(
+        raw, steps, torch.tensor([8, 8, 4]))
+    assert not bool(symbols[0].ne(0).any())
+    assert bool(symbols[1].ne(0).any())
+    assert bool(saturated[2])
+    assert symbols[2, 0] == 7 and symbols[2, 1] == -8
+    torch.testing.assert_close(decoded[1, 0], torch.tensor(.1), rtol=0, atol=0)
+
+
+def test_parent_precision_compensation_ignores_empty_structural_child():
+    _, motion = storage_aware_binary_fixture()
+    snapshot_step, evaluation_step, level = 5, 10, 0
+    with torch.no_grad():
+        for logits in motion.refine_logits:
+            logits.fill_(5.)
+    node = int(motion.active_layout['refine_rows'][level][0])
+    children = torch.where(motion.active_layout['parents'][level] == node)[0]
+    owner = motion.active_layout['index'][level + 1]
+    owner[owner == children[0]] = children[1]
+    motion._cached_occupancy = SAB._occupancy(motion.active_layout)
+    PPC.freeze_hard_choices(motion, snapshot_step)
+    report = PPC.rebase_immediate_children(
+        motion, evaluation_step, level, node, 0)
+    assert report['structural_children'].tolist() == children.tolist()
+    assert report['children'].tolist() == [int(children[1])]
+
+
+def test_fixed_gate_value_states_change_only_declared_hard_choices_and_children():
+    _, source = storage_aware_binary_fixture()
+    snapshot_step, evaluation_step, level = 5, 10, 0
+    with torch.no_grad():
+        for logits in source.refine_logits:
+            logits.fill_(5.)
+        source.region_translation[0][:] = torch.tensor([.037, -.021, .014])
+        source.region_rotation[0][:] = torch.tensor([.081, -.027, .043])
+    PPC.freeze_hard_choices(source, snapshot_step)
+    packet = source.capture()
+    node = int(source.active_layout['refine_rows'][level][0])
+    position = source._refine_position(level, node)
+    original_precision = int(source.hard_masks['precision'][level][node])
+
+    def clone():
+        result = SAB.StorageAwareBinaryMotion(copy.deepcopy(source.config))
+        result.restore(copy.deepcopy(packet))
+        return result
+
+    states = {name: clone() for name in ('a', 'b', 'c', 'd', 'e')}
+    PPC.set_frozen_node_action(states['b'], level, node, opened=False)
+    PPC.set_frozen_node_action(states['c'], level, node, opened=False,
+                               parent_precision_index=0)
+    PPC.set_frozen_node_action(states['d'], level, node, opened=True,
+                               parent_precision_index=0)
+    PPC.set_frozen_node_action(states['e'], level, node, opened=True)
+    report = PPC.rebase_immediate_children(
+        states['e'], evaluation_step, level, node, 0)
+    assert bool(states['a'].hard_masks['refine'][level][position])
+    assert not bool(states['b'].hard_masks['refine'][level][position])
+    assert not bool(states['c'].hard_masks['refine'][level][position])
+    assert bool(states['d'].hard_masks['refine'][level][position])
+    assert bool(states['e'].hard_masks['refine'][level][position])
+    assert int(states['a'].hard_masks['precision'][level][node]) == original_precision
+    assert all(int(states[name].hard_masks['precision'][level][node]) == 0
+               for name in ('c', 'd', 'e'))
+    for name in ('b', 'c', 'd'):
+        for actual, expected in zip(states[name].parameters(), states['a'].parameters()):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    children = report['children']
+    for depth in range(len(source.counts)):
+        for field in ('region_translation', 'region_rotation'):
+            actual = getattr(states['e'], field)[depth]
+            expected = getattr(states['a'], field)[depth]
+            changed = (actual != expected).any(-1)
+            allowed = torch.zeros_like(changed)
+            if depth == level + 1:
+                allowed[children] = True
+            assert not bool((changed & ~allowed).any())
+    # A/B/C/D retain every non-target hard choice exactly.
+    for name in ('b', 'c', 'd'):
+        for depth, (actual, expected) in enumerate(zip(
+                states[name].hard_masks['refine'], states['a'].hard_masks['refine'])):
+            difference = actual != expected
+            allowed = torch.zeros_like(difference)
+            if name in ('b', 'c') and depth == level:
+                allowed[position] = True
+            assert not bool((difference & ~allowed).any())
+        for depth, (actual, expected) in enumerate(zip(
+                states[name].hard_masks['precision'], states['a'].hard_masks['precision'])):
+            difference = actual != expected
+            allowed = torch.zeros_like(difference)
+            if name in ('c', 'd') and depth == level:
+                allowed[node] = True
+            assert not bool((difference & ~allowed).any())
 
 
 if __name__ == '__main__':

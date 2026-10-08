@@ -34,6 +34,11 @@ from .model.sparse_hierarchical import SparseHierarchicalConfig, SparseHierarchi
 from .model.flat_cluster import FlatClusterConfig, FlatClusterMotion
 from .model.binary_refinement import BinaryRefinementConfig, BinaryRefinementMotion
 from .model.storage_aware_binary import StorageAwareBinaryConfig, StorageAwareBinaryMotion, birth_ply_size
+from .model.common_contrast import CommonContrastConfig, CommonContrastMotion
+from .model.gate_diagnostics import (GateDiagnosticsConfig, isolated_rng, node_trace,
+                                    sample_nodes, run_probes, write_trace,
+                                    private_view_plan, collect_gradient_components)
+from .model.gate_probe_snapshot import capture_rng, save_probe_snapshot
 
 import json
 import csv
@@ -42,7 +47,7 @@ import time
 import math
 
 SPARSE_MOTION_MODES = {'sparse_hierarchical', 'flat_cluster', 'binary_refinement',
-                       'storage_aware_binary'}
+                       'storage_aware_binary', 'common_contrast_binary'}
 QUANTIZED_MOTION_MODES = {'quantized_residual', *SPARSE_MOTION_MODES}
 
 @dataclass
@@ -134,7 +139,9 @@ class ModuleConfig(BaseModuleConfig):
     flat_cluster: FlatClusterConfig = field(default_factory=FlatClusterConfig)
     binary_refinement: BinaryRefinementConfig = field(default_factory=BinaryRefinementConfig)
     storage_aware_binary: StorageAwareBinaryConfig = field(default_factory=StorageAwareBinaryConfig)
+    common_contrast_binary: CommonContrastConfig = field(default_factory=CommonContrastConfig)
     quantized_diagnostics: QuantizedDiagnosticsConfig = field(default_factory=QuantizedDiagnosticsConfig)
+    gate_diagnostics: GateDiagnosticsConfig = field(default_factory=GateDiagnosticsConfig)
     selective_diagnostics_config: Optional[str] = 'config/diagnostics/selective_motion.yaml'
 
 
@@ -159,6 +166,12 @@ class Module(BaseModule):
                 else self.config.selective_motion)
 
     def setup(self):
+        gate_diagnostics = getattr(self.config, 'gate_diagnostics', None)
+        if gate_diagnostics is not None:
+            gate_diagnostics.validate(self.config.storage_aware_binary
+                                      if self.config.motion_mode == 'storage_aware_binary' else None)
+            if gate_diagnostics.enabled and self.config.motion_mode != 'storage_aware_binary':
+                raise ValueError('gate_diagnostics supports storage_aware_binary only')
         if self.config.motion_mode not in {'legacy', 'selective', 'learned_selective', *QUANTIZED_MOTION_MODES}:
             raise ValueError('Unsupported motion_mode')
         if self.config.sparse_export_index_encoding not in {'per_row', 'shared_table'}:
@@ -179,6 +192,8 @@ class Module(BaseModule):
                 cfg = self.config.binary_refinement
             elif self.config.motion_mode == 'storage_aware_binary':
                 cfg = self.config.storage_aware_binary
+            elif self.config.motion_mode == 'common_contrast_binary':
+                cfg = self.config.common_contrast_binary
             elif self.config.motion_mode == 'flat_cluster':
                 cfg = self.config.flat_cluster
             elif self.config.motion_mode == 'sparse_hierarchical':
@@ -198,7 +213,8 @@ class Module(BaseModule):
                 if self.config.selective_diagnostics_config is not None:
                     raise ValueError('Sparse motion does not support legacy selective overlays; '
                                      'set selective_diagnostics_config: null')
-                motion_cls = (StorageAwareBinaryMotion if self.config.motion_mode == 'storage_aware_binary'
+                motion_cls = (CommonContrastMotion if self.config.motion_mode == 'common_contrast_binary'
+                              else StorageAwareBinaryMotion if self.config.motion_mode == 'storage_aware_binary'
                               else BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
                               else FlatClusterMotion if self.config.motion_mode == 'flat_cluster'
                               else SparseHierarchicalMotion)
@@ -329,8 +345,8 @@ class Module(BaseModule):
         The caller must advance the base Gaussian state to the start of this
         frame. The optional PLY contains only this frame's newly added points.
         """
-        if getattr(self.config, 'motion_mode', 'legacy') == 'storage_aware_binary':
-            raise RuntimeError('storage_aware_binary requires sequential playback with StorageAwareBinaryDecoder')
+        if getattr(self.config, 'motion_mode', 'legacy') in {'storage_aware_binary', 'common_contrast_binary'}:
+            raise RuntimeError('Binary frame streams require their matching sequential decoder')
         base = self.gaussians.get_xyz_ori
         if getattr(self.config, 'motion_mode', 'legacy') in SPARSE_MOTION_MODES:
             motion_cls = (BinaryRefinementMotion if self.config.motion_mode == 'binary_refinement'
@@ -655,7 +671,7 @@ class Module(BaseModule):
             stage = self.residual_motion.stage(current_step)
             storage_active = (self.config.motion_mode not in SPARSE_MOTION_MODES or
                               stage in ({'gate_compress', 'gate_refine', 'incremental'}
-                                        if self.config.motion_mode == 'storage_aware_binary'
+                                        if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}
                                         else {'gate_compress', 'incremental'}))
             storage_weight = (cfg.storage_loss_weight * self.residual_motion.storage_scale(current_step)
                               if storage_active else 0.)
@@ -1132,7 +1148,10 @@ class Module(BaseModule):
         path = self.output_dir / 'frame_summary' / f'control_{self.current_frame:03d}.json'
         path.parent.mkdir(parents=True, exist_ok=True)
         mode = getattr(self.config, 'motion_mode', 'legacy')
-        semantics = ('Storage-aware binary motion jointly selects hierarchy gates and per-node precision, '
+        semantics = ('Common/contrast motion stores root common transforms and one fixed-precision '
+                     'contrast per open effective split; subtree gates truncate descendants.'
+                     if mode == 'common_contrast_binary' else
+                     'Storage-aware binary motion jointly selects hierarchy gates and per-node precision, '
                      'then writes a deterministic preorder bitstream.'
                      if mode == 'storage_aware_binary' else
                      'Binary refinement uses quantized parent/child residuals and hard-forward STE '
@@ -1157,9 +1176,17 @@ class Module(BaseModule):
         if self.trainer.is_first_frame or self.residual_motion.committed:
             return
         motion = self.residual_motion
-        groups = {f'region_translation_{i}': p for i, p in enumerate(motion.region_translation)}
-        groups.update({f'region_rotation_{i}': p for i, p in enumerate(motion.region_rotation)})
-        if self.config.motion_mode in {'binary_refinement', 'storage_aware_binary'}:
+        if self.config.motion_mode == 'common_contrast_binary':
+            groups = dict(root_translation=motion.root_translation,
+                          root_rotation=motion.root_rotation)
+            groups.update({f'contrast_translation_{i}': p
+                           for i, p in enumerate(motion.contrast_translation)})
+            groups.update({f'contrast_rotation_{i}': p
+                           for i, p in enumerate(motion.contrast_rotation)})
+        else:
+            groups = {f'region_translation_{i}': p for i, p in enumerate(motion.region_translation)}
+            groups.update({f'region_rotation_{i}': p for i, p in enumerate(motion.region_rotation)})
+        if self.config.motion_mode in {'binary_refinement', 'storage_aware_binary', 'common_contrast_binary'}:
             groups.update({f'refine_gate_{i}': p for i, p in enumerate(motion.refine_logits)})
             if self.config.motion_mode == 'storage_aware_binary':
                 groups.update({f'precision_logits_{i}': p
@@ -1171,7 +1198,7 @@ class Module(BaseModule):
             groups.update({f'z_region_{i}': p for i, p in enumerate(motion.z_region_logits)})
         else:
             groups.update({f'gate_{i}': p for i, p in enumerate(motion.gate_logits)})
-        if self.config.motion_mode not in {'binary_refinement', 'storage_aware_binary'}:
+        if self.config.motion_mode not in {'binary_refinement', 'storage_aware_binary', 'common_contrast_binary'}:
             groups.update(gs_translation=motion.gs_translation, gs_rotation=motion.gs_rotation)
         gradients = {}
         for name, parameter in groups.items():
@@ -1185,7 +1212,7 @@ class Module(BaseModule):
             gradients[name] = (None if grad is None else dict(
                 l2=float(grad.norm()), max_abs=float(grad.abs().max()) if grad.numel() else 0.,
                 nonzero_rows=nonzero_rows, rows=len(grad)))
-        if self.config.motion_mode in {'binary_refinement', 'storage_aware_binary'}:
+        if self.config.motion_mode in {'binary_refinement', 'storage_aware_binary', 'common_contrast_binary'}:
             states = [value.detach().cpu().clone() for value in motion.refinement_masks(self.global_step)]
             if self.config.motion_mode == 'storage_aware_binary':
                 states.extend(value.argmax(-1).detach().cpu().clone()
@@ -1206,6 +1233,87 @@ class Module(BaseModule):
             gradients=gradients, sampled_gate_changes=changes,
             activity=motion.statistics(), training_metrics=dict(motion.last_metrics)))
         self.save_quantized_control_diagnostics()
+
+    def record_gate_diagnostics(self, training_view):
+        """Called after main backward, before its optimizer update; source stays read-only."""
+        config = getattr(self.config, 'gate_diagnostics', None)
+        if (config is None or self.trainer.is_first_frame or
+                self.config.motion_mode != 'storage_aware_binary' or
+                not config.due(self.current_frame, self.global_step)):
+            return 0.
+        from .gate_diagnostic_render import FrozenImageObjective
+        motion = self.residual_motion
+        if motion.committed:
+            raise ValueError('Online gate diagnostics must precede motion commit')
+        self.trainer.synchronize()
+        started = time.perf_counter()
+        directory = self.trainer.output_dir / 'gate_diagnostics'
+        source_rng = capture_rng() if config.save_probe_snapshots else None
+        with isolated_rng(self.device):
+            if self.global_step in config.trace_steps:
+                with torch.no_grad():
+                    samples = sample_nodes(motion, self.global_step, self.current_frame, config)
+                    if getattr(self, '_gate_trace_frame', None) != self.current_frame:
+                        self._gate_trace_frame = self.current_frame
+                        self._gate_trace_samples = {}
+                    for sample in samples:
+                        self._gate_trace_samples.setdefault((sample['level'], sample['node']),
+                            dict(first_sample_step=self.global_step, **sample))
+                    # Once sampled, keep tracing the same node even after its gate changes group.
+                    rows = [dict(stage=motion.stage(self.global_step), first_sample=sample,
+                        gradient_source='total_training_loss_after_backward_before_update',
+                        **node_trace(motion, self.global_step, sample['level'], sample['node']))
+                        for _, sample in sorted(self._gate_trace_samples.items())]
+                    write_trace(directory / f'frame_{self.current_frame:03d}_trace.jsonl',
+                        frame=self.current_frame, step=self.global_step, context='online_pre_update',
+                        camera=training_view.path.name, rows=rows)
+            if self.global_step in config.probe_steps:
+                all_names = list(dict.fromkeys(config.camera_names + config.evaluation_camera_names))
+                training_names = self.datamodule.config.training_camera_names
+                if training_names is not None and not set(all_names).issubset(training_names):
+                    raise ValueError('Diagnostic fitting cameras must belong to the training split')
+                loaded_views = [now for now, _ in self.datamodule.selective_training_pairs(
+                    all_names, self.device, 0.)]
+                by_name = {view.path.name: view for view in loaded_views}
+                views = [by_name[name] for name in config.camera_names]
+                evaluation_views = [by_name[name] for name in config.evaluation_camera_names]
+                objective = FrozenImageObjective(self.gaussians, self.config.renderer,
+                    self.background, self.config.lambda_dssim, len(motion.base_xyz))
+                weight = motion.config.storage_loss_weight * motion.storage_scale(self.global_step)
+                if motion.stage(self.global_step) not in {'gate_compress', 'gate_refine'}:
+                    weight = 0.
+                samples = sample_nodes(motion, self.global_step, self.current_frame, config, reachable_only=True)
+                view_plans = {f"{item['level']}:{item['node']}": private_view_plan(
+                    config, self.current_frame, self.global_step, item['level'], item['node']) for item in samples}
+                components = None
+                with torch.enable_grad():
+                    if config.record_component_gradients:
+                        components = collect_gradient_components(motion, self.global_step, training_view,
+                            objective, reference_bytes=motion.reference_storage_bytes(
+                                self.quant_first_frame_gs_count), rate_weight=weight)
+                    snapshot_path = None
+                    if config.save_probe_snapshots:
+                        from dataclasses import asdict
+                        snapshot_views = list(by_name.values())
+                        if training_view.path.name not in by_name:
+                            snapshot_views.append(training_view)
+                        snapshot_path = save_probe_snapshot(directory / 'snapshots' /
+                            f'frame_{self.current_frame:03d}_step_{self.global_step:04d}.pth',
+                            motion=motion, frame=self.current_frame, step=self.global_step,
+                            diagnostic_config=config, render_state=objective.snapshot_state(),
+                            data_config=asdict(self.datamodule.config), module_config=asdict(self.config),
+                            renderer_config=asdict(self.config.renderer), background=self.background,
+                            first_frame_gs_count=self.quant_first_frame_gs_count, samples=samples,
+                            view_plans=view_plans, views=snapshot_views, training_camera=training_view.path.name,
+                            source_rng=source_rng, gradient_components=components)
+                    run_probes(motion, frame=self.current_frame, step=self.global_step,
+                        context='online_pre_update', views=views, image_loss=objective,
+                        config=config, reference_bytes=motion.reference_storage_bytes(
+                            self.quant_first_frame_gs_count), rate_weight=weight, output_dir=directory,
+                        evaluation_views=evaluation_views, samples=samples, view_plans=view_plans,
+                        gradient_components=components, snapshot_path=snapshot_path)
+        self.trainer.synchronize()
+        return time.perf_counter() - started
 
     @torch.no_grad()
     def prepare_quantized_frame(self):
@@ -1228,7 +1336,7 @@ class Module(BaseModule):
         if (self.config.quantized_residual.enable_learned_gates and
                 self.residual_motion.index is not None):
             deletion_score = (self.gaussians._opacity
-                              if getattr(self.config, 'motion_mode', 'legacy') == 'storage_aware_binary'
+                              if getattr(self.config, 'motion_mode', 'legacy') in {'storage_aware_binary', 'common_contrast_binary'}
                               else self.gaussians.get_opacity)
             deleted, deletion_protection = self.residual_motion.compensation_deletions(
                 deletion_score, count)
@@ -1356,7 +1464,7 @@ class Module(BaseModule):
         """Count effective motion, gate, birth and deletion parameter bytes."""
         parts = self.residual_motion.storage_parts(self.global_step, hard=hard)
         zero = next(iter(parts.values())) * 0
-        if self.config.motion_mode == 'storage_aware_binary':
+        if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}:
             if view is None:
                 birth_bytes = zero
             elif hard:
@@ -1411,7 +1519,7 @@ class Module(BaseModule):
             motion.stage_seconds[stage] = motion.stage_seconds.get(stage, 0.) + time.perf_counter() - render_pkg['quantized_started']
             if self.config.motion_mode in SPARSE_MOTION_MODES:
                 probe_steps = getattr(cfg, 'tree_probe_steps', 0)
-                if (self.config.motion_mode in {'binary_refinement', 'storage_aware_binary'} and
+                if (self.config.motion_mode in {'binary_refinement', 'storage_aware_binary', 'common_contrast_binary'} and
                         self.global_step == cfg.coarse_fit_steps):
                     self.quantized_quality_snapshot('after_coarse_fit')
                 elif probe_steps and self.global_step == probe_steps:
@@ -1501,9 +1609,9 @@ class Module(BaseModule):
         frame_manifest = None
         if self.config.motion_mode in SPARSE_MOTION_MODES:
             storage_dir = self.output_dir / 'frame_storage' / self.config.motion_mode
-            suffix = '.bin' if self.config.motion_mode == 'storage_aware_binary' else '.npz'
+            suffix = '.bin' if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'} else '.npz'
             motion_path = storage_dir / f'motion_{self.current_frame:03d}{suffix}'
-            if self.config.motion_mode != 'storage_aware_binary':
+            if self.config.motion_mode not in {'storage_aware_binary', 'common_contrast_binary'}:
                 motion_export = self.residual_motion.export_motion(motion_path)
         self.quant_birth_control['final_candidate_count'] = (
             len(self.gaussians_incr.get_xyz) if cfg.enable_incremental else 0)
@@ -1526,7 +1634,7 @@ class Module(BaseModule):
             incremental_export = dict(path=str(incremental_path),
                                       archive_bytes=incremental_path.stat().st_size,
                                       rows=retained_count)
-        if self.config.motion_mode == 'storage_aware_binary':
+        if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}:
             motion_export = self.residual_motion.export_motion(motion_path,
                 frame_index=self.current_frame,
                 previous_state_digest=self.quant_previous_sha256,
@@ -1536,7 +1644,7 @@ class Module(BaseModule):
                 birth_count=retained_count)
         if self.config.motion_mode in SPARSE_MOTION_MODES:
             manifest_path = storage_dir / f'frame_{self.current_frame:03d}.json'
-            if self.config.motion_mode == 'storage_aware_binary':
+            if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}:
                 manifest = dict(
                     layout_version=self.residual_motion.layout_version,
                     frame=self.current_frame,
@@ -1566,7 +1674,7 @@ class Module(BaseModule):
                     incremental_export=incremental_export)
             manifest_path.write_text(json.dumps(manifest, indent=2))
             frame_manifest = dict(path=str(manifest_path), archive_bytes=manifest_path.stat().st_size,
-                deleted_count=manifest['deleted_count'] if self.config.motion_mode == 'storage_aware_binary'
+                deleted_count=manifest['deleted_count'] if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}
                 else len(manifest['deleted_indices']))
         self.quantized_quality_snapshot('after_retention')
         self.trainer.synchronize()
@@ -1683,13 +1791,13 @@ class Module(BaseModule):
                 'uncompressed_inference_arrays_v1'
                 if self.config.motion_mode in SPARSE_MOTION_MODES else None),
             inference_file_bytes=(sum(item['archive_bytes'] for item in
-                ((motion_export, incremental_export) if self.config.motion_mode == 'storage_aware_binary'
+                ((motion_export, incremental_export) if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}
                  else (motion_export, incremental_export, frame_manifest)) if item is not None)
                 if sparse_mode else None),
             inference_file_semantics=(
                 'Necessary preorder motion bitstream and retained birth PLY bytes. The motion header is '
                 'included; diagnostic JSON is excluded. Shared first-frame model, images, checkpoints and logs '
-                'are excluded.' if self.config.motion_mode == 'storage_aware_binary' else
+                'are excluded.' if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'} else
                 'Necessary motion NPZ, retained birth PLY and deletion/frame manifest file bytes for this '
                 'dynamic frame. Includes container headers and verification metadata; excludes the shared '
                 'first-frame model, images, full-frame debug PLYs, checkpoints and logs.'
@@ -1791,6 +1899,32 @@ class Module(BaseModule):
             if actual_motion is not None:
                 actual_motion['semantics'] = (
                     'Actual quantized old-GS pose changes, without an independent m gate.')
+        elif self.config.motion_mode == 'common_contrast_binary':
+            semantics = (
+                'A deterministic binary forest stores one fixed-precision common transform per occupied '
+                'root and one zero-mean contrast per open effective binary split. Unary branches inherit '
+                'without parameters. A closed learned subtree gate truncates all descendants; a zero local '
+                'contrast does not close the gate, so deeper differences remain representable.')
+            self.quant_report.update(
+                method_semantics=semantics,
+                storage_accounting='common_contrast_preorder_v1',
+                storage_semantics=(
+                    f'Exact inference files use a {self.residual_motion.__class__.__name__} stream with '
+                    'a 132-byte verified header and byte-padded preorder payload plus retained birth PLY. '
+                    'Split member weights are reconstructed from deterministic post-deletion membership; '
+                    'empty and unary branches consume no contrast record.'),
+                candidate_fit=dict(enabled=False, extra_renders=0, semantics=(
+                    'Root common transforms and split contrasts learn only through the normal image forward.')),
+                gs_activity_cost=dict(weight=0., semantics=(
+                    'No independent per-GS activity gate or activity loss. Actual fixed-precision '
+                    'old-GS pose changes are reported separately and do not identify physical motion.')),
+                motion_gradient_schedule=dict(stages=dict(
+                    dense_fit='fit roots first, then expose the complete contrast tree',
+                    gate_compress='jointly optimize fixed-16-bit motion and hard-forward subtree gates',
+                    gate_refine='freeze subtree choices and refine only reached roots/open contrasts',
+                    incremental='freeze old motion and fit newborn Gaussians'), semantics=semantics))
+            if actual_motion is not None:
+                actual_motion['semantics'] = 'Actual fixed-precision old-GS pose changes under the committed subtree cut.'
         elif self.config.motion_mode == 'storage_aware_binary':
             semantics = (
                 'Storage-aware preorder bitstream. Every reached region carries a motion-presence flag; '

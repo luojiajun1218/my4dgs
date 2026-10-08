@@ -454,6 +454,68 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             self.active_layout, regions, paths[:len(regions)], selected_only=selected,
             terminal=terminal, active_rows=rows)
 
+    def shadow_frontier_plan(self, step, gate_level, gate_positions=None):
+        """Temporarily open one reachable closed frontier without changing logits.
+
+        All harder descendant choices retain their current hard values. Target
+        motion rows are exactly those that become reachable because this
+        frontier was opened; the already reachable parent rows are excluded.
+        """
+        if self.stage(step) != 'gate_compress' or self.hard_masks is not None:
+            raise ValueError('Shadow exploration requires a soft gate-compress step')
+        if (isinstance(gate_level, bool) or not isinstance(gate_level, int)
+                or gate_level < 0 or gate_level >= len(self.refine_logits)):
+            raise ValueError('Shadow gate_level is outside the refinement hierarchy')
+        gates = [value.detach().clone() for value in self.refinement_masks(step)]
+        paths = self._paths(gates)
+        occupancy = self._occupancy_values()
+        internal = self.active_layout['refine_rows'][gate_level]
+        internal_occupied = occupancy[gate_level][internal].bool()
+        reachable = paths[gate_level][internal].bool() & internal_occupied
+        closed = ~gates[gate_level].bool()
+        candidate_positions = torch.where(reachable & closed)[0]
+        if gate_positions is None:
+            positions = candidate_positions
+        else:
+            positions = torch.as_tensor(
+                gate_positions, device=candidate_positions.device, dtype=torch.long)
+            if positions.ndim != 1 or len(positions) != len(torch.unique(positions)):
+                raise ValueError('Shadow gate positions must be a unique 1-D selection')
+            if (len(positions) and (int(positions.min()) < 0
+                                    or int(positions.max()) >= len(gates[gate_level]))):
+                raise ValueError('Shadow gate position is outside the selected level')
+            candidate_mask = torch.zeros_like(gates[gate_level], dtype=torch.bool)
+            candidate_mask[candidate_positions] = True
+            if len(positions) and not bool(candidate_mask[positions].all()):
+                raise ValueError('Shadow selection contains a non-frontier gate')
+        nodes = internal[positions]
+        shadow_gates = [value.clone() for value in gates]
+        shadow_gates[gate_level][positions] = True
+        shadow_paths = self._paths(shadow_gates)
+        target_rows = [(shadow.bool() & ~base.bool() & occupied.bool())
+                       for base, shadow, occupied in zip(paths, shadow_paths, occupancy)]
+        if any(bool(mask.any()) for mask in target_rows[:gate_level + 1]):
+            raise AssertionError('Shadow frontier unexpectedly targets an ancestor row')
+        return dict(step=int(step), gate_level=gate_level,
+                    candidate_gate_positions=candidate_positions,
+                    candidate_gate_nodes=internal[candidate_positions],
+                    gate_positions=positions, gate_nodes=nodes,
+                    source_gates=gates, shadow_gates=shadow_gates,
+                    source_paths=paths, shadow_paths=shadow_paths,
+                    target_rows=target_rows)
+
+    def shadow_frontier_pose(self, step, plan):
+        """Render a planned frontier with detached hard gate/precision choices."""
+        if plan['gate_level'] >= len(self.refine_logits):
+            raise ValueError('Shadow plan does not belong to this hierarchy')
+        if len(plan['shadow_paths']) != len(self.counts):
+            raise ValueError('Shadow plan depth differs from this hierarchy')
+        regions = self._region_motion(step, hard=True)
+        return node_conditional_transform(
+            self.base_xyz, self.base_rotation, self.active_layout, regions,
+            plan['shadow_paths'][:len(regions)], selected_only=False,
+            terminal=self._static_terminal)
+
     def _hard_masks_for_step(self, step):
         if self.config.motion_compute == 'reference':
             return super()._hard_masks_for_step(step)
@@ -682,7 +744,7 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
             topology_digest=topology.hex(), payload=packet[CODEC_HEADER_BYTES:])
 
     @classmethod
-    def decode_motion(cls, path, base_xyz, base_rotation, config, layout):
+    def decode_motion(cls, path, base_xyz, base_rotation, config, layout, *, coding_state=None):
         header = cls.read_header(path)
         if len(base_xyz) != header['base_count']:
             raise ValueError('Post-deletion base count disagrees with stream header')
@@ -696,6 +758,10 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
         counts = layout['counts']
         device = base_xyz.device
         regions = [base_xyz.new_zeros(count, 6) for count in counts]
+        if coding_state is not None:
+            precision_choices = [torch.full((count,), len(bits) - 1, device=device,
+                                             dtype=torch.long) for count in counts]
+            coded_symbols = [torch.zeros(count, 6, device=device, dtype=torch.long) for count in counts]
         gates = [base_xyz.new_zeros(len(rows), dtype=torch.bool)
                  for rows in layout['refine_rows']]
         gate_positions = [{int(node): i for i, node in enumerate(rows.tolist())}
@@ -717,6 +783,9 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
                 if not any(values):
                     raise ValueError('A zero motion must omit its precision payload')
                 regions[level][node] = base_xyz.new_tensor(values) * steps[precision]
+                if coding_state is not None:
+                    precision_choices[level][node] = precision
+                    coded_symbols[level][node] = torch.tensor(values, device=device, dtype=torch.long)
             if level < len(gates):
                 child_nodes = [child for child in children[level][node]
                                if bool(occupancy[level + 1][child])]
@@ -743,18 +812,25 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
                      else _conditional_transform)
         transform_options = dict(selected_only=True) if config.motion_compute == 'node' else {}
         xyz, rotation = transform(base_xyz, base_rotation, layout, regions, paths, **transform_options)
+        if coding_state is not None:
+            coding_state.update(precision=precision_choices, symbols=coded_symbols)
         return xyz, rotation, gates, regions, header
 
     @torch.no_grad()
     def register_materialized_layout(self, materialized_xyz, birth_sources):
+        """Route full-PLY newborns by their decoded positions, matching the decoder.
+
+        birth_sources are the attribute predictors selected before quantization.
+        Quantization can move a newborn across their nearest-neighbor boundary.
+        Those predictors are not transmitted and must not determine cached ownership.
+        """
         source = torch.as_tensor(birth_sources, device=self.base_xyz.device, dtype=torch.long)
         old_count = len(self.base_xyz)
-        if len(materialized_xyz) != old_count + len(source):
+        if (source.ndim != 1 or len(materialized_xyz) != old_count + len(source) or
+                bool(((source < 0) | (source >= old_count)).any())):
             raise ValueError('Materialized newborn count does not match source rows')
         computed = _nearest_source_rows(materialized_xyz[:old_count], materialized_xyz[old_count:])
-        if not torch.equal(computed, source):
-            raise ValueError('Newborn source assignment cannot be reconstructed by the decoder')
-        full_index = torch.cat((self.index, self.index[:, source]), dim=1)
+        full_index = torch.cat((self.index, self.index[:, computed]), dim=1)
         self.materialized_layout = _copy_layout(_binary_layout(
             full_index, self.counts, self.parents, materialized_xyz,
             self.active_layout['pivots']))
@@ -853,7 +929,7 @@ class StorageAwareBinaryMotion(BinaryRefinementMotion):
 class StorageAwareBinaryDecoder:
     """Sequential decoder that mirrors deletion, cached trees and newborn routing."""
 
-    def __init__(self, config):
+    def __init__(self, config, *, retain_frame_state=False):
         config.validate()
         self.config = config
         self.materialized_layout = None
@@ -862,6 +938,8 @@ class StorageAwareBinaryDecoder:
         self.last_frame = 0
         self.last_pose_xyz = None
         self.last_pose_rotation = None
+        self.retain_frame_state = retain_frame_state
+        self.last_frame_state = None
 
     def advance(self, motion_path, birth_path, raw):
         header = StorageAwareBinaryMotion.read_header(motion_path)
@@ -891,8 +969,13 @@ class StorageAwareBinaryDecoder:
                 old['counts'], old['parents'], base['xyz'], old['pivots'])
         if layout_digest(layout).hex() != header['topology_digest']:
             raise ValueError('Reconstructed cached tree digest mismatch')
+        coding_state = {} if self.retain_frame_state else None
         xyz, rotation, gates, regions, decoded_header = StorageAwareBinaryMotion.decode_motion(
-            motion_path, base['xyz'], base['rotation'], self.config, layout)
+            motion_path, base['xyz'], base['rotation'], self.config, layout, coding_state=coding_state)
+        if self.retain_frame_state:
+            self.last_frame_state = dict(base_xyz=base['xyz'], base_rotation=base['rotation'],
+                layout=layout, previous_layout=self.materialized_layout, gates=gates, regions=regions,
+                coding=coding_state, header=decoded_header)
         changed = ((xyz != base['xyz']).any(-1) |
                    (rotation != base['rotation']).any(-1)).detach()
         base['xyz'], base['rotation'] = xyz, rotation
@@ -926,6 +1009,23 @@ class StorageAwareBinaryDecoder:
             tree_rebuilt=rebuild, topology_digest=header['topology_digest'],
             coded_payload_bits=header['payload_bits'], motion_path=str(motion_path),
             birth_path=str(birth_path) if birth_path else None)
+
+
+def decoder_for_binary_stream(path, config, *, retain_frame_state=False):
+    """Dispatch a sequential decoder from the stream magic without ambiguity."""
+    magic = Path(path).read_bytes()[:4]
+    if magic == CODEC_MAGIC:
+        if not isinstance(config, StorageAwareBinaryConfig):
+            raise TypeError('SARB stream requires StorageAwareBinaryConfig')
+        return StorageAwareBinaryDecoder(config, retain_frame_state=retain_frame_state)
+    # Lazy import avoids a module cycle: common_contrast reuses the bit IO.
+    from .common_contrast import (CODEC_MAGIC as COMMON_CONTRAST_MAGIC,
+                                  CommonContrastConfig, CommonContrastDecoder)
+    if magic == COMMON_CONTRAST_MAGIC:
+        if not isinstance(config, CommonContrastConfig):
+            raise TypeError('CCRB stream requires CommonContrastConfig')
+        return CommonContrastDecoder(config, retain_frame_state=retain_frame_state)
+    raise ValueError('Unknown binary motion codec identifier')
 
 
 def _load_birth_ply(path, device):

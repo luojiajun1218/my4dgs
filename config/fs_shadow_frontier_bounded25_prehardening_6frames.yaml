@@ -1,0 +1,30 @@
+experiment_name: fs_shadow_frontier_bounded25_prehardening_6frames
+source_run: output/fs_joint_precision_mechanism_100f/20261007T235547_f9a241
+output_root: output/fs_shadow_frontier_bounded25_prehardening_6frames
+device: cuda
+frames: [1, 5, 25, 50, 75, 99]
+source_step: 120
+end_step: 200
+ordinary_camera_names: [cam01.png, cam02.png, cam03.png, cam04.png, cam05.png, cam06.png, cam07.png, cam08.png, cam09.png, cam10.png, cam11.png, cam12.png, cam13.png, cam14.png, cam15.png, cam16.png, cam17.png, cam18.png, cam19.png, cam20.png]
+validation_camera_name: cam00.png
+main_seed: 0
+main_camera_policy: saved_current_then_seeded_balanced_cycle
+final_validation_only: true
+evaluation_steps: [120, 150, 174, 180, 181, 200]
+shadow:
+  start_step: 120
+  end_step: 174
+  interval: 6
+  max_backward_per_frame: 10
+  levels: [0, 1, 2]
+  seed: 0
+  camera_policy: seeded_balanced_cycle
+  frontier_policy: reachable_closed_same_level_uniform_without_replacement
+  fraction: 0.25
+  descendant_policy: preserve_source_hard
+  precision_policy: current_argmax_detached
+  loss: image_only
+  translation_lr: 0.0005
+  rotation_lr: 0.00005
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
