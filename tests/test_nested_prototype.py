@@ -18,6 +18,8 @@ import torch
 from torch.nn import functional as F
 
 project_root = Path(__file__).resolve().parents[1]
+# Archived configs remain test inputs after experiment-directory cleanup.
+legacy_config_root = project_root / 'tests' / 'fixtures' / 'config'
 sys.path.insert(0, str(project_root))
 # Import numerical modules without executing the production pipeline initializer,
 # which creates a GUI socket at import time.
@@ -4275,7 +4277,7 @@ def test_module_setup_selects_flat_model_and_shared_birth_config():
 
 def retained_experiment_config():
     import yaml
-    path = project_root / 'config' / 'fs_storage_aware_polish03_24f_20261007.yaml'
+    path = legacy_config_root / 'fs_storage_aware_polish03_24f_20261007.yaml'
     return yaml.safe_load(path.read_text(encoding='utf-8'))
 
 
@@ -4538,7 +4540,7 @@ def storage_aware_binary_fixture(**overrides):
 
 def common_contrast_fixture(**overrides):
     import yaml
-    values = yaml.safe_load((project_root / 'config' /
+    values = yaml.safe_load((legacy_config_root /
         'fs_common_contrast_fixed16_100f.yaml').read_text())['module']['common_contrast_binary']
     values.update(coarse_region_gs=12, min_child_gs=2, max_motion_levels=4,
         coarse_fit_steps=2, dense_fit_steps=4, gate_compress_steps=4,
@@ -4557,7 +4559,7 @@ def common_contrast_fixture(**overrides):
 
 def test_common_contrast_config_matches_full_run_protocol():
     import yaml
-    config = yaml.safe_load((project_root / 'config' /
+    config = yaml.safe_load((legacy_config_root /
         'fs_common_contrast_fixed16_100f.yaml').read_text())
     parameters = CC.CommonContrastConfig(**config['module']['common_contrast_binary'])
     parameters.validate()
@@ -5462,7 +5464,7 @@ def test_gate_diagnostic_default_off_and_100_frame_candidate_preserves_algorithm
     import yaml
     assert not GD.GateDiagnosticsConfig().enabled
     GD.GateDiagnosticsConfig().validate()
-    config = yaml.safe_load((project_root / 'config' /
+    config = yaml.safe_load((legacy_config_root /
         'fs_gate_mechanism_diagnostics_100f.yaml').read_text())
     baseline = retained_experiment_config()
     assert config['data']['extra_dataset_kwargs']['num_frames'] == 100
@@ -5653,7 +5655,7 @@ def test_gate_diagnostic_entry_loads_native_resolved_yaml_lists():
     from omegaconf import OmegaConf
     from libgs.utils.config import to_structured
     entry = importlib.import_module('scripts.diagnose_binary_gates')
-    path = project_root / 'config' / 'fs_gate_mechanism_diagnostics_100f.yaml'
+    path = legacy_config_root / 'fs_gate_mechanism_diagnostics_100f.yaml'
     values = OmegaConf.load(path).module.gate_diagnostics
     direct, unused = to_structured(values, GD.GateDiagnosticsConfig)
     assert not unused
@@ -5787,8 +5789,8 @@ def joint_diagnostic_fixture():
 
 def test_joint_precision_yaml_keeps_main_parameters_and_has_32_restricted_candidates():
     import yaml
-    config = yaml.safe_load((project_root / 'config/fs_joint_precision_mechanism_100f.yaml').read_text())
-    original = yaml.safe_load((project_root / 'config/fs_gate_mechanism_diagnostics_100f.yaml').read_text())
+    config = yaml.safe_load((legacy_config_root / 'fs_joint_precision_mechanism_100f.yaml').read_text())
+    original = yaml.safe_load((legacy_config_root / 'fs_gate_mechanism_diagnostics_100f.yaml').read_text())
     assert config['data'] == original['data'] and config['trainer'] == original['trainer']
     assert config['module']['storage_aware_binary'] == original['module']['storage_aware_binary']
     diagnostics = GD.GateDiagnosticsConfig(**config['module']['gate_diagnostics'])
@@ -5846,7 +5848,7 @@ def test_joint_candidate_fits_share_private_views_and_check_views_do_not_fit():
 def test_crossfold_feedback_protocol_and_summary_keep_check_views_held_out():
     module = importlib.import_module('scripts.replay_joint_feedback_crossfold')
     protocol = module.load_protocol(
-        project_root / 'config/fs_joint_feedback_crossfold_3nodes.yaml')
+        legacy_config_root / 'fs_joint_feedback_crossfold_3nodes.yaml')
     assert len(protocol['nodes']) == 3 and protocol['expected_candidate_count'] == 32
     for fold in protocol['folds']:
         assert len(fold['fit_camera_names']) == len(fold['check_camera_names']) == 10
@@ -5886,7 +5888,7 @@ def test_crossfold_feedback_protocol_and_summary_keep_check_views_held_out():
 def test_crossfold_balanced_plans_use_each_fit_view_twice_and_swap_roles():
     module = importlib.import_module('scripts.replay_joint_feedback_crossfold')
     protocol = module.load_protocol(
-        project_root / 'config/fs_joint_feedback_crossfold_3nodes.yaml')
+        legacy_config_root / 'fs_joint_feedback_crossfold_3nodes.yaml')
     base = asdict(joint_diagnostic_fixture()[1])
     base.update(stop_parent_precision_bits=[8, 12, 16, 24, 32],
                 refine_parent_precision_bits=[8, 12, 16, 24, 32],
@@ -5969,7 +5971,7 @@ def test_joint_feedback_transaction_learns_hard_choices_and_rolls_back_exact_sta
 def test_joint_feedback_continuation_protocol_balances_future_views():
     module = importlib.import_module('scripts.continue_joint_feedback_pair')
     protocol = module.load_protocol(
-        project_root / 'config/fs_joint_feedback_continuation_pair.yaml')
+        legacy_config_root / 'fs_joint_feedback_continuation_pair.yaml')
     assert [(row['frame'], row['step']) for row in protocol['nodes']] == [(5, 120), (99, 180)]
     for frame, start, current, cycles in ((5, 120, 'cam06.png', 4),
                                           (99, 180, 'cam13.png', 1)):
