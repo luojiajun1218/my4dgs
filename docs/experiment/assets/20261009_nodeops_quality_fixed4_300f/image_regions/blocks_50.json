@@ -1,0 +1,74 @@
+[
+  {
+    "first": 1,
+    "last": 50,
+    "means": {
+      "whole_psnr": 34.00637775507634,
+      "dog_psnr": 35.35646287706721,
+      "face_psnr": 34.98136686228126,
+      "hands_torch_psnr": 33.49847950984798,
+      "pan_flame_psnr": 32.071441258406765,
+      "upper_blinds_psnr": 33.94397799834546
+    }
+  },
+  {
+    "first": 51,
+    "last": 100,
+    "means": {
+      "whole_psnr": 33.37086575790178,
+      "dog_psnr": 33.025316329954805,
+      "face_psnr": 33.86146231704897,
+      "hands_torch_psnr": 30.48633121382967,
+      "pan_flame_psnr": 29.5744023987833,
+      "upper_blinds_psnr": 34.51166557739845
+    }
+  },
+  {
+    "first": 101,
+    "last": 150,
+    "means": {
+      "whole_psnr": 33.22098488449283,
+      "dog_psnr": 33.60391508637574,
+      "face_psnr": 33.854880043237564,
+      "hands_torch_psnr": 29.270889413198816,
+      "pan_flame_psnr": 27.87691599500878,
+      "upper_blinds_psnr": 34.77002755267361
+    }
+  },
+  {
+    "first": 151,
+    "last": 200,
+    "means": {
+      "whole_psnr": 32.323742935805214,
+      "dog_psnr": 33.56008792406216,
+      "face_psnr": 30.852160680177462,
+      "hands_torch_psnr": 27.43007073226926,
+      "pan_flame_psnr": 25.144513635619525,
+      "upper_blinds_psnr": 34.57882976392323
+    }
+  },
+  {
+    "first": 201,
+    "last": 250,
+    "means": {
+      "whole_psnr": 32.72332138462477,
+      "dog_psnr": 33.693587704150424,
+      "face_psnr": 31.260765384486863,
+      "hands_torch_psnr": 27.969222821209623,
+      "pan_flame_psnr": 27.15150662554518,
+      "upper_blinds_psnr": 33.705832743166376
+    }
+  },
+  {
+    "first": 251,
+    "last": 299,
+    "means": {
+      "whole_psnr": 31.87213426536493,
+      "dog_psnr": 34.398929045542275,
+      "face_psnr": 31.931893716829876,
+      "hands_torch_psnr": 26.74836634467323,
+      "pan_flame_psnr": 23.90908922503962,
+      "upper_blinds_psnr": 33.992129259409005
+    }
+  }
+]

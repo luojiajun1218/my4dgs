@@ -1,0 +1,194 @@
+# 同一共享首帧、视角与300步预算；第100步提出候选，之后共同学习gate。
+# 节点操作编码；拆分每侧至少6个观测GS；关闭的新拆分在写码流前移除。
+# 本轮先验证拆分，合并与交换关闭；storage权重0.005，优先画质。
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+data:
+  eval_test: true
+  eval_train: false
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+  extra_dataset_kwargs:
+    num_frames: 6
+  first_frame_eval_train: false
+  resolution: -1
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak
+  shuffle: true
+  split_train_test: true
+  training_camera_names: null
+  training_view_seed: 0
+  validation_camera_names: null
+  white_background: false
+  expected_image_size:
+  - 1600
+  - 1199
+detect_anomaly: false
+experiment_name: fs_nodeops_split_v4_smoke6_20261009
+gui_ip: 127.0.0.1
+gui_port: 6210
+mode: train
+module:
+  deformation:
+    densify_grad_threshold: 0.00015
+    densify_interval: 40
+    num_stage1_steps: 200
+    opacity_threshold: 0.01
+  full_eval: true
+  gaussian_stage2:
+    feature_lr: 0.0375
+    opacity_lr: 0.75
+    percent_dense: 0.01
+    position_lr_delay_mult: 0.01
+    position_lr_final: 2.4e-05
+    position_lr_init: 0.0024
+    position_lr_max_steps: 15000
+    rotation_lr: 0.015
+    scaling_lr: 0.075
+  lambda_deform: 0.0
+  lambda_dssim: 0.2
+  lpips_required: true
+  motion_mode: common_contrast_binary
+  num_saving_images: 5
+  quantized_diagnostics:
+    actual_motion_enabled: true
+    control_quality_camera_names:
+    - cam01.png
+    - cam17.png
+    - cam18.png
+    - cam19.png
+    - cam20.png
+    control_quality_enabled: false
+    deletion_damage_enabled: false
+    deletion_damage_every_n_frames: 1
+    deletion_damage_view_name: cam00.png
+    gradient_steps: []
+    prediction_quality_enabled: true
+    rotation_radian_thresholds:
+    - 0.0
+    - 0.001
+    - 0.01
+    translation_extent_thresholds:
+    - 0.0
+    - 1.0e-05
+    - 0.0001
+    - 0.001
+  random_background: false
+  renderer:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug: false
+    debug_from: -1
+  saving_gs_frames:
+  - 1
+  - 5
+  saving_gs_steps: []
+  selective_diagnostics_config: null
+  sh_degree: 1
+  render_attribute_cache: true
+  gate_diagnostics:
+    enabled: false
+  common_contrast_binary:
+    adam_betas:
+    - 0.9
+    - 0.999
+    adam_eps: 1.0e-08
+    clone_sigma_scale: 2.0
+    dense_fit_steps: 100
+    densification_stats_steps: 30
+    enable_incremental: true
+    enable_learned_gates: true
+    gate_compress_steps: 80
+    gate_hard_threshold: 0.5
+    gate_lr: 0.02
+    gate_policy: learned
+    gate_refine_steps: 20
+    gate_temperature_end: 1.0
+    gate_temperature_start: 1.0
+    gs_activity_loss_weight: 0.0
+    gs_rotation_lr: 0.0001
+    gs_translation_lr: 0.0001
+    incremental_steps: 100
+    initial_gate_logit: 0.0
+    m_fine_sharing: false
+    m_hard_forward: false
+    max_new_gaussians: null
+    max_retained_gaussians: 200
+    motion_gradient_mode: all_split
+    motion_init_decay: 0.0
+    motion_rotation_step_rad: 0.01
+    motion_steps: 200
+    motion_xyz_step_extent: 0.001
+    new_logscale_step: 0.001
+    new_max_screen_size: 20.0
+    new_opacity_step: 0.01
+    new_rotation_step: 0.001
+    new_sh_step: 0.001
+    new_xyz_step_extent: 1.0e-05
+    opacity_keep_threshold: 0.01
+    opacity_support_temperature: 0.05
+    rebase_on_hardening: false
+    refine_lr_scale: 0.3
+    region_rotation_lr: 5.0e-05
+    region_translation_lr: 0.0005
+    reset_keep_gate_priors: false
+    shared_warmup_steps: 0
+    storage_loss_weight: 0.005
+    storage_only: true
+    storage_ramp_steps: 20
+    storage_warmup_steps: 100
+    tree_rebuild_interval: 5
+    tree_rebuild_neighbors: 3
+    motion_export_format: sparse_parameters
+    coarse_region_gs: 96
+    min_child_gs: 12
+    max_motion_levels: 4
+    coarse_fit_steps: 50
+    gate_adam_eps: 1.0e-15
+    rate_support_temperature: 0.1
+    cache_static_layout: true
+    cache_frozen_storage: true
+    fixed_motion_bits: 16
+    translation_step_extent: 1.0e-05
+    rotation_step_rad: 0.0001
+    force_all_gates_open: false
+    component_modes: true
+    direct_tree_enabled: true
+    direct_initial_levels: 3
+    direct_update_interval: 5
+    direct_candidate_windows: 0
+    direct_neighbors: 3
+    direct_max_trial_splits: null
+    direct_node_budget: 1000000
+    direct_gradient_split_enabled: true
+    direct_split_camera_names:
+    - cam01.png
+    - cam05.png
+    - cam10.png
+    - cam15.png
+    - cam20.png
+    direct_split_min_visible_views: 2
+    direct_split_top_k: null
+    direct_split_candidate_fraction: 0.3
+    direct_split_cluster_iterations: 20
+    direct_split_position_weight: 1.0
+    direct_split_gradient_weight: 1.0
+    direct_edit_encoding: node_ops
+    direct_proposal_step: 100
+    direct_split_min_child_gs: 6
+    direct_enable_merges: false
+    direct_merge_max_disagreement: 0.001
+    direct_prune_inactive_splits: true
+output_dir: output
+quiet: false
+random_seed: 0
+trainer:
+  cache_data_on_device: true
+  first_frame_testing_steps: []
+  num_incr_steps: 300
+  num_init_steps: 15000
+  saving_ckpt_frames:
+  - 1
+  - 5
+  saving_ckpt_steps: []
+  selective_console_mode: compact
+  testing_steps: []

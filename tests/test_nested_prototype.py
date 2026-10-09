@@ -50,6 +50,10 @@ MC = importlib.import_module('pipeline.ReCon-GS.model.motion_clustering')
 SL_CODEC = importlib.import_module('pipeline.ReCon-GS.model.sparse_layout_codec')
 GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
 GAUSS = importlib.import_module('pipeline.ReCon-GS.model.gaussian')
+SPLIT_SCORES = importlib.import_module('pipeline.ReCon-GS.model.split_region_scores')
+DIRECT_TREE = importlib.import_module('pipeline.ReCon-GS.model.direct_tree')
+DIRECT_TRANSACTION = importlib.import_module('pipeline.ReCon-GS.direct_transaction')
+NODE_EDITS = importlib.import_module('pipeline.ReCon-GS.model.tree_edit_codec')
 
 
 class WorkerOnlyPairView(SimpleNamespace):
@@ -6676,6 +6680,508 @@ def test_fixed_gate_value_states_change_only_declared_hard_choices_and_children(
             if name in ('c', 'd') and depth == level:
                 allowed[node] = True
             assert not bool((difference & ~allowed).any())
+
+
+def test_split_region_scores_average_visible_views_before_norm():
+    gradients = torch.tensor([
+        [[2., 0., 0.], [2., 0., 0.], [float('nan'), 0., 0.]],
+        [[-2., 0., 0.], [100., 0., 0.], [4., 0., 0.]],
+        [[0., 0., 0.], [6., 0., 0.], [8., 0., 0.]],
+    ], dtype=torch.float64)
+    visible = torch.tensor([[True, True, True], [True, False, True], [False, True, True]])
+    evidence = SPLIT_SCORES.average_position_gradients(
+        gradients, visible, min_visible_views=2)
+    torch.testing.assert_close(evidence.mean,
+        torch.tensor([[0., 0., 0.], [4., 0., 0.], [6., 0., 0.]], dtype=torch.float64),
+        rtol=0, atol=0)
+    assert evidence.visible_views.tolist() == [2, 2, 2]
+    assert evidence.supported.tolist() == [True, True, True]
+    assert not evidence.mean.requires_grad
+
+
+def test_split_region_scores_do_not_cancel_opposite_gs_gradients():
+    gradients = torch.tensor([[[3., 0., 0.], [-3., 0., 0.],
+                               [0., 2., 0.], [0., 2., 0.]]], dtype=torch.float64)
+    evidence = SPLIT_SCORES.average_position_gradients(
+        gradients, torch.ones(1, 4, dtype=torch.bool), min_visible_views=1)
+    owners = torch.tensor([0, 0, 1, 1])
+    scores = SPLIT_SCORES.score_split_regions(evidence, owners, region_count=3)
+    torch.testing.assert_close(scores.score, torch.tensor([3., 2., 0.], dtype=torch.float64),
+                               rtol=0, atol=0)
+    assert scores.total_gs.tolist() == [2, 2, 0]
+    assert scores.supported_gs.tolist() == [2, 2, 0]
+
+
+def test_split_region_scores_preserve_unknown_support_and_normalize_size():
+    gradients = torch.tensor([[[4., 0., 0.], [4., 0., 0.], [4., 0., 0.],
+                               [4., 0., 0.], [100., 0., 0.]]], dtype=torch.float64)
+    visible = torch.tensor([[True, True, True, True, False]])
+    evidence = SPLIT_SCORES.average_position_gradients(gradients, visible, min_visible_views=1)
+    scores = SPLIT_SCORES.score_split_regions(evidence,
+        torch.tensor([0, 1, 1, 1, 0]), region_count=3)
+    torch.testing.assert_close(scores.score, torch.tensor([4., 4., 0.], dtype=torch.float64),
+                               rtol=0, atol=0)
+    assert scores.total_gs.tolist() == [2, 3, 0]
+    assert scores.supported_gs.tolist() == [1, 3, 0]
+    selected = SPLIT_SCORES.select_split_regions(scores,
+        torch.tensor([True, True, True]), top_k=2)
+    assert selected.tolist() == [0, 1]
+    assert SPLIT_SCORES.select_split_regions(scores,
+        torch.tensor([False, True, True]), top_k=2).tolist() == [1]
+    assert SPLIT_SCORES.select_split_regions(scores,
+        torch.ones(3, dtype=torch.bool), top_k=0).numel() == 0
+
+
+def gradient_split_fixture(**overrides):
+    import yaml
+    values = yaml.safe_load((project_root / 'config' /
+        'fs_gradient_cluster_tree_30f.yaml').read_text())['module']['common_contrast_binary']
+    # Small deterministic fixture budgets, separate from experiment settings.
+    values.update(coarse_region_gs=12, min_child_gs=1, coarse_fit_steps=2,
+        dense_fit_steps=4, gate_compress_steps=4, gate_refine_steps=2,
+        motion_steps=10, incremental_steps=0, enable_incremental=False,
+        storage_warmup_steps=4, storage_ramp_steps=1, densification_stats_steps=2,
+        direct_candidate_windows=0, direct_split_cluster_iterations=8,
+        direct_split_top_k=2, direct_max_trial_splits=2)
+    values.update(overrides)
+    raw = residual_raw_fixture(48)
+    motion = CC.CommonContrastMotion(CC.CommonContrastConfig(**values))
+    motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    motion.last_step = motion.config.dense_fit_steps + motion.config.gate_compress_steps
+    return raw, motion
+
+
+def test_gradient_split_clustering_scales_blocks_and_preserves_unknowns():
+    xyz = torch.tensor([[-3., 0., 0.], [-2., 0., 0.], [-1., 0., 0.],
+                        [1., 0., 0.], [2., 0., 0.], [3., 0., 0.], [9., 0., 0.]],
+                       dtype=torch.float64)
+    gradients = torch.tensor([[[-2., 0., 0.]] * 3 + [[2., 0., 0.]] * 3 +
+                              [[float('nan'), 0., 0.]]], dtype=torch.float64)
+    evidence = SPLIT_SCORES.average_position_gradients(gradients,
+        torch.ones(1, 7, dtype=torch.bool), min_visible_views=1)
+    kwargs = dict(min_child_gs=2, iterations=10, position_weight=1., gradient_weight=1.)
+    labels = SPLIT_SCORES.cluster_split_region(xyz, evidence, **kwargs)
+    assert labels.tolist() == [0, 0, 0, 1, 1, 1, 1]
+    scaled = SPLIT_SCORES.PositionGradientEvidence(evidence.mean * .001,
+        evidence.visible_views, evidence.supported)
+    again = SPLIT_SCORES.cluster_split_region(xyz * 1000 + 20, scaled, **kwargs)
+    assert torch.equal(labels, again)
+    assert torch.equal(labels, SPLIT_SCORES.cluster_split_region(xyz, evidence, **kwargs))
+
+
+def test_split_region_scores_allow_unlimited_or_fractional_candidates():
+    scores = SPLIT_SCORES.SplitRegionScores(
+        torch.tensor([6., 5., 4., 3., 2., 1., 100., 0.]),
+        torch.ones(8, dtype=torch.long), torch.ones(8, dtype=torch.long))
+    legal = torch.tensor([True] * 6 + [False, True])
+    selected = SPLIT_SCORES.select_split_regions(scores, legal, top_k=None)
+    assert selected.tolist() == [0, 1, 2, 3, 4, 5]
+    selected = SPLIT_SCORES.select_split_regions(scores, legal, top_k=None, candidate_fraction=.5)
+    assert selected.tolist() == [0, 1, 2]
+    larger = SPLIT_SCORES.SplitRegionScores(torch.arange(12, 0, -1).float(),
+        torch.ones(12, dtype=torch.long), torch.ones(12, dtype=torch.long))
+    assert SPLIT_SCORES.select_split_regions(larger,
+        torch.ones(12, dtype=torch.bool), top_k=None, candidate_fraction=.5).numel() == 6
+
+
+def test_gradient_split_more_than_two_regions_produce_decodable_edits():
+    raw, source = gradient_split_fixture(direct_split_top_k=None,
+                                         direct_max_trial_splits=None,
+                                         direct_split_candidate_fraction=.5)
+    gradient = torch.zeros(2, len(raw['xyz']), 3)
+    gradient[:, :, 0] = torch.arange(1, len(raw['xyz']) + 1).float()
+    evidence = SPLIT_SCORES.average_position_gradients(gradient,
+        torch.ones(2, len(raw['xyz']), dtype=torch.bool), min_visible_views=2)
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is not None
+    selection = report['split_selection']
+    assert len(selection['selected_regions']) == math.ceil(selection['eligible_regions'] * .5)
+    applied = [record for record in selection['selected_regions'] if record.get('edit_applied')]
+    assert len(applied) > 2 and candidate.counts[-1] == 2 * len(applied)
+    xyz, rotation = candidate(candidate.config.motion_steps)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'many_splits.bin'
+        moved = dict(raw, xyz=xyz, rotation=rotation)
+        candidate.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(moved), previous_count=len(xyz),
+            deleted_count=0, birth_count=0)
+        decoded, _ = CC.CommonContrastDecoder(candidate.config).advance(path, None, raw)
+        assert Q.reference_digest(decoded) == Q.reference_digest(moved)
+
+
+def test_gradient_split_unlimited_neighbor_windows_are_not_capped_at_two():
+    _, source = gradient_split_fixture(direct_gradient_split_enabled=False,
+        direct_candidate_windows=None, direct_max_trial_splits=None, direct_split_top_k=None)
+    raw = residual_raw_fixture(96)
+    source = CC.CommonContrastMotion(copy.deepcopy(source.config))
+    source.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    source.last_step = source.config.dense_fit_steps + source.config.gate_compress_steps
+    candidate, report = DIRECT_TREE.propose_local_batch(source)
+    assert candidate is not None and len(report['windows']) > 2
+
+
+def test_gradient_split_clustering_rejects_tiny_child_and_missing_evidence():
+    xyz = torch.zeros(6, 3, dtype=torch.float64)
+    gradients = torch.tensor([[[-1., 0., 0.]] * 5 + [[1., 0., 0.]]], dtype=torch.float64)
+    evidence = SPLIT_SCORES.average_position_gradients(gradients,
+        torch.ones(1, 6, dtype=torch.bool), min_visible_views=1)
+    kwargs = dict(min_child_gs=2, iterations=10, position_weight=1., gradient_weight=1.)
+    assert SPLIT_SCORES.cluster_split_region(xyz, evidence, **kwargs) is None
+    evidence.supported[2:] = False
+    assert SPLIT_SCORES.cluster_split_region(xyz, evidence, **kwargs) is None
+
+
+def test_gradient_split_candidates_are_independent_and_roundtrip_on_cuda_or_cpu():
+    for device in ('cpu', 'cuda') if torch.cuda.is_available() else ('cpu',):
+        raw, source = gradient_split_fixture()
+        raw = {name: value.to(device) for name, value in raw.items()}
+        source.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+        source.last_step = source.config.dense_fit_steps + source.config.gate_compress_steps
+        with torch.no_grad():
+            source.root_translation[:] = source.base_xyz.new_tensor([.03, -.02, .01])
+            source.root_rotation[:] = source.base_xyz.new_tensor([.04, -.02, .03])
+            for logit in source.refine_logits:
+                logit.fill_(-2.)
+        gradients = torch.zeros(2, len(raw['xyz']), 3, device=device)
+        gradients[:, :, 0] = torch.linspace(1., 2., len(raw['xyz']), device=device)
+        evidence = SPLIT_SCORES.average_position_gradients(gradients,
+            torch.ones(2, len(raw['xyz']), device=device, dtype=torch.bool), min_visible_views=2)
+        xyz, _ = source(source.last_step)
+        before = source(source.config.motion_steps)
+        candidate, report = DIRECT_TREE.propose_local_batch(source,
+            split_xyz=xyz, split_evidence=evidence)
+        assert candidate is not None
+        assert len(report['split_selection']['selected_regions']) == 2
+        assert all(record['actions'] == ['gradient_cluster_terminal_split']
+                   for record in report['windows'])
+        assert candidate.counts[-1] == 4
+        assert all(record['child_gs'][0] >= source.config.min_child_gs and
+                   record['child_gs'][1] >= source.config.min_child_gs
+                   for record in report['split_selection']['selected_regions'])
+        xyz, rotation = candidate(candidate.config.motion_steps)
+        torch.testing.assert_close(xyz, before[0], rtol=0, atol=1e-4)
+        torch.testing.assert_close(rotation, before[1], rtol=0, atol=1e-4)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'gradient_tree.bin'
+            moved = dict(raw, xyz=xyz, rotation=rotation)
+            candidate.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+                post_motion_digest=Q.reference_digest(moved), previous_count=len(xyz),
+                deleted_count=0, birth_count=0)
+            decoder = CC.CommonContrastDecoder(candidate.config)
+            decoded, _ = decoder.advance(path, None, raw)
+            assert Q.reference_digest(decoded) == Q.reference_digest(moved)
+            assert round(float(sum(candidate.storage_parts(candidate.config.motion_steps, hard=True).values()))) == path.stat().st_size
+            restored = CC.CommonContrastMotion(copy.deepcopy(candidate.config))
+            restored.restore(candidate.capture())
+            assert restored._structural_payload() == candidate._structural_payload()
+            candidate.committed = True
+            candidate.register_materialized_layout(xyz, torch.empty(0, device=device, dtype=torch.long))
+            candidate.setup(xyz, rotation, 1., frame_index=2,
+                previous_rows=torch.arange(len(xyz), device=device), previous_new_count=0)
+            assert not candidate.tree_rebuilt and candidate.counts[-1] == 4
+            xyz, rotation = candidate(candidate.config.motion_steps)
+            path2 = Path(directory) / 'next.bin'
+            candidate.export_motion(path2, frame_index=2, previous_state_digest=Q.reference_digest(decoded),
+                post_motion_digest=Q.reference_digest(dict(decoded, xyz=xyz, rotation=rotation)),
+                previous_count=len(xyz), deleted_count=0, birth_count=0)
+            decoded, _ = decoder.advance(path2, None, decoded)
+            assert SAB.layout_digest(decoder.materialized_layout) == SAB.layout_digest(candidate.active_layout)
+
+
+def test_gradient_split_no_signal_and_node_budget_make_no_proposal():
+    raw, source = gradient_split_fixture()
+    gradients = torch.zeros(2, len(raw['xyz']), 3)
+    evidence = SPLIT_SCORES.average_position_gradients(gradients,
+        torch.ones(2, len(raw['xyz']), dtype=torch.bool), min_visible_views=2)
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is None and not report['split_selection']['selected_regions']
+    source.config.direct_node_budget = sum(source.counts)
+    evidence.mean.fill_(1.)
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is None and report['split_selection']['eligible_regions'] == 0
+
+
+def test_gradient_split_component_modes_omit_blocks_and_decode_old_version():
+    raw, motion = gradient_split_fixture(direct_tree_enabled=False,
+                                         direct_gradient_split_enabled=False)
+    with torch.no_grad():
+        for logit in motion.refine_logits:
+            logit.fill_(-2.)
+    with tempfile.TemporaryDirectory() as directory:
+        for translation, rotation in ((True, False), (False, True), (True, True), (False, False)):
+            with torch.no_grad():
+                motion.root_translation.zero_()
+                motion.root_rotation.zero_()
+                if translation:
+                    motion.root_translation[:, 0] = .03
+                if rotation:
+                    motion.root_rotation[:, 2] = .04
+            xyz, q = motion(motion.config.motion_steps)
+            moved = dict(raw, xyz=xyz, rotation=q)
+            sizes = []
+            for component_modes in (True, False):
+                motion.config.component_modes = component_modes
+                path = Path(directory) / f'{translation}_{rotation}_{component_modes}.bin'
+                motion.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+                    post_motion_digest=Q.reference_digest(moved), previous_count=len(xyz),
+                    deleted_count=0, birth_count=0)
+                dx, dq, *_ = motion.decode_motion(path, raw['xyz'], raw['rotation'],
+                                                  motion.config, motion.active_layout)
+                assert Q.reference_digest(dict(raw, xyz=dx, rotation=dq)) == Q.reference_digest(moved)
+                assert round(float(sum(motion.storage_parts(motion.config.motion_steps, hard=True).values()))) == path.stat().st_size
+                sizes.append(path.stat().st_size)
+            if translation != rotation:
+                assert sizes[0] < sizes[1]
+
+
+def test_gradient_split_probe_restores_state_and_uses_only_image_world_gradients():
+    torch.manual_seed(20261008)
+    parameter = torch.nn.Parameter(torch.zeros(3, 3))
+    parameter.grad = torch.full_like(parameter, 7.)
+    cfg = SimpleNamespace(direct_split_camera_names=['cam01.png', 'cam02.png'],
+                          direct_split_min_visible_views=2)
+    class Motion:
+        config = cfg
+        last_step = 10
+        def __call__(self, step):
+            return parameter, torch.tensor([[1., 0., 0., 0.]]).expand(3, -1)
+    class Data:
+        config = SimpleNamespace(training_camera_names=None, validation_camera_names=None)
+        _camera_indices = staticmethod(DATA.DataModule._camera_indices)
+        def get_train_dataset(self):
+            return SimpleNamespace(items=[SimpleNamespace(path=Path(name))
+                                          for name in cfg.direct_split_camera_names])
+        def train_dataloader(self, random, indices):
+            torch.rand(1)
+            return [SimpleNamespace(path=Path(name), image=torch.ones(3, 1, 3),
+                to=lambda device, name=name: SimpleNamespace(path=Path(name), image=torch.ones(3, 1, 3)))
+                for name in cfg.direct_split_camera_names]
+    sentinel_xyz, sentinel_rotation = object(), object()
+    gs = SimpleNamespace(rigid_xyz=sentinel_xyz, rigid_rotation=sentinel_rotation)
+    original_model = object()
+    class Renderer:
+        gaussians = original_model
+        def __call__(self, view, background):
+            assert self.gaussians is gs and gs.rigid_xyz.is_leaf and gs.rigid_xyz.requires_grad
+            torch.testing.assert_close(gs.rigid_xyz, parameter.detach(), rtol=0, atol=0)
+            return dict(render=gs.rigid_xyz.T[:, None, :], visibility_filter=torch.ones(3, dtype=torch.bool))
+    subject = SimpleNamespace(residual_motion=Motion(), datamodule=Data(),
+        renderer=Renderer(), gaussians=gs, config=SimpleNamespace(lambda_dssim=0.),
+        background=torch.zeros(3), device='cpu')
+    rng = torch.random.get_rng_state().clone()
+    with patch.object(DIRECT_TRANSACTION, 'ssim', lambda image, target: image.sum() * 0 + 1):
+        xyz, evidence, report = DIRECT_TRANSACTION.collect_split_position_gradients(subject)
+    torch.testing.assert_close(evidence.mean, torch.full((3, 3), -1. / 9), rtol=0, atol=1e-8)
+    assert evidence.supported.all() and report['cameras'] == cfg.direct_split_camera_names
+    assert torch.equal(rng, torch.random.get_rng_state())
+    assert subject.renderer.gaussians is original_model
+    assert gs.rigid_xyz is sentinel_xyz and gs.rigid_rotation is sentinel_rotation
+    torch.testing.assert_close(parameter.grad, torch.full_like(parameter, 7.), rtol=0, atol=0)
+    torch.testing.assert_close(xyz, parameter.detach(), rtol=0, atol=0)
+    with patch.object(DIRECT_TRANSACTION, 'ssim', side_effect=RuntimeError('probe failure')):
+        try:
+            DIRECT_TRANSACTION.collect_split_position_gradients(subject)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('Probe failure did not propagate')
+    assert subject.renderer.gaussians is original_model
+    assert gs.rigid_xyz is sentinel_xyz and gs.rigid_rotation is sentinel_rotation
+    cfg.direct_split_camera_names = ['cam00.png']
+    try:
+        DIRECT_TRANSACTION.collect_split_position_gradients(subject)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Held-out scoring camera was accepted')
+
+
+def test_gradient_split_config_requires_explicit_parameters():
+    _, source = gradient_split_fixture()
+    for changes in (dict(direct_split_min_visible_views=6), dict(direct_split_top_k=3),
+                    dict(direct_split_candidate_fraction=0.), dict(direct_split_candidate_fraction=1.1),
+                    dict(direct_split_position_weight=0.), dict(direct_split_cluster_iterations=None),
+                    dict(direct_tree_enabled=False)):
+        values = asdict(source.config)
+        values.update(changes)
+        try:
+            CC.CommonContrastConfig(**values).validate()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'Invalid gradient split settings accepted: {changes}')
+
+
+def node_edit_fixture(**overrides):
+    settings = dict(direct_edit_encoding='node_ops', direct_prune_inactive_splits=True,
+                    direct_proposal_step=4, direct_split_min_child_gs=1,
+                    direct_enable_merges=False)
+    settings.update(overrides)
+    raw, source = gradient_split_fixture(**settings)
+    source.last_step = source.config.dense_fit_steps
+    gradient = torch.zeros(2, len(raw['xyz']), 3)
+    gradient[:, :, 0] = torch.linspace(1., 2., len(raw['xyz']))
+    evidence = SPLIT_SCORES.average_position_gradients(gradient,
+        torch.ones(2, len(raw['xyz']), dtype=torch.bool), min_visible_views=2)
+    return raw, source, evidence
+
+
+def test_node_edit_codec_roundtrips_packed_membership_and_rejects_corruption():
+    operations = [dict(kind='swap', left=4, right=10000), dict(kind='merge', a=2, b=7),
+                  dict(kind='split', level=2, node=41, labels=[0, 1, 0, 1, 0, 1, 1, 0, 1])]
+    wire = NODE_EDITS.encode_node_edits(operations)
+    assert NODE_EDITS.decode_node_edits(wire) == operations
+    assert len(wire) < 30
+    for bad in (wire[:-1], wire + b'\x00', b'NED1\x01\x7f', b'NED1\x01\x03\x02\x01\x08'):
+        try:
+            NODE_EDITS.decode_node_edits(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Corrupt node edit was decoded')
+
+
+def test_node_edit_candidate_has_trainable_gates_and_exact_v4_cost():
+    raw, source, evidence = node_edit_fixture()
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate.hard_masks is None
+    candidate.prepare_step(candidate.config.dense_fit_steps + 1)
+    assert all(parameter.requires_grad for parameter in candidate.refine_logits)
+    cost = candidate.storage_parts(candidate.config.dense_fit_steps + 1)['structure_edit_bytes']
+    gradients = torch.autograd.grad(cost, list(candidate.refine_logits), allow_unused=True)
+    assert any(gradient is not None and bool(gradient.abs().sum() > 0) for gradient in gradients)
+    wire = candidate._structural_payload()
+    assert wire.startswith(NODE_EDITS.MAGIC)
+    replay = DIRECT_TREE.apply_layout_edits(source.active_layout, wire, raw['xyz'])
+    assert SAB.layout_digest(replay) == SAB.layout_digest(candidate.active_layout)
+    assert len(wire) < len(DIRECT_TREE.layout_edits(source.active_layout, candidate.active_layout))
+    xyz, rotation = candidate(candidate.config.motion_steps)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'v4.bin'
+        moved = dict(raw, xyz=xyz, rotation=rotation)
+        candidate.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(moved), previous_count=len(xyz), deleted_count=0, birth_count=0)
+        assert candidate.read_header(path)['codec'] == 'common_contrast_node_edits_v4'
+        decoded, _ = CC.CommonContrastDecoder(candidate.config).advance(path, None, raw)
+        assert Q.reference_digest(decoded) == Q.reference_digest(moved)
+        assert round(float(sum(candidate.storage_parts(candidate.config.motion_steps, hard=True).values()))) == path.stat().st_size
+        resumed = CC.CommonContrastMotion(copy.deepcopy(candidate.config))
+        resumed.restore(candidate.capture())
+        assert resumed._pending_edit_operations == candidate._pending_edit_operations
+        assert resumed._structural_payload() == wire
+
+
+def test_node_edit_pruning_removes_only_closed_new_routes_without_pose_change():
+    raw, source, evidence = node_edit_fixture()
+    candidate, _ = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    with torch.no_grad():
+        candidate.root_translation[:] = torch.tensor([.03, -.02, .01])
+        candidate.root_rotation[:] = torch.tensor([.04, -.02, .03])
+        candidate.contrast_translation[2][:, 0] = .002
+    candidate.hard_masks = dict(refine=[torch.ones(len(rows), dtype=torch.bool)
+                                       for rows in candidate.active_layout['refine_rows']])
+    first = candidate._pending_edit_operations[0]
+    position = candidate._cached_gate_positions[first['level']][first['node']]
+    candidate.hard_masks['refine'][first['level']][position] = False
+    candidate.last_step = candidate.config.motion_steps
+    before = candidate(candidate.config.motion_steps)
+    pruned, report = DIRECT_TREE.prune_inactive_split_edits(candidate)
+    assert report['removed_splits'] == 1 and pruned.counts[-1] == 2
+    after = pruned(pruned.config.motion_steps)
+    torch.testing.assert_close(after[0], before[0], rtol=0, atol=0)
+    torch.testing.assert_close(after[1], before[1], rtol=0, atol=0)
+    assert len(pruned._pending_edit_operations) == 1
+    decoded_layout = DIRECT_TREE.apply_layout_edits(pruned._frame_coding_layout,
+        pruned._structural_payload(), raw['xyz'])
+    assert SAB.layout_digest(decoded_layout) == SAB.layout_digest(pruned.active_layout)
+
+
+def test_node_edit_merge_replay_matches_existing_topology_edits():
+    _, source, _ = node_edit_fixture(direct_gradient_split_enabled=False,
+        direct_candidate_windows=None, direct_enable_merges=True, direct_prune_inactive_splits=False)
+    raw = residual_raw_fixture(96)
+    source = CC.CommonContrastMotion(copy.deepcopy(source.config))
+    source.setup(raw['xyz'], raw['rotation'], 1., frame_index=1)
+    source.last_step = source.config.dense_fit_steps
+    candidate, _ = DIRECT_TREE.propose_local_batch(source)
+    operations = NODE_EDITS.decode_node_edits(candidate._structural_payload())
+    assert any(operation['kind'] == 'merge' for operation in operations)
+    replay = DIRECT_TREE.apply_layout_edits(source.active_layout,
+        candidate._structural_payload(), raw['xyz'])
+    assert SAB.layout_digest(replay) == SAB.layout_digest(candidate.active_layout)
+
+
+def test_node_edit_merge_disagreement_filters_incompatible_roots():
+    raw, source, evidence = node_edit_fixture(direct_candidate_windows=None,
+        direct_enable_merges=True, direct_merge_max_disagreement=.01)
+    with torch.no_grad():
+        source.root_translation[:, 0] = torch.arange(source.counts[0]) * .1
+    evidence.mean.zero_()
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is None
+
+
+def test_node_edit_warm_prior_opens_edited_paths_for_joint_gate_learning():
+    raw, source, evidence = node_edit_fixture(direct_candidate_gate_logit=1.)
+    candidate, _ = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    for operation in candidate._pending_edit_operations:
+        if operation['kind'] != 'split':
+            continue
+        level, node = operation['level'], operation['node']
+        while level >= 0:
+            position = candidate._cached_gate_positions[level].get(node)
+            if position is not None:
+                assert float(candidate.refine_logits[level][position]) >= 1.
+            if level == 0:
+                break
+            node = int(candidate.parents[level - 1][node])
+            level -= 1
+    assert candidate.hard_masks is None
+
+
+def test_node_edit_four_level_fixed_control_bootstrap_decodes_identically():
+    raw, source, _ = node_edit_fixture(direct_initial_levels=4,
+                                      direct_gradient_split_enabled=False)
+    assert source.counts[-1] > 0
+    xyz, rotation = source(source.config.motion_steps)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'fixed4.bin'
+        source.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(dict(raw, xyz=xyz, rotation=rotation)),
+            previous_count=len(xyz), deleted_count=0, birth_count=0)
+        decoded, _ = CC.CommonContrastDecoder(source.config).advance(path, None, raw)
+        assert Q.reference_digest(decoded) == Q.reference_digest(dict(raw, xyz=xyz, rotation=rotation))
+
+
+def test_node_edit_swap_replay_matches_full_four_level_motion():
+    raw, source, _ = node_edit_fixture(direct_initial_levels=4,
+        direct_gradient_split_enabled=False, direct_candidate_windows=None,
+        direct_enable_merges=False)
+    with torch.no_grad():
+        source.contrast_translation[0][:, 0] = .04
+    candidate, _ = DIRECT_TREE.propose_local_batch(source)
+    assert candidate is not None
+    operations = NODE_EDITS.decode_node_edits(candidate._structural_payload())
+    assert any(operation['kind'] == 'swap' for operation in operations)
+    replay = DIRECT_TREE.apply_layout_edits(source.active_layout,
+        candidate._structural_payload(), raw['xyz'])
+    assert SAB.layout_digest(replay) == SAB.layout_digest(candidate.active_layout)
+    xyz, rotation = candidate(candidate.config.motion_steps)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'swap4.bin'
+        source_state = Q.reference_digest(raw)
+        target_state = Q.reference_digest(dict(raw, xyz=xyz, rotation=rotation))
+        candidate.export_motion(path, frame_index=1, previous_state_digest=source_state,
+            post_motion_digest=target_state, previous_count=len(xyz), deleted_count=0, birth_count=0)
+        decoded, _ = CC.CommonContrastDecoder(candidate.config).advance(path, None, raw)
+        assert Q.reference_digest(decoded) == target_state
 
 
 if __name__ == '__main__':

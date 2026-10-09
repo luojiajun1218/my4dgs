@@ -8,10 +8,12 @@ parent transform and consume neither a gate nor a contrast record.
 """
 
 from dataclasses import asdict, dataclass
+import copy
 import math
 from pathlib import Path
 import struct
 import time
+from typing import List, Optional
 
 import torch
 from torch import nn
@@ -48,6 +50,29 @@ class CommonContrastConfig(BinaryRefinementConfig):
     cache_static_layout: bool = True
     cache_frozen_storage: bool = True
     force_all_gates_open: bool = False
+    component_modes: bool = False  # v2: omit quantized-zero translation/rotation blocks
+    direct_tree_enabled: bool = False
+    direct_update_interval: int = 5
+    direct_candidate_windows: Optional[int] = None
+    direct_neighbors: int = 3
+    direct_max_trial_splits: Optional[int] = None
+    direct_initial_levels: int = 3
+    direct_node_budget: int = 1000000
+    direct_gradient_split_enabled: bool = False
+    direct_split_camera_names: Optional[List[str]] = None
+    direct_split_min_visible_views: Optional[int] = None
+    direct_split_top_k: Optional[int] = None
+    direct_split_candidate_fraction: float = 1.0
+    direct_split_cluster_iterations: Optional[int] = None
+    direct_split_position_weight: Optional[float] = None
+    direct_split_gradient_weight: Optional[float] = None
+    direct_edit_encoding: str = 'row_json'
+    direct_proposal_step: Optional[int] = None  # None preserves the late legacy proposal
+    direct_split_min_child_gs: Optional[int] = None  # None reuses initial-tree minimum
+    direct_enable_merges: bool = True
+    direct_merge_max_disagreement: Optional[float] = None
+    direct_prune_inactive_splits: bool = False
+    direct_candidate_gate_logit: float = 0.0  # Early-proposal prior on edited split paths
 
     def validate(self):
         self._validate_binary_config(max_levels=4, rebuild_interval=5)
@@ -62,9 +87,70 @@ class CommonContrastConfig(BinaryRefinementConfig):
                     not math.isfinite(value) or value <= 0):
                 raise ValueError(f'{name} must be finite and positive')
         for name in ('cache_static_layout', 'cache_frozen_storage',
-                     'force_all_gates_open'):
+                     'force_all_gates_open', 'component_modes', 'direct_tree_enabled',
+                     'direct_gradient_split_enabled', 'direct_enable_merges',
+                     'direct_prune_inactive_splits'):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f'{name} must be bool')
+
+        if self.direct_tree_enabled and not self.component_modes:
+            raise ValueError('direct tree v3 requires component_modes')
+        if self.direct_edit_encoding not in ('row_json', 'node_ops'):
+            raise ValueError('Unknown direct tree edit encoding')
+        if self.direct_proposal_step is not None:
+            value = self.direct_proposal_step
+            if (isinstance(value, bool) or not isinstance(value, int) or
+                    not self.dense_fit_steps <= value <= self.dense_fit_steps + self.gate_compress_steps):
+                raise ValueError('Proposal step must follow dense fit and precede motion refinement')
+        if self.direct_split_min_child_gs is not None:
+            value = self.direct_split_min_child_gs
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError('Split child minimum must be a positive integer')
+        if self.direct_merge_max_disagreement is not None:
+            value = self.direct_merge_max_disagreement
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError('Merge disagreement must be finite and nonnegative')
+        if self.direct_prune_inactive_splits and self.direct_edit_encoding != 'node_ops':
+            raise ValueError('Split pruning requires replayable node operations')
+        if not math.isfinite(self.direct_candidate_gate_logit):
+            raise ValueError('Candidate gate logit must be finite')
+        for name in ('direct_update_interval', 'direct_neighbors', 'direct_initial_levels', 'direct_node_budget'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f'{name} must be a positive integer')
+        for name, minimum in (('direct_candidate_windows', 0), ('direct_max_trial_splits', 1)):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < minimum):
+                raise ValueError(f'{name} must be None or an integer >= {minimum}')
+        if self.direct_tree_enabled and not 1 <= self.direct_initial_levels <= self.max_motion_levels:
+            raise ValueError('Initial tree depth exceeds the motion-level budget')
+        if self.direct_gradient_split_enabled:
+            if not self.direct_tree_enabled:
+                raise ValueError('Gradient split selection requires direct_tree_enabled')
+            names = self.direct_split_camera_names
+            if not names or len(set(names)) != len(names):
+                raise ValueError('Split scoring requires distinct training camera names')
+            self.direct_split_camera_names = list(names)
+            for name in ('direct_split_min_visible_views', 'direct_split_cluster_iterations'):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f'{name} must be a positive integer')
+            if self.direct_split_min_visible_views > len(names):
+                raise ValueError('Split observation requirement exceeds scoring view count')
+            top_k = self.direct_split_top_k
+            if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1):
+                raise ValueError('direct_split_top_k must be None or a positive integer')
+            fraction = self.direct_split_candidate_fraction
+            if (isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 < fraction <= 1):
+                raise ValueError('direct_split_candidate_fraction must be in (0, 1]')
+            if (top_k is not None and self.direct_max_trial_splits is not None and
+                    top_k > self.direct_max_trial_splits):
+                raise ValueError('Split top_k exceeds the local split budget')
+            for name in ('direct_split_position_weight', 'direct_split_gradient_weight'):
+                value = getattr(self, name)
+                if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                        not math.isfinite(value) or value <= 0):
+                    raise ValueError(f'{name} must be finite and positive')
 
 
 def _member_counts(layout):
@@ -137,7 +223,7 @@ def _principal_rotation_vector(value):
     return vector * scale
 
 
-def decompose_terminal_transforms(layout, terminal_rotation, terminal_delta):
+def decompose_terminal_transforms(layout, terminal_rotation, terminal_delta, affected_roots=None):
     """Exactly factor per-GS terminal transforms on the principal SO(3) branch.
 
     Every GS belonging to one terminal node must supply the same cumulative
@@ -149,6 +235,12 @@ def decompose_terminal_transforms(layout, terminal_rotation, terminal_delta):
     if terminal_rotation.shape != (index.shape[1], 4) or terminal_delta.shape != (index.shape[1], 3):
         raise ValueError('Terminal transforms must contain one cumulative pose per GS')
     occupancy, children, _, positions, binary, unary, weights = _effective_splits(layout)
+    root_owner = [torch.arange(counts[0], device=index.device)]
+    for parent in layout['parents']:
+        root_owner.append(root_owner[-1][parent])
+    selected = [set(range(count)) if affected_roots is None else
+                {node for node, root in enumerate(owner.cpu().tolist()) if root in affected_roots}
+                for count, owner in zip(counts, root_owner)]
     paths = [terminal_delta.new_ones(count) for count in counts]
     terminal = terminal_node_rows(layout, paths, selected_only=False)
     offsets = [0]
@@ -159,6 +251,8 @@ def decompose_terminal_transforms(layout, terminal_rotation, terminal_delta):
     known = [torch.zeros(count, device=terminal.device, dtype=torch.bool) for count in counts]
     for level, count in enumerate(counts):
         for node in range(count):
+            if node not in selected[level]:
+                continue
             rows = torch.where(terminal == offsets[level] + node)[0]
             if not len(rows):
                 continue
@@ -175,6 +269,8 @@ def decompose_terminal_transforms(layout, terminal_rotation, terminal_delta):
     contrasts = [terminal_delta.new_zeros(len(rows), 6) for rows in layout['refine_rows']]
     for level in reversed(range(len(counts) - 1)):
         for node in torch.where(occupancy[level])[0].tolist():
+            if node not in selected[level]:
+                continue
             child = [value for value in children[level][node]
                      if bool(occupancy[level + 1][value])]
             if not child:
@@ -278,10 +374,18 @@ class CommonContrastMotion(BinaryRefinementMotion):
             if (isinstance(frame_index, bool) or not isinstance(frame_index, int)
                     or frame_index < 1):
                 raise ValueError('Common/contrast setup requires a positive frame_index')
-            rebuild = old_layout is None or (frame_index - 1) % self.config.tree_rebuild_interval == 0
+            rebuild = old_layout is None or (not self.config.direct_tree_enabled and
+                (frame_index - 1) % self.config.tree_rebuild_interval == 0)
             if rebuild:
                 layout = stable_binary_forest(xyz, self.config.coarse_region_gs,
-                    self.config.min_child_gs, self.config.max_motion_levels)
+                    self.config.min_child_gs,
+                    self.config.direct_initial_levels if self.config.direct_tree_enabled else self.config.max_motion_levels)
+                if self.config.direct_tree_enabled:
+                    while len(layout['counts']) < self.config.max_motion_levels:
+                        layout['index'] = torch.cat((layout['index'], torch.full_like(layout['index'][:1], -1)))
+                        layout['counts'].append(0)
+                        layout['parents'].append(torch.empty(0, device=xyz.device, dtype=torch.long))
+                    layout = _binary_layout(layout['index'], layout['counts'], layout['parents'], xyz)
             else:
                 old_count = old_layout['index'].shape[1]
                 rows = (torch.arange(len(xyz), device=xyz.device) if previous_rows is None else
@@ -303,6 +407,10 @@ class CommonContrastMotion(BinaryRefinementMotion):
         started = time.perf_counter()
         self.previous_layout = _copy_layout(old_layout)
         self.active_layout = layout
+        self._frame_coding_layout = _copy_layout(layout)
+        self._frame_edit_payload = None
+        self._pending_edit_operations = None
+        self._node_edit_cost_cache = None
         self.materialized_layout = _copy_layout(layout)
         self.index, self.counts, self.parents = layout['index'], layout['counts'], layout['parents']
         self.extent = float(extent)
@@ -548,10 +656,16 @@ class CommonContrastMotion(BinaryRefinementMotion):
         gates = (self.refinement_masks(step) if gate_fixed else self.gate_probabilities(step))
         paths = self._paths([value.to(self.base_xyz) for value in gates])
         _, _, root_symbols, split_symbols, root_scaled, split_scaled = self._quantized_parameters()
-        root_support = self._support(root_scaled, root_symbols, support_differentiable)
+        def component_cost(scaled, symbols):
+            if not self.config.component_modes:
+                return self._support(scaled, symbols, support_differentiable) * 6
+            return 3 * (self._support(scaled[..., :3], symbols[..., :3], support_differentiable) +
+                        self._support(scaled[..., 3:], symbols[..., 3:], support_differentiable))
+
+        root_support = component_cost(root_scaled, root_symbols)
         bits = self.config.fixed_motion_bits
-        presence = paths[0].sum()
-        payload = (paths[0] * root_support * (6 * bits)).sum()
+        presence = paths[0].sum() * (2 if self.config.component_modes else 1)
+        payload = (paths[0] * root_support * bits).sum()
         flags = self.base_xyz.new_zeros(())
         for level, rows in enumerate(self.active_layout['refine_rows']):
             binary = self._cached_binary[level][rows].to(self.base_xyz)
@@ -559,14 +673,21 @@ class CommonContrastMotion(BinaryRefinementMotion):
             flags = flags + reach.sum()
             opened = gates[level].to(self.base_xyz)
             contrast_reach = reach * opened
-            presence = presence + contrast_reach.sum()
-            support = self._support(split_scaled[level], split_symbols[level],
-                                    support_differentiable)
-            payload = payload + (contrast_reach * support * (6 * bits)).sum()
+            presence = presence + contrast_reach.sum() * (2 if self.config.component_modes else 1)
+            support = component_cost(split_scaled[level], split_symbols[level])
+            payload = payload + (contrast_reach * support * bits).sum()
         total_bits = presence + flags + payload
         padding = (self.base_xyz.new_tensor(float((-int(total_bits)) % 8))
                    if hard else self.base_xyz.new_zeros(()))
-        result = dict(codec_header_bytes=self.base_xyz.new_tensor(float(CODEC_HEADER_BYTES)),
+        edits = self._structural_payload()
+        structural_bytes = 4 + len(edits) if self.config.direct_tree_enabled else 0
+        if (support_differentiable and self.config.direct_prune_inactive_splits and
+                self._pending_edit_operations):
+            structural_bytes = self._expected_node_edit_bytes(paths, gates)
+        structure_cost = (structural_bytes if torch.is_tensor(structural_bytes) else
+                          self.base_xyz.new_tensor(float(structural_bytes)))
+        result = dict(structure_edit_bytes=structure_cost,
+            codec_header_bytes=self.base_xyz.new_tensor(float(CODEC_HEADER_BYTES)),
             payload_padding_bytes=padding / 8,
             stop_refine_flag_bytes=flags / 8,
             motion_presence_flag_bytes=presence / 8,
@@ -575,6 +696,36 @@ class CommonContrastMotion(BinaryRefinementMotion):
             self._frozen_storage_parts[hard] = {key: value.detach() for key, value in result.items()}
             return dict(self._frozen_storage_parts[hard])
         return result
+
+    def _expected_node_edit_bytes(self, paths, gates):
+        """Differentiable expected split-body cost; hard writer remains exact."""
+        from .tree_edit_codec import encode_node_edits, encode_operation
+        cached = self._node_edit_cost_cache
+        if cached is None:
+            operations = self._pending_edit_operations
+            bodies = [len(encode_operation(op)) for op in operations]
+            prefix = len(encode_node_edits(operations)) - sum(bodies)
+            constant = sum(size for op, size in zip(operations, bodies) if op['kind'] != 'split')
+            groups = {}
+            for op, size in zip(operations, bodies):
+                if op['kind'] != 'split':
+                    continue
+                level, node = op['level'], op['node']
+                groups.setdefault(level, []).append((node, self._cached_gate_positions[level][node], size))
+            groups = {level: (torch.tensor([r[0] for r in rows], device=self.base_xyz.device),
+                              torch.tensor([r[1] for r in rows], device=self.base_xyz.device),
+                              self.base_xyz.new_tensor([r[2] for r in rows]))
+                      for level, rows in groups.items()}
+            cached = self._node_edit_cost_cache = (prefix, constant, groups)
+        prefix, constant, groups = cached
+        probabilities, costs = [], self.base_xyz.new_zeros(())
+        for level, (nodes, positions, size) in groups.items():
+            probability = paths[level][nodes] * gates[level][positions]
+            probabilities.append(probability)
+            costs = costs + (size * probability).sum()
+        present = (self.base_xyz.new_ones(()) if constant or not probabilities else
+                   1 - (1 - torch.cat(probabilities)).prod())
+        return 4 + constant + prefix * present + costs
 
     def storage_bit_counts(self, step, hard=False):
         parts = self.storage_parts(step, hard=hard)
@@ -595,11 +746,19 @@ class CommonContrastMotion(BinaryRefinementMotion):
         bits = self.config.fixed_motion_bits
 
         def motion(values):
-            present = any(value != 0 for value in values)
-            writer.write(int(present))
-            if present:
-                for value in values:
-                    writer.write(_signed_code(value, bits), bits)
+            if self.config.component_modes:
+                mode = int(any(values[:3])) + 2 * int(any(values[3:]))
+                writer.write(mode, 2)
+                for offset, enabled in ((0, mode & 1), (3, mode & 2)):
+                    if enabled:
+                        for value in values[offset:offset + 3]:
+                            writer.write(_signed_code(value, bits), bits)
+            else:
+                present = any(value != 0 for value in values)
+                writer.write(int(present))
+                if present:
+                    for value in values:
+                        writer.write(_signed_code(value, bits), bits)
 
         def visit(level, node):
             if level >= len(self.refine_logits):
@@ -623,24 +782,51 @@ class CommonContrastMotion(BinaryRefinementMotion):
         count = writer.bit_count
         return writer.finish(), count
 
+    def _structural_payload(self):
+        if not self.config.direct_tree_enabled:
+            return b''
+        if self._frame_edit_payload is not None:
+            return self._frame_edit_payload
+        if layout_digest(self._frame_coding_layout) == layout_digest(self.active_layout):
+            self._frame_edit_payload = b''
+        elif self.config.direct_edit_encoding == 'node_ops':
+            from .tree_edit_codec import encode_node_edits
+            if self._pending_edit_operations is None:
+                raise ValueError('Changed node-op layout lacks replay operations')
+            self._frame_edit_payload = encode_node_edits(self._pending_edit_operations)
+        else:
+            from .direct_tree import layout_edits
+            self._frame_edit_payload = layout_edits(self._frame_coding_layout, self.active_layout)
+        return self._frame_edit_payload
+
     def export_motion(self, path, *, frame_index, previous_state_digest,
                       post_motion_digest, previous_count, deleted_count, birth_count):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload, bit_count = self._encode_payload(self.config.motion_steps)
-        header = CODEC_HEADER.pack(CODEC_MAGIC, 1, 0, CODEC_HEADER_BYTES,
+        version = ((4 if self.config.direct_edit_encoding == 'node_ops' else 3)
+                   if self.config.direct_tree_enabled else 2 if self.config.component_modes else 1)
+        edits = self._structural_payload()
+        structure = struct.pack('<I', len(edits)) + edits if version >= 3 else b''
+        header = CODEC_HEADER.pack(CODEC_MAGIC, version, 0, CODEC_HEADER_BYTES,
             int(frame_index), int(previous_count), len(self.base_xyz), int(deleted_count),
             int(birth_count), int(bit_count), float(self.extent), bytes.fromhex(previous_state_digest),
             bytes.fromhex(post_motion_digest), layout_digest(self.active_layout))
-        path.write_bytes(header + payload)
-        if path.stat().st_size != CODEC_HEADER_BYTES + math.ceil(bit_count / 8):
+        path.write_bytes(header + structure + payload)
+        if path.stat().st_size != CODEC_HEADER_BYTES + len(structure) + math.ceil(bit_count / 8):
             raise AssertionError('Common/contrast stream size disagrees with encoded bit length')
         return dict(path=str(path), archive_bytes=path.stat().st_size,
             parameter_bytes=path.stat().st_size, payload_bits=bit_count,
             payload_padding_bits=(-bit_count) % 8, codec_header_bytes=CODEC_HEADER_BYTES,
-            frame=frame_index, layout_encoding=CODEC_VERSION,
+            frame=frame_index, layout_encoding=('common_contrast_node_edits_v4' if version == 4 else
+                'common_contrast_direct_tree_v3' if version == 3 else
+                'common_contrast_component_v2' if self.config.component_modes else CODEC_VERSION),
+            structure_edit_bytes=len(structure),
+            component_modes=self.config.component_modes,
             fixed_motion_bits=self.config.fixed_motion_bits,
-            semantics='Each occupied root has one presence bit and optional fixed-width six-vector. '
+            semantics=('v2 uses a two-bit identity/translation/rotation/full mode and omits quantized-zero blocks. '
+                'Centers retain existing deterministic pivot semantics. ' if self.config.component_modes else '') +
+                'Each occupied root has a motion record. '
                 'Each reached effective binary split has one refine bit; an open split has one '
                 'contrast presence bit and optional six-vector. Unary branches consume no fields.')
 
@@ -653,17 +839,33 @@ class CommonContrastMotion(BinaryRefinementMotion):
         (magic, version, flags, header_size, frame, previous_count, base_count,
          deleted_count, birth_count, bit_count, extent, previous_digest,
          base_digest, topology) = values
-        if magic != CODEC_MAGIC or version != 1 or flags != 0 or header_size != CODEC_HEADER_BYTES:
+        if magic != CODEC_MAGIC or version not in (1, 2, 3, 4) or flags != 0 or header_size != CODEC_HEADER_BYTES:
             raise ValueError('Unsupported common/contrast stream')
         if not math.isfinite(extent) or extent <= 0:
             raise ValueError('Invalid scene extent in common/contrast stream')
-        if len(packet) != CODEC_HEADER_BYTES + math.ceil(bit_count / 8):
+        cursor = CODEC_HEADER_BYTES
+        edits = b''
+        if version >= 3:
+            if len(packet) < cursor + 4:
+                raise ValueError('Truncated structure size')
+            size = struct.unpack_from('<I', packet, cursor)[0]
+            cursor += 4
+            if size > len(packet) - cursor:
+                raise ValueError('Truncated structure edits')
+            edits = packet[cursor:cursor + size]
+            cursor += size
+        if len(packet) != cursor + math.ceil(bit_count / 8):
             raise ValueError('Common/contrast stream length disagrees with bit count')
-        return dict(codec=CODEC_VERSION, frame=frame, previous_count=previous_count,
+        return dict(codec=('common_contrast_node_edits_v4' if version == 4 else
+                'common_contrast_direct_tree_v3' if version == 3 else
+                'common_contrast_component_v2' if version == 2 else CODEC_VERSION),
+            component_modes=(version >= 2), structure_edits=edits,
+            structure_edit_bytes=cursor - CODEC_HEADER_BYTES,
+            frame=frame, previous_count=previous_count,
             base_count=base_count, deleted_count=deleted_count, birth_count=birth_count,
             payload_bits=bit_count, extent=extent, previous_digest=previous_digest.hex(),
             post_motion_digest=base_digest.hex(), topology_digest=topology.hex(),
-            payload=packet[CODEC_HEADER_BYTES:])
+            payload=packet[cursor:])
 
     @classmethod
     def decode_motion(cls, path, base_xyz, base_rotation, config, layout,
@@ -685,11 +887,21 @@ class CommonContrastMotion(BinaryRefinementMotion):
                                     [config.rotation_step_rad] * 3)
 
         def motion():
-            if not reader.read():
-                return base_xyz.new_zeros(6), [0] * 6
-            values = [_signed_value(reader.read(bits), bits) for _ in range(6)]
-            if not any(values):
-                raise ValueError('A zero motion must omit its fixed-width payload')
+            if header['component_modes']:
+                mode = reader.read(2)
+                values = [0] * 6
+                for offset, enabled in ((0, mode & 1), (3, mode & 2)):
+                    if enabled:
+                        block = [_signed_value(reader.read(bits), bits) for _ in range(3)]
+                        if not any(block):
+                            raise ValueError('A zero component must omit its payload')
+                        values[offset:offset + 3] = block
+            else:
+                if not reader.read():
+                    return base_xyz.new_zeros(6), [0] * 6
+                values = [_signed_value(reader.read(bits), bits) for _ in range(6)]
+                if not any(values):
+                    raise ValueError('A zero motion must omit its fixed-width payload')
             return base_xyz.new_tensor(values) * steps, values
 
         coded_root = torch.zeros(counts[0], 6, device=base_xyz.device, dtype=torch.long)
@@ -831,6 +1043,8 @@ class CommonContrastMotion(BinaryRefinementMotion):
                                    for value in self.hard_masks['refine']]}
                         if self.hard_masks is not None else None),
             active_layout=_copy_layout(self.active_layout),
+            frame_coding_layout=_copy_layout(self._frame_coding_layout),
+            edit_operations=copy.deepcopy(self._pending_edit_operations),
             previous_layout=_copy_layout(self.previous_layout),
             materialized_layout=_copy_layout(self.materialized_layout),
             tree_setup=self.tree_setup, last_metrics=dict(self.last_metrics),
@@ -852,6 +1066,8 @@ class CommonContrastMotion(BinaryRefinementMotion):
         self.setup(xyz, rotation, packet['extent'], warm_start=False,
             frame_index=(packet.get('tree_setup') or {}).get('frame'),
             layout_override=packet['active_layout'])
+        self._frame_coding_layout = _copy_layout(packet.get('frame_coding_layout', packet['active_layout']))
+        self._pending_edit_operations = copy.deepcopy(packet.get('edit_operations'))
         self.load_state_dict(state)
         self.motion_optimizer.load_state_dict(packet['motion_optimizer'])
         self.gate_optimizer.load_state_dict(packet['gate_optimizer'])
@@ -901,16 +1117,26 @@ class CommonContrastDecoder:
         base = {name: raw[name][rows].clone() for name in RAW_FIELDS}
         if len(base['xyz']) != header['base_count']:
             raise ValueError('Deterministic deletion disagrees with stream base count')
-        rebuild = (frame - 1) % self.config.tree_rebuild_interval == 0
+        rebuild = self.materialized_layout is None if self.config.direct_tree_enabled else (frame - 1) % self.config.tree_rebuild_interval == 0
         if rebuild:
             layout = stable_binary_forest(base['xyz'], self.config.coarse_region_gs,
-                self.config.min_child_gs, self.config.max_motion_levels)
+                self.config.min_child_gs,
+                self.config.direct_initial_levels if self.config.direct_tree_enabled else self.config.max_motion_levels)
+            if self.config.direct_tree_enabled:
+                while len(layout['counts']) < self.config.max_motion_levels:
+                    layout['index'] = torch.cat((layout['index'], torch.full_like(layout['index'][:1], -1)))
+                    layout['counts'].append(0)
+                    layout['parents'].append(torch.empty(0, device=base['xyz'].device, dtype=torch.long))
+                layout = _binary_layout(layout['index'], layout['counts'], layout['parents'], base['xyz'])
         else:
             if self.materialized_layout is None:
                 raise ValueError('Intermediate frame has no cached common/contrast tree')
             old = self.materialized_layout
             layout = _binary_layout(old['index'].to(base['xyz'].device)[:, rows],
                 old['counts'], old['parents'], base['xyz'], old['pivots'])
+        if header['structure_edits']:
+            from .direct_tree import apply_layout_edits
+            layout = apply_layout_edits(layout, header['structure_edits'], base['xyz'])
         coding = {} if self.retain_frame_state else None
         xyz, rotation, gates, regions, decoded = CommonContrastMotion.decode_motion(
             motion_path, base['xyz'], base['rotation'], self.config, layout,
@@ -945,5 +1171,5 @@ class CommonContrastDecoder:
         return base, dict(frame=frame, deleted_rows=deleted.detach().cpu().tolist(),
             birth_count=self.previous_birth_count, changed_old_count=int(changed.sum()),
             tree_rebuilt=rebuild, topology_digest=header['topology_digest'],
-            coded_payload_bits=header['payload_bits'], motion_path=str(motion_path),
+            coded_payload_bits=header['payload_bits'], structure_edit_bytes=header['structure_edit_bytes'], motion_path=str(motion_path),
             birth_path=str(birth_path) if birth_path else None)

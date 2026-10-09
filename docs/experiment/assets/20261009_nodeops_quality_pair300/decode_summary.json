@@ -1,0 +1,36 @@
+[
+  {
+    "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_quality_fixed4_300f_20261009/20261009T031755_fce68f",
+    "dynamic_bytes": 17216603,
+    "bootstrap_bytes": 22363214,
+    "full_sequence_bytes": 39579817,
+    "structure_bytes": 1196,
+    "decode_mean_seconds": 3.2664140124893266,
+    "warm_render_mean_seconds": 0.00508090921827159,
+    "final_fields_exact": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    }
+  },
+  {
+    "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_quality_dynamic4_300f_20261009/20261009T093800_b2466a",
+    "dynamic_bytes": 17376207,
+    "bootstrap_bytes": 22363216,
+    "full_sequence_bytes": 39739423,
+    "structure_bytes": 97839,
+    "decode_mean_seconds": 3.3876995552638016,
+    "warm_render_mean_seconds": 0.005104543847408782,
+    "final_fields_exact": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    }
+  }
+]

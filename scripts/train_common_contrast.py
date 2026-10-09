@@ -1,7 +1,7 @@
 """Formal training entry for the common/contrast motion backend.
 
-This intentionally does not recreate the repository's removed top-level
-``main.py``.  It keeps the standard libgs configuration and checkpoint path.
+This keeps the standard libgs configuration/checkpoint path and saves the
+source files needed to reproduce the selected motion backend.
 """
 
 import sys
@@ -67,6 +67,10 @@ def main(argv):
             Path('pipeline/ReCon-GS/model/binary_refinement.py').resolve(),
             Path('pipeline/ReCon-GS/model/storage_aware_binary.py').resolve(),
             Path('pipeline/ReCon-GS/model/residual_motion.py').resolve(),
+            Path('pipeline/ReCon-GS/model/direct_tree.py').resolve(),
+            Path('pipeline/ReCon-GS/model/tree_edit_codec.py').resolve(),
+            Path('pipeline/ReCon-GS/model/split_region_scores.py').resolve(),
+            Path('pipeline/ReCon-GS/direct_transaction.py').resolve(),
             Path('pipeline/ReCon-GS/module.py').resolve(),
             Path('pipeline/ReCon-GS/trainer.py').resolve()]
         manifest = []

@@ -253,6 +253,11 @@ class Module(BaseModule):
         self._sparse_motion_export = None
 
     def on_save_checkpoint(self, ckpt: dict):
+        transaction = getattr(self, 'direct_transaction', None)
+        if transaction is not None:
+            ckpt['direct_transaction'] = dict(control=transaction.control.capture(), report=transaction.report,
+                                              view_names=transaction.view_names, control_stats=transaction.control_stats,
+                                              control_stats_window_initialized=transaction.control_stats_window_initialized)
         ckpt["gaussians"] = self.gaussians.capture()
         if not self.trainer.is_first_frame:
             if self.config.motion_mode in {'selective', 'learned_selective', *QUANTIZED_MOTION_MODES} and self.gaussians_incr.optimizer is None:
@@ -324,6 +329,17 @@ class Module(BaseModule):
                     for parameter in self.residual_motion.parameters():
                         parameter.requires_grad_(False)
                 self.renderer.gaussians = self.gaussians
+            transaction = ckpt.get('direct_transaction')
+            if transaction is not None:
+                from .direct_transaction import DirectTransaction
+                control = CommonContrastMotion(self.config.common_contrast_binary)
+                control.restore(transaction['control'])
+                self.direct_transaction = DirectTransaction(self, control, transaction['report'])
+                self.direct_transaction.report = transaction['report']
+                self.direct_transaction.view_names = transaction['view_names']
+                self.direct_transaction.control_stats = transaction['control_stats']
+                self.direct_transaction.control_stats_window_initialized = transaction.get(
+                    'control_stats_window_initialized', self.quant_stats_window_initialized)
             return
         if self.config.motion_mode in {'selective', 'learned_selective'}:
             packet = ckpt.get('selective_motion')
@@ -615,6 +631,9 @@ class Module(BaseModule):
         if (current_step - 1) == self.renderer.config.debug_from:
             self.renderer.config.debug = True
 
+        transaction = getattr(self, 'direct_transaction', None)
+        if transaction is not None:
+            transaction.train_control(self, viewpoint)
         render_pkg = self.forward(viewpoint, training=True)
         image = render_pkg["render"]
         gt_image = viewpoint.image
@@ -1406,6 +1425,7 @@ class Module(BaseModule):
         self.quant_report = None
         self.quant_finalized = False
         self.quant_stats_window_initialized = False
+        self.direct_transaction = None
         self.quant_birth_control = self.new_quant_birth_control()
         self.quant_birth_control['point_origins'] = point_origins
         self.quant_birth_control['deletion_damage'] = deletion_damage
@@ -1528,7 +1548,17 @@ class Module(BaseModule):
                     self.quantized_quality_snapshot('after_dense_fit')
                 elif self.global_step == probe_steps + cfg.dense_fit_steps + cfg.gate_compress_steps:
                     self.quantized_quality_snapshot('after_gate_compress_soft')
+            if (self.config.motion_mode == 'common_contrast_binary' and
+                    self.global_step == (cfg.direct_proposal_step if cfg.direct_proposal_step is not None else
+                                         cfg.dense_fit_steps + cfg.gate_compress_steps)):
+                from .direct_transaction import start_transaction
+                start_transaction(self, render_pkg)
             if self.global_step == cfg.motion_steps:
+                transaction = getattr(self, 'direct_transaction', None)
+                if transaction is not None:
+                    transaction.finish(self)
+                    self.direct_transaction = None
+                    motion = self.residual_motion
                 xyz, rotation = motion(self.global_step)
                 self.gaussians.apply_selected_motion(xyz, rotation)
                 motion.committed = True
@@ -1651,7 +1681,8 @@ class Module(BaseModule):
                     playback_scope=('Sequential decoder verifies the previous full-state hash, recreates '
                         'deletions from the prior pose-change mask and opacity order, rebuilds or remaps the '
                         'deterministic tree, decodes motion and verifies its post-motion base hash before '
-                        'appending the birth PLY. No row IDs or node ownership tables are present.'),
+                        'appending the birth PLY. v3 includes compressed ownership/parent edits; '
+                        'v1/v2 spatial streams have no ownership tables.'),
                     previous_reference_sha256=self.quant_previous_sha256,
                     post_motion_base_sha256=post_motion_base_digest,
                     deleted_count=int(self.quant_deleted_indices.numel()),
@@ -1900,21 +1931,36 @@ class Module(BaseModule):
                 actual_motion['semantics'] = (
                     'Actual quantized old-GS pose changes, without an independent m gate.')
         elif self.config.motion_mode == 'common_contrast_binary':
+            cfg = self.residual_motion.config
+            codec = ('common_contrast_node_edits_v4' if cfg.direct_tree_enabled and cfg.direct_edit_encoding == 'node_ops' else
+                     'common_contrast_direct_tree_v3' if cfg.direct_tree_enabled else
+                     'common_contrast_component_v2' if cfg.component_modes else
+                     'common_contrast_preorder_v1')
+            trial_path = self.output_dir / 'direct_tree_trials' / f'frame_{self.current_frame:03d}' / 'report.json'
+            trial = json.loads(trial_path.read_text()) if trial_path.exists() else {}
+            extra_renders = (int(trial.get('extra_control_steps', 0)) +
+                             2 * len(trial.get('training_cameras', [])) +
+                             len(trial.get('split_gradient_probe', {}).get('cameras', [])))
             semantics = (
-                'A deterministic binary forest stores one fixed-precision common transform per occupied '
+                'A cached binary forest stores one fixed-precision common transform per occupied '
                 'root and one zero-mean contrast per open effective binary split. Unary branches inherit '
                 'without parameters. A closed learned subtree gate truncates all descendants; a zero local '
                 'contrast does not close the gate, so deeper differences remain representable.')
             self.quant_report.update(
                 method_semantics=semantics,
-                storage_accounting='common_contrast_preorder_v1',
+                storage_accounting=codec,
                 storage_semantics=(
                     f'Exact inference files use a {self.residual_motion.__class__.__name__} stream with '
                     'a 132-byte verified header and byte-padded preorder payload plus retained birth PLY. '
                     'Split member weights are reconstructed from deterministic post-deletion membership; '
-                    'empty and unary branches consume no contrast record.'),
-                candidate_fit=dict(enabled=False, extra_renders=0, semantics=(
-                    'Root common transforms and split contrasts learn only through the normal image forward.')),
+                    'empty and unary branches consume no contrast record. v2/v3 omit zero translation '
+                    'and rotation blocks independently; dynamic streams include their actual tree edit bytes.'),
+                candidate_fit=dict(enabled=trial.get('reason') == 'proposed', extra_renders=extra_renders,
+                    report=trial or None, semantics=(
+                        'One decoded whole-batch comparison after equal remaining motion/gate budgets. '
+                        'Scoring and acceptance use training cameras only; newborn fitting follows '
+                        'the selected branch once.' if cfg.direct_tree_enabled else
+                        'Root common transforms and split contrasts learn only through the normal image forward.')),
                 gs_activity_cost=dict(weight=0., semantics=(
                     'No independent per-GS activity gate or activity loss. Actual fixed-precision '
                     'old-GS pose changes are reported separately and do not identify physical motion.')),

@@ -1,0 +1,146 @@
+{
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521",
+  "frames": [
+    {
+      "frame": 1,
+      "decode_seconds": 3.3005148859811015,
+      "render_seconds": 0.005320722004398704,
+      "motion_bytes": 54658,
+      "birth_bytes": 939,
+      "structure_bytes": 4,
+      "info": {
+        "frame": 1,
+        "deleted_rows": [],
+        "birth_count": 3,
+        "changed_old_count": 214996,
+        "tree_rebuilt": true,
+        "topology_digest": "fbac5474027b5e0f1000339ff0cf30e0bc41daef72f7f1d168f93c1a04935a35",
+        "coded_payload_bits": 436176,
+        "structure_edit_bytes": 4,
+        "motion_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/motion_001.bin",
+        "birth_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/incremental_001.ply"
+      }
+    },
+    {
+      "frame": 2,
+      "decode_seconds": 1.940224699996179,
+      "render_seconds": 0.005251208593836054,
+      "motion_bytes": 38746,
+      "birth_bytes": 835,
+      "structure_bytes": 4,
+      "info": {
+        "frame": 2,
+        "deleted_rows": [
+          183401,
+          22424,
+          71524
+        ],
+        "birth_count": 2,
+        "changed_old_count": 214996,
+        "tree_rebuilt": false,
+        "topology_digest": "4b246a5b8169db51edb7f14c377d6b38f08f1c7ac39334ab8fd6333f2308a90d",
+        "coded_payload_bits": 308880,
+        "structure_edit_bytes": 4,
+        "motion_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/motion_002.bin",
+        "birth_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/incremental_002.ply"
+      }
+    },
+    {
+      "frame": 3,
+      "decode_seconds": 1.760036060004495,
+      "render_seconds": 0.005260710197035223,
+      "motion_bytes": 35574,
+      "birth_bytes": 939,
+      "structure_bytes": 4,
+      "info": {
+        "frame": 3,
+        "deleted_rows": [
+          120996,
+          150196
+        ],
+        "birth_count": 3,
+        "changed_old_count": 214996,
+        "tree_rebuilt": false,
+        "topology_digest": "aefa9131ade5b5a516982349d35c860c75a5192d2faa3bb776e4fb8688b24bcd",
+        "coded_payload_bits": 283504,
+        "structure_edit_bytes": 4,
+        "motion_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/motion_003.bin",
+        "birth_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/incremental_003.ply"
+      }
+    },
+    {
+      "frame": 4,
+      "decode_seconds": 1.7351941340020858,
+      "render_seconds": 0.00540716620744206,
+      "motion_bytes": 34158,
+      "birth_bytes": 1876,
+      "structure_bytes": 4,
+      "info": {
+        "frame": 4,
+        "deleted_rows": [
+          121588,
+          140166,
+          117378
+        ],
+        "birth_count": 12,
+        "changed_old_count": 214996,
+        "tree_rebuilt": false,
+        "topology_digest": "498982be5bc99bb614dc66ec8073f4b36e2d797102b3946b7b0c738a6f258074",
+        "coded_payload_bits": 272176,
+        "structure_edit_bytes": 4,
+        "motion_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/motion_004.bin",
+        "birth_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/incremental_004.ply"
+      }
+    },
+    {
+      "frame": 5,
+      "decode_seconds": 1.750916696008062,
+      "render_seconds": 0.005466930405236781,
+      "motion_bytes": 30763,
+      "birth_bytes": 1147,
+      "structure_bytes": 158,
+      "info": {
+        "frame": 5,
+        "deleted_rows": [
+          146081,
+          93035,
+          214764,
+          149817,
+          210531,
+          199735,
+          150721,
+          168590,
+          59131,
+          135065,
+          180806,
+          213988
+        ],
+        "birth_count": 5,
+        "changed_old_count": 214996,
+        "tree_rebuilt": false,
+        "topology_digest": "847f05d2b2019e80be1b192274ac59dfc6320d384392bf3355fb16e180988e11",
+        "coded_payload_bits": 243783,
+        "structure_edit_bytes": 158,
+        "motion_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/motion_005.bin",
+        "birth_path": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_nodeops_split_v4_smoke6_20261009/20261009T011740_76e521/frame_storage/common_contrast_binary/incremental_005.ply"
+      }
+    }
+  ],
+  "final_fields_exact": {
+    "xyz": true,
+    "rotation": true,
+    "logscale": true,
+    "opacity": true,
+    "sh_dc": true,
+    "sh_rest": true
+  },
+  "final_digest": "29119375ccddc7d1642bd2e282f91c109e37babf436985f4e0911897a913e487",
+  "dynamic_bytes": 199635,
+  "first_frame_bytes": 22360216,
+  "configuration_bytes": 2961,
+  "bootstrap_bytes": 22363177,
+  "full_sequence_bytes": 22562812,
+  "structure_bytes": 174,
+  "structure_fraction_dynamic": 0.0008715906529416184,
+  "timing_semantics": "Decode includes motion file read, synchronized deletion/tree edit, motion application, hashes, birth PLY read and append. Render is five synchronized warm renders of one cam00 view, excludes decode, data loading, model install and metrics. Bootstrap/data loading are not timed. These are separate timings, not end-to-end playback FPS."
+}
