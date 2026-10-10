@@ -103,8 +103,10 @@ def _binary_layout(index, counts, parents, xyz, previous_pivots=None):
         if np.any((owner < -1) | (owner >= count)):
             raise ValueError('Binary layout owner is out of range')
         valid = owner >= 0
-        sums = np.zeros((count, 3), dtype=np.float64)
-        np.add.at(sums, owner[valid], points[valid])
+        # bincount visits each owner's values in input order, matching add.at
+        # while avoiding its repeated multidimensional scatter operations.
+        sums = np.stack([np.bincount(owner[valid], weights=points[valid, axis],
+                                     minlength=count) for axis in range(3)], axis=-1)
         sizes = np.bincount(owner[valid], minlength=count)[:, None]
         means = sums / np.maximum(sizes, 1)
         if previous_pivots is not None:

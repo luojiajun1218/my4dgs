@@ -6,6 +6,7 @@ from torch import Tensor
 
 from libgs.model.gaussian import GaussianModel as BaseGaussianModel
 from libgs.utils.general import build_rotation, quaternion_multiply
+from .node_motion import rotation_delta
 
 
 def select_budget_mask(mask: Tensor, scores: Tensor, limit: Optional[int]) -> Tensor:
@@ -46,8 +47,10 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_features(self):
-        return self._render_cached('features', (self._features_dc, self._features_rest),
-            lambda: torch.cat((self._features_dc, self._features_rest), dim=1))
+        dc = getattr(self, 'updated_features_dc', None)
+        dc = self._features_dc if dc is None else dc
+        return self._render_cached('features', (dc, self._features_rest),
+            lambda: torch.cat((dc, self._features_rest), dim=1))
 
     @property
     def get_scaling(self):
@@ -56,8 +59,9 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_opacity(self):
-        return self._render_cached('opacity', (self._opacity,),
-                                   lambda: self.opacity_activation(self._opacity))
+        value = getattr(self, 'updated_opacity', None)
+        value = self._opacity if value is None else value
+        return self._render_cached('opacity', (value,), lambda: self.opacity_activation(value))
 
     def initialize_incremental_optimizer(self, training_args) -> None:
         """Start newborn optimization with stage-two rates and fresh Adam moments.
@@ -217,7 +221,7 @@ class GaussianModel(BaseGaussianModel):
         new_xyz = torch.normal(means, stds * sigma_scale)
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
-        # Set opacity to 0.1
+        # Preserve ReCon-GS's raw opacity-logit initialization.
         new_opacities = torch.zeros_like(self._opacity[selected_pts_mask]) + 0.1
         new_scaling = self._scaling[selected_pts_mask]
         # Set rotation to identity quaternion

@@ -59,6 +59,7 @@ class DataConfig(BaseDataConfig):
     split_train_test: bool = True
     shuffle: bool = True
     training_view_seed: Optional[int] = None
+    canonical_training_view_order: bool = False
     training_camera_names: Optional[List[str]] = None
     validation_camera_names: Optional[List[str]] = None
     eval_train: bool = True
@@ -252,11 +253,27 @@ class DataModule(BaseDataModule):
         if indices is None:
             indices = self._camera_indices(
                 dataset, getattr(self.config, 'training_camera_names', None))
+        seed = self.config.training_view_seed
+        if getattr(self.config, 'canonical_training_view_order', False):
+            if random and seed is None:
+                raise ValueError('Canonical training order requires training_view_seed')
+            if not hasattr(dataset, 'items'):
+                raise ValueError('Canonical training order requires camera metadata')
+            selected = (range(len(dataset)) if indices is None or len(indices) == 0
+                        else indices)
+            # The parent dataset shuffles all frames before filtering this one.
+            # Sort a Subset index, preserving its cached views and source order.
+            def camera_key(index):
+                item = dataset.items[index]
+                frame = getattr(item, 'frame', self.current_frame)
+                path = Path(item.path)
+                return frame, path.name, str(path)
+
+            indices = sorted(selected, key=camera_key)
         if indices:
             dataset = Subset(dataset, indices)
         collate_fn = self._view_collate()
         kwargs = dict(num_workers=8, pin_memory=True, collate_fn=collate_fn)
-        seed = self.config.training_view_seed
         generator = (torch.Generator().manual_seed(seed + max(self.current_frame, 0))
                      if seed is not None else None)
         if random:

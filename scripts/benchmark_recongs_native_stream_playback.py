@@ -78,16 +78,19 @@ def make_pipeline(config_path: Path, source_root: Path, checkpoint: Path, temp_d
 
     sys.path.insert(0, str(source_root.resolve()))
     from libgs.pipeline.loader import load_pipeline
-    from libgs.renderer import network_gui
     from libgs.utils.config import to_structured
     import libgs.data.dataset.base as dataset_base
 
-    network_gui.init = lambda *args, **kwargs: None
     # This warning's implementation assumes a DataLoader worker, but playback
     # intentionally loads one frame view synchronously in the main process.
     dataset_base.warning = lambda: None
     Config, Pipeline = load_pipeline("ReCon-GS")
     config, _ = to_structured(OmegaConf.load(config_path), Config)
+    if hasattr(config, 'gui_enabled'):
+        config.gui_enabled = False
+    else:
+        from libgs.renderer import network_gui
+        network_gui.init = lambda *args, **kwargs: None
     config.mode = "train"
     config.ckpt_path = checkpoint
     config.output_dir = temp_dir

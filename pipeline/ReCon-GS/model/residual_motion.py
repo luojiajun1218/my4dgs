@@ -1,5 +1,6 @@
 """Quantized cumulative regional offsets and per-Gaussian residuals."""
 from dataclasses import asdict, dataclass, fields
+from collections.abc import Sequence
 from typing import List, Optional
 import hashlib
 import math
@@ -38,6 +39,11 @@ class QuantizedResidualConfig:
     new_sh_step: Optional[float] = None
     opacity_keep_threshold: Optional[float] = None
     opacity_support_temperature: Optional[float] = None
+    birth_retention_mode: str = 'opacity_threshold'  # Or periodic_prune, matching ReCon-GS
+    birth_appearance_fraction: float = 0.0
+    birth_appearance_camera_names: Optional[List[str]] = None
+    birth_appearance_action: str = 'clone'  # color_update reuses geometry for appearance changes
+    birth_clone_geometry: str = 'legacy'  # Or parent_covariance: rotate jitter and inherit orientation
     clone_sigma_scale: Optional[float] = None
     new_max_screen_size: Optional[float] = None
     densification_stats_steps: Optional[int] = None
@@ -66,7 +72,40 @@ class QuantizedResidualConfig:
     storage_warmup_steps: Optional[int] = None
     storage_ramp_steps: Optional[int] = None
 
+    def require_simple_birth_training(self):
+        """Old experiment settings remain readable, but are not trainable here."""
+        extras = []
+        if self.birth_appearance_fraction > 0 or self.birth_appearance_action != 'clone':
+            extras.append('appearance birth/color updates')
+        if getattr(self, 'birth_residual_enabled', False):
+            extras.append('depth-residual births')
+        if getattr(self, 'birth_lifetime_enabled', False):
+            extras.append('historical opacity fitting')
+        if self.birth_clone_geometry != 'legacy':
+            extras.append('parent-covariance jitter')
+        if extras:
+            raise ValueError('Birth training now uses position-gradient cloning only; '
+                             'disable these old experiment options: ' + ', '.join(extras))
+
     def validate(self):
+        if self.birth_appearance_action not in ('clone', 'color_update'):
+            raise ValueError('birth_appearance_action must be clone or color_update')
+        if self.birth_clone_geometry not in ('legacy', 'parent_covariance'):
+            raise ValueError('Unknown birth clone geometry')
+        if (not isinstance(self.birth_retention_mode, str) or
+                self.birth_retention_mode not in {'opacity_threshold', 'periodic_prune'}):
+            raise ValueError('birth_retention_mode must be opacity_threshold or periodic_prune')
+        fraction = self.birth_appearance_fraction
+        if (isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or
+                not math.isfinite(fraction) or not 0 <= fraction <= 1):
+            raise ValueError('birth_appearance_fraction must be finite and in [0, 1]')
+        if fraction > 0:
+            names = self.birth_appearance_camera_names
+            if (not isinstance(names, Sequence) or isinstance(names, (str, bytes)) or
+                    not names or any(not isinstance(name, str) or not name for name in names)
+                    or len(set(names)) != len(names)):
+                raise ValueError('birth_appearance_camera_names must be nonempty and unique')
+            self.birth_appearance_camera_names = list(names)
         if not isinstance(self.fit_fine_split_candidates, bool):
             raise ValueError('fit_fine_split_candidates must be bool')
         if self.fit_fine_split_candidates and self.motion_gradient_mode != 'keep_candidate_loss':
@@ -112,7 +151,7 @@ class QuantizedResidualConfig:
         if self.gate_initial_logits is not None:
             self.gate_initial_logits = [float(value) for value in self.gate_initial_logits]
         optional = {'densification_stats_steps', 'max_new_gaussians', 'max_retained_gaussians',
-                    'fixed_gate_budget_path'} | (
+                    'fixed_gate_budget_path', 'birth_appearance_camera_names'} | (
             set() if self.enable_learned_gates else gated)
         missing = [f.name for f in fields(self) if f.name not in optional and getattr(self, f.name) is None]
         if missing:
@@ -544,6 +583,11 @@ class QuantizedResidualMotion(nn.Module):
         saved_config.setdefault('fixed_gate_budget_path', None)
         saved_config.setdefault('fixed_gate_seed', 0)
         saved_config.setdefault('reset_keep_gate_priors', False)
+        saved_config.setdefault('birth_retention_mode', 'opacity_threshold')
+        saved_config.setdefault('birth_appearance_fraction', 0.0)
+        saved_config.setdefault('birth_appearance_camera_names', None)
+        saved_config.setdefault('birth_appearance_action', 'clone')
+        saved_config.setdefault('birth_clone_geometry', 'legacy')
         if not saved_config.get('storage_only', False):
             raise ValueError('Legacy rate/codec dynamic-frame checkpoints cannot resume with storage-only motion')
         removed = set(saved_config) - {field.name for field in fields(self.config)}
@@ -566,7 +610,12 @@ class QuantizedResidualMotion(nn.Module):
 
 
 class QuantizedNewGaussianView:
-    """Render quantized raw attributes; opacity determines retention without another gate."""
+    """Quantized birth attributes with separate fitting and final retention.
+
+    In periodic_prune mode, every surviving candidate renders and is stored,
+    including low-opacity candidates not removed at a pruning interval. This
+    keeps fitting and final materialization consistent, as in ReCon-GS.
+    """
     def __init__(self, model, config, extent, reference, source_tree=None):
         self.model, self.config = model, config
         self.steps = attribute_steps(config, extent)
@@ -588,10 +637,14 @@ class QuantizedNewGaussianView:
                 value = torch.where((value * self.predictor[name]).sum(-1, keepdim=True) < 0, -value, value)
             self.symbols[name] = quantized_symbols(value - self.predictor[name], self.steps[name])
         opacity = torch.sigmoid(self.raw_value('opacity'))
-        self.keep = opacity.detach().flatten() >= config.opacity_keep_threshold
-        probability = torch.sigmoid((opacity.flatten() - config.opacity_keep_threshold) /
-                                    config.opacity_support_temperature)
-        self.keep_st = self.keep.to(probability) + (probability - probability.detach())
+        if config.birth_retention_mode == 'periodic_prune':
+            self.keep = torch.ones(len(opacity), dtype=torch.bool, device=opacity.device)
+            self.keep_st = opacity.new_ones(len(opacity))
+        else:
+            self.keep = opacity.detach().flatten() >= config.opacity_keep_threshold
+            probability = torch.sigmoid((opacity.flatten() - config.opacity_keep_threshold) /
+                                        config.opacity_support_temperature)
+            self.keep_st = self.keep.to(probability) + (probability - probability.detach())
 
     def raw_value(self, name):
         return self.predictor[name] + self.symbols[name] * self.steps[name]
@@ -615,7 +668,7 @@ class QuantizedNewGaussianView:
             self.keep_st = self.keep.to(self.keep_st)
         return dict(eligible=before, pruned=before - int(self.keep.sum()),
                     limit=limit, selection='highest_quantized_opacity_stable_ties',
-                    semantics='Applied only at final materialization, after opacity eligibility. '
+                    semantics='Applied only at final materialization, after retention-mode eligibility. '
                               'Opacity ranking is a heuristic, not measured image contribution. '
                               'No minimum retained count is enforced.')
 

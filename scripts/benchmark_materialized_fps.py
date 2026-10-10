@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 
 import yaml
 
-from benchmark_recongs_native_stream_playback import make_pipeline, get_cam00_view
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.benchmark_recongs_native_stream_playback import make_pipeline, get_cam00_view
 
 
 def check_exclusive_gpu():
@@ -40,6 +42,7 @@ def main():
     parser.add_argument('run', type=Path)
     parser.add_argument('--protocol', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     run, output = args.run.resolve(), args.output.resolve()
     if output.exists():
@@ -51,14 +54,17 @@ def main():
         with tempfile.TemporaryDirectory(prefix='materialized_fps_') as temporary:
             checkpoint = run / f'ckpt-{frame}-{protocol["checkpoint_step"]}.pth'
             config_path = run / 'config.yaml'
-            if 'evaluation_resolution' in protocol:
+            if 'evaluation_resolution' in protocol or 'render_attribute_cache' in protocol:
                 evaluation_config = yaml.safe_load(config_path.read_text())
-                evaluation_config['data']['resolution'] = protocol['evaluation_resolution']
-                evaluation_config['data']['expected_image_size'] = protocol['image_size']
+                if 'evaluation_resolution' in protocol:
+                    evaluation_config['data']['resolution'] = protocol['evaluation_resolution']
+                    evaluation_config['data']['expected_image_size'] = protocol['image_size']
+                if 'render_attribute_cache' in protocol:
+                    evaluation_config['module']['render_attribute_cache'] = protocol['render_attribute_cache']
                 config_path = Path(temporary) / 'evaluation_config.yaml'
                 config_path.write_text(yaml.safe_dump(evaluation_config, sort_keys=False))
             pipeline, torch, _, _ = make_pipeline(config_path,
-                Path(__file__).resolve().parents[1], checkpoint, Path(temporary))
+                args.source_root.resolve(), checkpoint, Path(temporary))
             module = pipeline.module
             module.eval()
             view, camera = get_cam00_view(pipeline, frame, module.device)
@@ -68,20 +74,37 @@ def main():
             initial_only = protocol.get('quality_reference') == 'initial_checkpoint'
             if initial_only and frame != 0:
                 raise ValueError('Initial checkpoint quality mode only accepts frame zero')
-            expected = None if initial_only else json.loads(report_path.read_text())
+            reference_kind = protocol.get('quality_reference', 'quantized_summary')
+            if reference_kind not in ('initial_checkpoint', 'quantized_summary', 'native_log'):
+                raise ValueError('Unknown quality reference')
+            expected = None if initial_only or reference_kind == 'native_log' else json.loads(report_path.read_text())
             from libgs.metric import psnr, ssim
             renderer = module.renderer
             with torch.no_grad():
                 image = module.forward(view)['render'].clamp(0., 1.)
                 quality = dict(psnr=float(psnr(image, view.image)), ssim=float(ssim(image, view.image)))
-                reference = expected['quantized_evaluation']['test'] if expected is not None else quality
+                if reference_kind == 'native_log':
+                    import re
+                    log = (run / 'logging.INFO').read_text()
+                    marker = f'==> Start learning frame {frame} ...'
+                    if marker not in log:
+                        raise ValueError(f'No native log section for frame {frame}')
+                    section = log.split(marker, 1)[1].split('==> Start learning frame', 1)[0]
+                    pattern = r'Evaluate test dataset at step \d+:\s+L1: [0-9.e+-]+ \| PSNR: ([0-9.e+-]+) \| SSIM: ([0-9.e+-]+)'
+                    matches = re.findall(pattern, section)
+                    if not matches:
+                        raise ValueError(f'No native held-out log metrics for frame {frame}')
+                    reference = dict(zip(('psnr', 'ssim'), map(float, matches[-1])))
+                else:
+                    reference = expected['quantized_evaluation']['test'] if expected is not None else quality
                 if any(abs(quality[key] - reference[key]) > protocol['metric_absolute_tolerance']
                        for key in quality):
                     raise ValueError(f'Restored quality differs at frame {frame}: {quality}, {reference}')
-                kwargs = dict(means3D=module.gaussians.get_xyz,
+                render_model = renderer.gaussians
+                kwargs = dict(means3D=render_model.get_xyz,
                     means2D=renderer.create_screenspace_points(), shs=None, colors_precomp=None,
-                    opacities=module.gaussians.get_opacity, scales=module.gaussians.get_scaling,
-                    rotations=module.gaussians.get_rotation, cov3D_precomp=None)
+                    opacities=render_model.get_opacity, scales=render_model.get_scaling,
+                    rotations=render_model.get_rotation, cov3D_precomp=None)
                 kwargs = renderer.apply_color(kwargs, view, None)
                 rasterizer = renderer.create_rasterizer(view, module.background, 1.)
                 functions = dict(forward_clamp=lambda: module.forward(view)['render'].clamp(0., 1.),
@@ -97,9 +120,11 @@ def main():
                 sum(value['seconds'] for value in values),
                 min_fps=min(value['fps'] for value in values),
                 max_fps=max(value['fps'] for value in values)) for name, values in samples.items()}
-            records.append(dict(frame=frame, gs=len(module.gaussians.get_xyz),
-                quality=quality, samples=samples, summary=summary,
-                render_attribute_cache=module.gaussians.render_attribute_cache))
+            records.append(dict(frame=frame, gs=len(render_model.get_xyz),
+                quality=quality, quality_reference=reference,
+                quality_difference={name: quality[name] - reference[name] for name in quality},
+                samples=samples, summary=summary,
+                render_attribute_cache=getattr(module.gaussians, 'render_attribute_cache', False)))
             print(json.dumps(dict(frame=frame, summary=summary)), flush=True)
             del functions, kwargs, rasterizer, image, module, renderer, view, pipeline
             gc.collect()
@@ -107,7 +132,8 @@ def main():
     aggregate = {name: protocol['timed_renders'] * protocol['rounds'] * len(records) /
         sum(sample['seconds'] for row in records for sample in row['samples'][name])
         for name in protocol['scopes']}
-    result = dict(run=str(run), protocol=protocol, records=records, aggregate_fps=aggregate,
+    result = dict(run=str(run), source_root=str(args.source_root.resolve()),
+        protocol=protocol, records=records, aggregate_fps=aggregate,
         gpu=torch.cuda.get_device_name(), pid=os.getpid(), no_training_updates=True,
         scope_semantics=dict(forward_clamp='Synchronized materialized module.forward plus image clamp; '
             'includes property preparation and Python submission, excludes metrics/loading/decoding.',

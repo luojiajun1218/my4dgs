@@ -134,12 +134,10 @@ class _BitReader:
         width = int(width)
         if width < 1 or self.cursor + width > self.bit_count:
             raise ValueError('Truncated binary motion payload')
-        value = 0
-        for offset in range(width):
-            byte = self.payload[self.cursor >> 3]
-            bit = (byte >> (self.cursor & 7)) & 1
-            value |= bit << offset
-            self.cursor += 1
+        start, offset = self.cursor >> 3, self.cursor & 7
+        size = (offset + width + 7) // 8
+        value = (int.from_bytes(self.payload[start:start + size], 'little') >> offset) & ((1 << width) - 1)
+        self.cursor += width
         return value
 
 
@@ -1019,9 +1017,9 @@ def decoder_for_binary_stream(path, config, *, retain_frame_state=False):
             raise TypeError('SARB stream requires StorageAwareBinaryConfig')
         return StorageAwareBinaryDecoder(config, retain_frame_state=retain_frame_state)
     # Lazy import avoids a module cycle: common_contrast reuses the bit IO.
-    from .common_contrast import (CODEC_MAGIC as COMMON_CONTRAST_MAGIC,
+    from .common_contrast import (CODEC_MAGIC as COMMON_CONTRAST_MAGIC, ENTROPY_MAGIC,
                                   CommonContrastConfig, CommonContrastDecoder)
-    if magic == COMMON_CONTRAST_MAGIC:
+    if magic in (COMMON_CONTRAST_MAGIC, ENTROPY_MAGIC):
         if not isinstance(config, CommonContrastConfig):
             raise TypeError('CCRB stream requires CommonContrastConfig')
         return CommonContrastDecoder(config, retain_frame_state=retain_frame_state)

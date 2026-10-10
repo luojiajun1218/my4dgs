@@ -140,6 +140,9 @@ class Trainer(BaseTrainer):
             'saving includes the quantized detail and first frame summary writes. '
             'gate_diagnostics measures optional traces and isolated fits and is excluded from training. '
             'wall spans frame setup, training, evaluation, drawing and saves up to the first summary write. '
+            'stream_export in stream.stage_seconds is a subset of state_update/finalize, including '
+            'birth packaging, motion encoding and deployment-file writes; do not add it again to wall. '
+            'direct_trial_codec and direct_trial_artifact_write are subsets of direct_acceptance. '
             'The final summary rewrite and console output are excluded; components need not sum to wall.')
         path.write_text(json.dumps(report, indent=2))
         self.routine_info('Quantized frame detail: %s', json.dumps(report, separators=(',', ':')))
@@ -157,8 +160,9 @@ class Trainer(BaseTrainer):
                      else '二叉细化')
             logging.info(
                 '帧 %d %s | %s | 纯训练=%.2fs 总计=%.2fs | '
-                '必要文件=%.4f MB 参数=%.2f KiB | 新增=%d 删除=%d',
+                '导出=%.2fs | 必要文件=%.4f MB 参数=%.2f KiB | 新增=%d 删除=%d',
                 self.current_frame, label, quality, clocks['training'], clocks['wall'],
+                stream.get('stage_seconds', {}).get('stream_export', 0.),
                 stream['inference_file_bytes'] / 1e6, stream['hard_storage_bytes'] / 1024,
                 stream['new_count'], stream['deleted_count'])
             self.routine_info('二叉细化活动: %s', json.dumps(activity, ensure_ascii=False))

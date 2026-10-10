@@ -8,7 +8,6 @@ from absl import logging
 
 from libgs.pipeline import Config as BaseConfig
 from libgs.pipeline import Pipeline as BasePipeline
-from libgs.renderer import network_gui
 from libgs.utils.config import to_yaml
 from libgs.utils.dist import is_global_zero
 from libgs.utils.general import safe_state
@@ -26,6 +25,7 @@ class Config(BaseConfig):
     ckpt_path: Optional[Path] = None
     gui_ip: str = "127.0.0.1"
     gui_port: int = 6009
+    gui_enabled: bool = True
     detect_anomaly: bool = False
     quiet: bool = False
     random_seed: int = 0
@@ -41,7 +41,9 @@ class Pipeline(BasePipeline):
 
     def setup(self):
         safe_state(self.config.quiet, seed=self.config.random_seed)
-        network_gui.init(self.config.gui_ip, self.config.gui_port)
+        if self.config.gui_enabled:
+            from libgs.renderer import network_gui
+            network_gui.init(self.config.gui_ip, self.config.gui_port)
         torch.autograd.set_detect_anomaly(self.config.detect_anomaly)
         return super().setup()
 
@@ -49,4 +51,5 @@ class Pipeline(BasePipeline):
         output_dir = Path(self.config.output_dir) / self.config.experiment_name
         self.datamodule = DataModule(self.config.data)
         self.module = Module(self.config.module, datamodule=self.datamodule)
+        self.module.gui_enabled = self.config.gui_enabled
         self.trainer = Trainer(self.config.trainer, output_dir=output_dir)

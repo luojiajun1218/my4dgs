@@ -89,6 +89,65 @@ def score_split_regions(
     return SplitRegionScores(summed / count.clamp_min(1), total, count)
 
 
+def rigid_gradient_residual(
+    xyz: torch.Tensor,
+    evidence: PositionGradientEvidence,
+    owners: torch.Tensor,
+    *,
+    region_count: int,
+    rotation_moves_positions: bool = True,
+) -> PositionGradientEvidence:
+    """Remove each region's shared infinitesimal rigid gradient field.
+
+    Fit ``g_i = t + omega x (x_i - center)`` to supported GS only. Batched
+    float64 normal equations and an input-precision rank cutoff handle
+    planar/collinear regions without a regularization hyperparameter. The residual is a
+    first-order proposal signal, not an estimate of physical motion. Missing
+    observations do not fit either the center or the shared field. If the
+    backend rotates covariance only, XYZ sharing can remove translation only.
+    """
+    scores = score_split_regions(evidence, owners, region_count=region_count)
+    if (xyz.shape != evidence.mean.shape or xyz.device != evidence.mean.device
+            or not xyz.is_floating_point() or not bool(torch.isfinite(xyz).all())):
+        raise ValueError('Rigid projection expects finite floating XYZ [N,3]')
+    known = evidence.supported & (owners >= 0)
+    residual = torch.zeros_like(evidence.mean)
+    if not bool(known.any()):
+        return PositionGradientEvidence(residual, evidence.visible_views.clone(), known)
+    identifiers = owners[known]
+    points = xyz[known].detach().double()
+    gradients = evidence.mean[known].detach().double()
+    counts = scores.supported_gs.double().clamp_min(1)[:, None]
+    centers = points.new_zeros(region_count, 3).index_add_(0, identifiers, points) / counts
+    translation = gradients.new_zeros(region_count, 3).index_add_(0, identifiers, gradients) / counts
+    shared = translation[identifiers]
+    if rotation_moves_positions:
+        relative = points - centers[identifiers]
+        radius = points.new_zeros(region_count).index_add_(
+            0, identifiers, relative.square().sum(-1))
+        radius = (radius / counts[:, 0]).sqrt()
+        relative = relative / radius[identifiers].clamp_min(torch.finfo(points.dtype).tiny)[:, None]
+        identity = torch.eye(3, dtype=points.dtype, device=points.device)
+        gram_rows = (relative.square().sum(-1)[:, None, None] * identity -
+                     relative[:, :, None] * relative[:, None, :])
+        gram = points.new_zeros(region_count, 3, 3).index_add_(0, identifiers, gram_rows)
+        gram = gram / counts[:, :, None]
+        centered_gradients = gradients - translation[identifiers]
+        torque = points.new_zeros(region_count, 3).index_add_(
+            0, identifiers, torch.cross(relative, centered_gradients, dim=-1)) / counts
+        precision = max(torch.finfo(xyz.dtype).eps, torch.finfo(evidence.mean.dtype).eps)
+        inverse = torch.linalg.pinv(gram, hermitian=True, rtol=gram.shape[-1] * precision)
+        omega = (inverse @ torque[:, :, None]).squeeze(-1)
+        shared = shared + torch.cross(omega[identifiers], relative, dim=-1)
+    remaining = gradients - shared
+    # Suppress only roundoff from an exactly representable shared field.
+    tolerance = (64 * torch.finfo(evidence.mean.dtype).eps *
+                 torch.maximum(gradients.norm(dim=-1), shared.norm(dim=-1)))
+    remaining = torch.where((remaining.norm(dim=-1) > tolerance)[:, None], remaining, 0)
+    residual[known] = remaining.to(residual)
+    return PositionGradientEvidence(residual, evidence.visible_views.clone(), known)
+
+
 def select_split_regions(
     scores: SplitRegionScores,
     legal: torch.Tensor,

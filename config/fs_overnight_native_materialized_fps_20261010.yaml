@@ -1,0 +1,19 @@
+# 仅只读FPS评测：恢复原版模型与历史PSNR有0.01375dB差异，显式报告。
+checkpoint_frames:
+- 299
+checkpoint_step: 200
+quality_reference: native_log
+evaluation_resolution: -1
+image_size:
+- 1600
+- 1199
+render_attribute_cache: true
+metric_absolute_tolerance: 0.02
+warmup_renders: 10
+timed_renders: 100
+rounds: 3
+scopes:
+- forward_clamp
+- rasterizer
+quality_reference_note: Original source reproduces PSNR 34.25715 vs historical rounded
+  log34.2709 (difference0.01375); timing uses restored state and reports both.

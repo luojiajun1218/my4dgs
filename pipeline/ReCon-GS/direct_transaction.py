@@ -115,25 +115,41 @@ class DirectTransaction:
         directory = module.output_dir / 'direct_tree_trials' / f'frame_{module.current_frame:03d}'
         directory.mkdir(parents=True, exist_ok=False)
         raw = model_raw(module.gaussians)
-        torch.save(dict(control=self.control.capture(), candidate=candidate.capture(),
-                        raw=raw, report=self.report, frame=module.current_frame,
-                        control_stats=self.control_stats, view_names=self.view_names),
-                   directory / 'fitted_motion_snapshot.pt')
+        io_seconds = 0.
+        if candidate.config.direct_save_trial_artifacts:
+            io_started = time.perf_counter()
+            torch.save(dict(control=self.control.capture(), candidate=candidate.capture(),
+                            raw=raw, report=self.report, frame=module.current_frame,
+                            control_stats=self.control_stats, view_names=self.view_names),
+                       directory / 'fitted_motion_snapshot.pt')
+            module.trainer.synchronize()
+            io_seconds += time.perf_counter() - io_started
         branches = {}
+        codec_started = time.perf_counter()
+        codec_io_seconds = 0.
         for name, motion in (('control', self.control), ('candidate', candidate)):
             xyz, rotation = motion(motion.config.motion_steps)
             moved = dict(raw, xyz=xyz.detach(), rotation=rotation.detach())
-            path = directory / f'{name}.bin'
-            export = motion.export_motion(path, frame_index=module.current_frame,
+            packet, export = motion.encode_motion(frame_index=module.current_frame,
                 previous_state_digest=module.quant_previous_sha256,
                 post_motion_digest=reference_digest(moved), previous_count=len(module.quant_previous_reference['xyz']),
                 deleted_count=int(module.quant_deleted_indices.numel()), birth_count=0)
-            header = motion.read_header(path)
+            header = motion.read_header(packet)
             layout = apply_layout_edits(motion._frame_coding_layout, header['structure_edits'], motion.base_xyz)
-            dx, dq, *_ = motion.decode_motion(path, motion.base_xyz, motion.base_rotation, motion.config, layout)
+            dx, dq, *_ = motion.decode_motion(packet, motion.base_xyz, motion.base_rotation, motion.config, layout)
             if reference_digest(dict(raw, xyz=dx, rotation=dq)) != header['post_motion_digest']:
                 raise AssertionError('Trial encoded/decoded motion hash mismatch')
+            if candidate.config.direct_save_trial_artifacts:
+                io_started = time.perf_counter()
+                path = directory / f'{name}.bin'
+                path.write_bytes(packet)
+                export['path'] = str(path)
+                duration = time.perf_counter() - io_started
+                io_seconds += duration
+                codec_io_seconds += duration
             branches[name] = dict(motion=motion, xyz=dx, rotation=dq, export=export, objectives=[])
+        module.trainer.synchronize()
+        codec_seconds = max(0., time.perf_counter() - codec_started - codec_io_seconds)
         # Acceptance uses all available cam01--20 training cameras, no holdout.
         cameras = []
         original_xyz, original_q = module.gaussians.rigid_xyz, module.gaussians.rigid_rotation
@@ -171,6 +187,9 @@ class DirectTransaction:
         self.report.update(accepted=accepted, branches=values, training_cameras=cameras,
                            continuation_view_order=self.view_names,
                            reference_bytes=reference_bytes, rate_weight=weight,
+                           trial_artifacts_saved=candidate.config.direct_save_trial_artifacts,
+                           trial_artifact_write_seconds=io_seconds,
+                           trial_codec_seconds=codec_seconds,
                            acceptance_seconds=time.perf_counter() - started,
                            semantics='One entire decoded motion batch; equal remaining motion/gate budgets '
                            'per branch after the proposal. Conditional motion comparison before newborn fitting. '
@@ -181,6 +200,8 @@ class DirectTransaction:
         module.residual_motion.stage_seconds['direct_control'] = self.report['extra_control_seconds']
         module.residual_motion.stage_seconds['direct_acceptance'] = self.report['acceptance_seconds']
         module.residual_motion.stage_seconds['direct_proposal'] = self.report['proposal_seconds']
+        module.residual_motion.stage_seconds['direct_trial_artifact_write'] = io_seconds
+        module.residual_motion.stage_seconds['direct_trial_codec'] = codec_seconds
 
 
 @torch.no_grad()
@@ -190,7 +211,11 @@ def start_transaction(module, render_pkg):
         return
     if module.current_frame % cfg.direct_update_interval:
         return
-    if cfg.direct_proposal_step is not None and cfg.direct_proposal_step < cfg.dense_fit_steps + cfg.gate_compress_steps:
+    if (not cfg.direct_reset_on_noop and cfg.direct_candidate_windows == 0
+            and not cfg.direct_gradient_split_enabled):
+        return
+    if (not cfg.direct_preserve_optimizer_moments and cfg.direct_proposal_step is not None
+            and cfg.direct_proposal_step < cfg.dense_fit_steps + cfg.gate_compress_steps):
         # Apply the same boundary reset even in fixed-tree control runs.
         motion._make_optimizers()
         motion.current_phase = None

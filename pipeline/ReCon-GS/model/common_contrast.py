@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 import struct
 import time
+import zlib
 from typing import List, Optional
 
 import torch
@@ -37,6 +38,8 @@ CODEC_VERSION = 'common_contrast_preorder_v1'
 CODEC_MAGIC = b'CCRB'
 CODEC_HEADER = struct.Struct('<4sBBH6If32s32s32s')
 CODEC_HEADER_BYTES = CODEC_HEADER.size
+ENTROPY_MAGIC = b'CCZ1'
+ENTROPY_HEADER = struct.Struct('<4sII')
 
 
 @dataclass
@@ -59,6 +62,33 @@ class CommonContrastConfig(BinaryRefinementConfig):
     direct_initial_levels: int = 3
     direct_node_budget: int = 1000000
     direct_gradient_split_enabled: bool = False
+    direct_split_score_mode: str = 'gradient_norm'  # Or rigid_residual for shared-motion conflict
+    direct_preserve_split_motion: bool = False
+    direct_save_trial_artifacts: bool = True
+    direct_reset_on_noop: bool = True  # Legacy periodic reset even with no edit candidates
+    direct_enable_swaps: bool = True
+    direct_preserve_optimizer_moments: bool = False
+    motion_prior_decay: float = 0.0
+    motion_entropy_compression: bool = False
+    birth_export_format: str = 'ply'  # Or raw_zlib: lossless attributes + tree sources
+    birth_residual_enabled: bool = False
+    birth_residual_camera_names: Optional[List[str]] = None
+    birth_residual_max_candidates: int = 100
+    birth_residual_proposals_per_view: int = 64
+    birth_residual_cell_size: int = 32
+    birth_residual_min_error: float = .08
+    birth_residual_min_alpha: float = .05
+    birth_residual_min_views: int = 2
+    birth_residual_depth_ratios: Optional[List[float]] = None
+    birth_residual_radius_pixels: float = 2.
+    birth_residual_separation: float = 1.5
+    birth_residual_occlusion_tolerance: float = .03
+    birth_residual_initial_opacity: float = .1
+    birth_lifetime_enabled: bool = False
+    birth_lifetime_opacity_lr: float = .1
+    birth_lifetime_opacity_regularization: float = .001
+    birth_lifetime_expire_opacity: float = .0039
+    rotation_moves_positions: bool = True  # False follows ReCon-GS covariance-only rotation
     direct_split_camera_names: Optional[List[str]] = None
     direct_split_min_visible_views: Optional[int] = None
     direct_split_top_k: Optional[int] = None
@@ -89,14 +119,70 @@ class CommonContrastConfig(BinaryRefinementConfig):
         for name in ('cache_static_layout', 'cache_frozen_storage',
                      'force_all_gates_open', 'component_modes', 'direct_tree_enabled',
                      'direct_gradient_split_enabled', 'direct_enable_merges',
-                     'direct_prune_inactive_splits'):
+                     'direct_prune_inactive_splits', 'direct_preserve_split_motion',
+                     'direct_save_trial_artifacts'):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f'{name} must be bool')
+        if not isinstance(self.direct_reset_on_noop, bool):
+            raise ValueError('direct_reset_on_noop must be bool')
+        for name in ('direct_enable_swaps', 'direct_preserve_optimizer_moments', 'motion_entropy_compression'):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f'{name} must be bool')
+        if (isinstance(self.motion_prior_decay, bool) or not math.isfinite(self.motion_prior_decay)
+                or not 0 <= self.motion_prior_decay <= 1):
+            raise ValueError('motion_prior_decay must be in [0, 1]')
 
         if self.direct_tree_enabled and not self.component_modes:
             raise ValueError('direct tree v3 requires component_modes')
+        if self.birth_appearance_action == 'color_update' and not self.component_modes:
+            raise ValueError('Sparse color v5 requires component_modes')
+        if self.birth_export_format not in ('ply', 'raw_zlib'):
+            raise ValueError('Unknown common/contrast birth export format')
+        if not isinstance(self.birth_residual_enabled, bool):
+            raise ValueError('birth_residual_enabled must be bool')
+        if self.birth_residual_enabled:
+            names = self.birth_residual_camera_names
+            if not names or len(set(names)) != len(names):
+                raise ValueError('Residual births require distinct training cameras')
+            for name in ('birth_residual_max_candidates', 'birth_residual_proposals_per_view',
+                         'birth_residual_cell_size', 'birth_residual_min_views'):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f'{name} must be a positive integer')
+            if self.birth_residual_min_views > len(names):
+                raise ValueError('Residual minimum support exceeds camera count')
+            for name in ('birth_residual_min_error', 'birth_residual_min_alpha',
+                         'birth_residual_radius_pixels', 'birth_residual_separation'):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'{name} must be finite and positive')
+            if not 0 < self.birth_residual_initial_opacity < 1:
+                raise ValueError('Residual initial opacity must be in (0, 1)')
+            if not math.isfinite(self.birth_residual_occlusion_tolerance) or self.birth_residual_occlusion_tolerance < 0:
+                raise ValueError('Residual occlusion tolerance must be finite and nonnegative')
+            if (not self.birth_residual_depth_ratios or any(isinstance(value, bool) or
+                    not math.isfinite(value) or value <= 0 for value in self.birth_residual_depth_ratios)):
+                raise ValueError('Residual depth ratios must be positive')
+        if not isinstance(self.birth_lifetime_enabled, bool):
+            raise ValueError('birth_lifetime_enabled must be bool')
+        if self.birth_lifetime_enabled:
+            if not self.enable_incremental or not self.component_modes:
+                raise ValueError('Birth lifetime fitting requires incremental steps')
+            if (not math.isfinite(self.birth_lifetime_opacity_lr) or self.birth_lifetime_opacity_lr <= 0 or
+                    not math.isfinite(self.birth_lifetime_opacity_regularization) or self.birth_lifetime_opacity_regularization < 0 or
+                    not 0 < self.birth_lifetime_expire_opacity < 1):
+                raise ValueError('Invalid birth lifetime settings')
+        if not isinstance(self.rotation_moves_positions, bool):
+            raise ValueError('rotation_moves_positions must be bool')
+        if not self.rotation_moves_positions:
+            if not self.component_modes:
+                raise ValueError('Covariance-only rotation requires component modes')
+            if self.direct_tree_enabled and (self.direct_enable_swaps or self.direct_enable_merges):
+                raise ValueError('Covariance-only motion currently supports motion-preserving splits only')
         if self.direct_edit_encoding not in ('row_json', 'node_ops'):
             raise ValueError('Unknown direct tree edit encoding')
+        if self.direct_split_score_mode not in ('gradient_norm', 'rigid_residual'):
+            raise ValueError('Unknown direct split score mode')
         if self.direct_proposal_step is not None:
             value = self.direct_proposal_step
             if (isinstance(value, bool) or not isinstance(value, int) or
@@ -164,36 +250,44 @@ def _member_counts(layout):
 
 def _effective_splits(layout):
     """Return binary masks, unary-child maps and fixed member weights."""
-    occupancy = _occupancy(layout)
     children = _children(layout)
     members = _member_counts(layout)
+    occupancy = [value > 0 for value in members]
+    member_lists = [value.detach().cpu().tolist() for value in members]
     gate_positions = [{int(node): i for i, node in enumerate(rows.tolist())}
                       for rows in layout['refine_rows']]
     binary, unary, weights = [], [], []
     for level in range(len(layout['counts']) - 1):
-        binary_level = torch.zeros(layout['counts'][level], dtype=torch.bool,
-                                   device=layout['index'].device)
-        unary_level = torch.full((layout['counts'][level],), -1, dtype=torch.long,
-                                 device=layout['index'].device)
+        binary_values = [False] * layout['counts'][level]
+        unary_values = [-1] * layout['counts'][level]
         weight_level = layout['pivots'][level].new_zeros(
             (len(layout['refine_rows'][level]), 2))
+        positions, left_rows, right_rows = [], [], []
         for parent, candidates in enumerate(children[level]):
-            occupied = [child for child in candidates if bool(occupancy[level + 1][child])]
+            occupied = [child for child in candidates if member_lists[level + 1][child] > 0]
             if len(occupied) == 1:
-                unary_level[parent] = occupied[0]
+                unary_values[parent] = occupied[0]
             elif len(occupied) == 2:
-                binary_level[parent] = True
+                binary_values[parent] = True
                 position = gate_positions[level].get(parent)
                 if position is None:
                     raise ValueError('Effective binary split has no gate row')
                 left, right = occupied
-                total = members[level + 1][left] + members[level + 1][right]
-                if int(total) <= 0:
-                    raise ValueError('Effective split has no occupied members')
-                weight_level[position, 0] = members[level + 1][left] / total
-                weight_level[position, 1] = members[level + 1][right] / total
+                positions.append(position)
+                left_rows.append(left)
+                right_rows.append(right)
             elif len(occupied) > 2:
                 raise ValueError('Common/contrast backend requires a binary forest')
+        device = layout['index'].device
+        binary_level = torch.tensor(binary_values, dtype=torch.bool, device=device)
+        unary_level = torch.tensor(unary_values, dtype=torch.long, device=device)
+        if positions:
+            left = members[level + 1][torch.tensor(left_rows, device=device)]
+            right = members[level + 1][torch.tensor(right_rows, device=device)]
+            total = left + right
+            # Keep integer true-division on this device, as in the scalar codec.
+            values = torch.stack((left / total, right / total), dim=-1)
+            weight_level[torch.tensor(positions, device=device)] = values.to(weight_level)
         binary.append(binary_level)
         unary.append(unary_level)
         weights.append(weight_level)
@@ -370,6 +464,15 @@ class CommonContrastMotion(BinaryRefinementMotion):
                 not math.isfinite(float(extent)) or extent <= 0):
             raise ValueError('Common/contrast motion requires valid base poses and extent')
         old_layout = self.materialized_layout
+        prior = None
+        if self.config.motion_prior_decay and self.index is not None and self.committed:
+            root, contrasts, *_ = self._quantized_parameters()
+            gates = self.refinement_masks(self.config.motion_steps)
+            paths = self._paths(gates)
+            prior = (root.detach().clone(),
+                [(value * (paths[level][self.active_layout['refine_rows'][level]] * gates[level])[:, None]).detach().clone()
+                 for level, value in enumerate(contrasts)],
+                [rows.detach().cpu().tolist() for rows in self.active_layout['refine_rows']])
         if layout_override is None:
             if (isinstance(frame_index, bool) or not isinstance(frame_index, int)
                     or frame_index < 1):
@@ -429,6 +532,19 @@ class CommonContrastMotion(BinaryRefinementMotion):
         self.refine_logits = nn.ParameterList([
             nn.Parameter(xyz.new_full((len(rows),), float(self.config.initial_gate_logit)))
             for rows in layout['refine_rows']])
+        inherited = prior is not None and not rebuild and len(prior[0]) == self.counts[0]
+        if inherited:
+            decay = self.config.motion_prior_decay
+            with torch.no_grad():
+                self.root_translation.copy_(prior[0][:, :3] * decay)
+                self.root_rotation.copy_(prior[0][:, 3:] * decay)
+                for level, rows in enumerate(layout['refine_rows']):
+                    previous = {node: i for i, node in enumerate(prior[2][level])}
+                    for position, node in enumerate(rows.detach().cpu().tolist()):
+                        if node in previous:
+                            value = prior[1][level][previous[node]] * decay
+                            self.contrast_translation[level][position].copy_(value[:3])
+                            self.contrast_rotation[level][position].copy_(value[3:])
         (self._cached_occupancy, self._cached_children, self._cached_members,
          self._cached_gate_positions, self._cached_binary, self._cached_unary,
          self._cached_weights) = _effective_splits(layout)
@@ -470,7 +586,7 @@ class CommonContrastMotion(BinaryRefinementMotion):
         self.tree_setup = dict(frame=frame_index, builder='spatial', probe_steps=0,
             action='initial' if old_layout is None else ('rebuild' if rebuild else 'reuse'),
             tree_rebuild_interval=self.config.tree_rebuild_interval,
-            tree_rebuilt=bool(rebuild), initialization_decay=0.,
+            tree_rebuilt=bool(rebuild), initialization_decay=self.config.motion_prior_decay if inherited else 0.,
             old_region_counts=list(old_layout['counts']) if old_layout else None,
             region_counts=list(self.counts),
             effective_binary_splits=[int(value.sum()) for value in self._cached_binary],
@@ -557,6 +673,23 @@ class CommonContrastMotion(BinaryRefinementMotion):
             scaled.append(raw_scaled)
         return root, contrasts, root_symbols, symbols, root_scaled, scaled
 
+    def motion_quantization_metadata(self):
+        """Report this backend's effective grid and zero-bin semantics."""
+        return dict(
+            translation_step_extent=self.config.translation_step_extent,
+            translation_step_world=self.extent * self.config.translation_step_extent,
+            rotation_step_rad=self.config.rotation_step_rad,
+            guaranteed_zero_translation_below_extent=self.config.translation_step_extent / 2,
+            guaranteed_zero_rotation_below_rad=self.config.rotation_step_rad / 2,
+            fixed_motion_bits=self.config.fixed_motion_bits,
+            quantized_records='Root shared transforms and split contrasts',
+            unused_legacy_motion_fields=['motion_xyz_step_extent', 'motion_rotation_step_rad'],
+            semantics='Each record component rounds to the nearest signed integer on this grid. '
+                      'A zero contrast inherits its shared ancestor motion. Member weights are '
+                      'applied after contrast quantization; the composed GS pose has no additional '
+                      'per-GS quantization. Exact nonzero GS changes are not counts of independent '
+                      'stored GS motion records.')
+
     def _regions(self, root, contrasts):
         regions = [root]
         for level in range(len(self.parents)):
@@ -610,7 +743,8 @@ class CommonContrastMotion(BinaryRefinementMotion):
         terminal = terminal_node_rows(self.active_layout, paths, selected_only=selected)
         return node_conditional_transform(self.base_xyz, self.base_rotation,
             self.active_layout, self._regions(root, contrasts), paths,
-            selected_only=selected, terminal=terminal)
+            selected_only=selected, terminal=terminal,
+            rotate_positions=self.config.rotation_moves_positions)
 
     def optimizer_step(self):
         phase = self.stage(self.last_step)
@@ -680,7 +814,8 @@ class CommonContrastMotion(BinaryRefinementMotion):
         padding = (self.base_xyz.new_tensor(float((-int(total_bits)) % 8))
                    if hard else self.base_xyz.new_zeros(()))
         edits = self._structural_payload()
-        structural_bytes = 4 + len(edits) if self.config.direct_tree_enabled else 0
+        structural_bytes = 4 + len(edits) if (self.config.direct_tree_enabled or
+            self.config.birth_appearance_action == 'color_update') else 0
         if (support_differentiable and self.config.direct_prune_inactive_splits and
                 self._pending_edit_operations):
             structural_bytes = self._expected_node_edit_bytes(paths, gates)
@@ -799,26 +934,44 @@ class CommonContrastMotion(BinaryRefinementMotion):
             self._frame_edit_payload = layout_edits(self._frame_coding_layout, self.active_layout)
         return self._frame_edit_payload
 
-    def export_motion(self, path, *, frame_index, previous_state_digest,
-                      post_motion_digest, previous_count, deleted_count, birth_count):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def encode_motion(self, *, frame_index, previous_state_digest,
+                      post_motion_digest, previous_count, deleted_count, birth_count,
+                      appearance_present=False, opacity_present=False):
+        """Return the exact deployment packet and size without filesystem I/O."""
         payload, bit_count = self._encode_payload(self.config.motion_steps)
         version = ((4 if self.config.direct_edit_encoding == 'node_ops' else 3)
                    if self.config.direct_tree_enabled else 2 if self.config.component_modes else 1)
+        if self.config.birth_appearance_action == 'color_update':
+            version = 5
+        if self.config.birth_lifetime_enabled:
+            version = 6
+        if not self.config.rotation_moves_positions:
+            version = 7
+        if appearance_present and version < 5:
+            raise ValueError('Appearance stream requires common/contrast v5')
+        if opacity_present and not self.config.birth_lifetime_enabled:
+            raise ValueError('Opacity stream requires common/contrast v6')
         edits = self._structural_payload()
         structure = struct.pack('<I', len(edits)) + edits if version >= 3 else b''
-        header = CODEC_HEADER.pack(CODEC_MAGIC, version, 0, CODEC_HEADER_BYTES,
+        flags = int(appearance_present) | (2 * int(opacity_present)) | (4 * int(self.config.birth_lifetime_enabled))
+        flags |= 8 * int(not self.config.rotation_moves_positions)
+        header = CODEC_HEADER.pack(CODEC_MAGIC, version, flags, CODEC_HEADER_BYTES,
             int(frame_index), int(previous_count), len(self.base_xyz), int(deleted_count),
             int(birth_count), int(bit_count), float(self.extent), bytes.fromhex(previous_state_digest),
             bytes.fromhex(post_motion_digest), layout_digest(self.active_layout))
-        path.write_bytes(header + structure + payload)
-        if path.stat().st_size != CODEC_HEADER_BYTES + len(structure) + math.ceil(bit_count / 8):
+        packet = header + structure + payload
+        if len(packet) != CODEC_HEADER_BYTES + len(structure) + math.ceil(bit_count / 8):
             raise AssertionError('Common/contrast stream size disagrees with encoded bit length')
-        return dict(path=str(path), archive_bytes=path.stat().st_size,
-            parameter_bytes=path.stat().st_size, payload_bits=bit_count,
+        parameter_bytes = len(packet)
+        if self.config.motion_entropy_compression:
+            packet = ENTROPY_HEADER.pack(ENTROPY_MAGIC, len(packet), zlib.crc32(packet)) + zlib.compress(packet, 3)
+        return packet, dict(archive_bytes=len(packet), entropy_compressed=self.config.motion_entropy_compression,
+            parameter_bytes=parameter_bytes, payload_bits=bit_count,
             payload_padding_bits=(-bit_count) % 8, codec_header_bytes=CODEC_HEADER_BYTES,
-            frame=frame_index, layout_encoding=('common_contrast_node_edits_v4' if version == 4 else
+            frame=frame_index, layout_encoding=('common_contrast_covariance_rotation_v7' if version == 7 else
+                'common_contrast_birth_lifetime_v6' if version == 6 else
+                'common_contrast_sparse_color_v5' if version == 5 else
+                'common_contrast_node_edits_v4' if version == 4 else
                 'common_contrast_direct_tree_v3' if version == 3 else
                 'common_contrast_component_v2' if self.config.component_modes else CODEC_VERSION),
             structure_edit_bytes=len(structure),
@@ -830,16 +983,42 @@ class CommonContrastMotion(BinaryRefinementMotion):
                 'Each reached effective binary split has one refine bit; an open split has one '
                 'contrast presence bit and optional six-vector. Unary branches consume no fields.')
 
+    def export_motion(self, path, **kwargs):
+        packet, report = self.encode_motion(**kwargs)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(packet)
+        if path.stat().st_size != len(packet):
+            raise AssertionError('Common/contrast file size disagrees with encoded packet')
+        return dict(report, path=str(path))
+
     @staticmethod
     def read_header(path):
-        packet = Path(path).read_bytes()
+        """Read a deployment file or an already encoded in-memory packet."""
+        packet = bytes(path) if isinstance(path, (bytes, bytearray, memoryview)) else Path(path).read_bytes()
+        if packet.startswith(ENTROPY_MAGIC):
+            if len(packet) < ENTROPY_HEADER.size:
+                raise ValueError('Truncated entropy envelope')
+            _, length, checksum = ENTROPY_HEADER.unpack_from(packet)
+            if length > 256 * 1024 * 1024:
+                raise ValueError('Oversized entropy envelope')
+            decoder = zlib.decompressobj()
+            body = decoder.decompress(packet[ENTROPY_HEADER.size:], length + 1)
+            if (len(body) != length or not decoder.eof or decoder.unused_data or
+                    decoder.unconsumed_tail or zlib.crc32(body) != checksum):
+                raise ValueError('Entropy envelope failed validation')
+            packet = body
         if len(packet) < CODEC_HEADER_BYTES:
             raise ValueError('Truncated common/contrast header')
         values = CODEC_HEADER.unpack(packet[:CODEC_HEADER_BYTES])
         (magic, version, flags, header_size, frame, previous_count, base_count,
          deleted_count, birth_count, bit_count, extent, previous_digest,
          base_digest, topology) = values
-        if magic != CODEC_MAGIC or version not in (1, 2, 3, 4) or flags != 0 or header_size != CODEC_HEADER_BYTES:
+        invalid_flags = (flags != 0 if version < 5 else flags not in (0, 1) if version == 5 else
+                         bool(flags & ~7) or not bool(flags & 4) if version == 6 else
+                         bool(flags & ~15) or not bool(flags & 8) or (bool(flags & 2) and not bool(flags & 4)))
+        if (magic != CODEC_MAGIC or version not in (1, 2, 3, 4, 5, 6, 7) or
+                invalid_flags or header_size != CODEC_HEADER_BYTES):
             raise ValueError('Unsupported common/contrast stream')
         if not math.isfinite(extent) or extent <= 0:
             raise ValueError('Invalid scene extent in common/contrast stream')
@@ -856,10 +1035,15 @@ class CommonContrastMotion(BinaryRefinementMotion):
             cursor += size
         if len(packet) != cursor + math.ceil(bit_count / 8):
             raise ValueError('Common/contrast stream length disagrees with bit count')
-        return dict(codec=('common_contrast_node_edits_v4' if version == 4 else
+        return dict(codec=('common_contrast_covariance_rotation_v7' if version == 7 else
+                'common_contrast_birth_lifetime_v6' if version == 6 else
+                'common_contrast_sparse_color_v5' if version == 5 else
+                'common_contrast_node_edits_v4' if version == 4 else
                 'common_contrast_direct_tree_v3' if version == 3 else
                 'common_contrast_component_v2' if version == 2 else CODEC_VERSION),
-            component_modes=(version >= 2), structure_edits=edits,
+            component_modes=(version >= 2), structure_edits=edits, appearance_present=bool(flags & 1),
+            opacity_present=bool(flags & 2), lifetime_enabled=bool(flags & 4),
+            rotation_moves_positions=not bool(flags & 8),
             structure_edit_bytes=cursor - CODEC_HEADER_BYTES,
             frame=frame, previous_count=previous_count,
             base_count=base_count, deleted_count=deleted_count, birth_count=birth_count,
@@ -876,12 +1060,14 @@ class CommonContrastMotion(BinaryRefinementMotion):
         if layout_digest(layout).hex() != header['topology_digest']:
             raise ValueError('Deterministic tree digest disagrees with stream')
         occupancy, children, members, positions, binary, unary, weights = _effective_splits(layout)
+        occupied_values = [value.detach().cpu().tolist() for value in occupancy]
+        binary_values = [value.detach().cpu().tolist() for value in binary]
+        unary_values = [value.detach().cpu().tolist() for value in unary]
         reader = _BitReader(header['payload'], header['payload_bits'])
         counts = layout['counts']
-        root = base_xyz.new_zeros(counts[0], 6)
-        contrasts = [base_xyz.new_zeros(len(rows), 6) for rows in layout['refine_rows']]
-        gates = [torch.zeros(len(rows), device=base_xyz.device, dtype=torch.bool)
-                 for rows in layout['refine_rows']]
+        root_codes = [[0] * 6 for _ in range(counts[0])]
+        split_codes = [[[0] * 6 for _ in range(len(rows))] for rows in layout['refine_rows']]
+        gate_values = [[False] * len(rows) for rows in layout['refine_rows']]
         bits = config.fixed_motion_bits
         steps = base_xyz.new_tensor([float(header['extent']) * config.translation_step_extent] * 3 +
                                     [config.rotation_step_rad] * 3)
@@ -898,52 +1084,54 @@ class CommonContrastMotion(BinaryRefinementMotion):
                         values[offset:offset + 3] = block
             else:
                 if not reader.read():
-                    return base_xyz.new_zeros(6), [0] * 6
+                    return [0] * 6
                 values = [_signed_value(reader.read(bits), bits) for _ in range(6)]
                 if not any(values):
                     raise ValueError('A zero motion must omit its fixed-width payload')
-            return base_xyz.new_tensor(values) * steps, values
-
-        coded_root = torch.zeros(counts[0], 6, device=base_xyz.device, dtype=torch.long)
-        coded_splits = [torch.zeros_like(value, dtype=torch.long) for value in contrasts]
+            return values
 
         def visit(level, node):
-            if level >= len(gates):
+            if level >= len(gate_values):
                 return
-            if bool(binary[level][node]):
+            if binary_values[level][node]:
                 position = positions[level][node]
                 opened = bool(reader.read())
-                gates[level][position] = opened
+                gate_values[level][position] = opened
                 if opened:
-                    value, code = motion()
-                    contrasts[level][position] = value
-                    coded_splits[level][position] = torch.as_tensor(code, device=base_xyz.device)
+                    split_codes[level][position] = motion()
                     for child in children[level][node]:
-                        if bool(occupancy[level + 1][child]):
+                        if occupied_values[level + 1][child]:
                             visit(level + 1, child)
-            elif int(unary[level][node]) >= 0:
-                visit(level + 1, int(unary[level][node]))
+            elif unary_values[level][node] >= 0:
+                visit(level + 1, unary_values[level][node])
 
-        for node in torch.where(occupancy[0])[0].tolist():
-            value, code = motion()
-            root[node] = value
-            coded_root[node] = torch.as_tensor(code, device=base_xyz.device)
-            visit(0, node)
+        for node, occupied in enumerate(occupied_values[0]):
+            if occupied:
+                root_codes[node] = motion()
+                visit(0, node)
         if reader.cursor != header['payload_bits']:
             raise ValueError('Common/contrast stream has unread bits')
+        coded_root = torch.tensor(root_codes, device=base_xyz.device, dtype=torch.long).reshape(-1, 6)
+        coded_splits = [torch.tensor(value, device=base_xyz.device, dtype=torch.long).reshape(-1, 6)
+                        for value in split_codes]
+        root = coded_root.to(base_xyz) * steps
+        contrasts = [value.to(base_xyz) * steps for value in coded_splits]
+        gates = [torch.tensor(value, device=base_xyz.device, dtype=torch.bool) for value in gate_values]
 
         # Reconstruct child locals from the single stored split contrast.
         regions = [root]
         for level in range(len(gates)):
             child_motion = base_xyz.new_zeros(counts[level + 1], 6)
-            for position, node in enumerate(layout['refine_rows'][level].tolist()):
-                if not bool(binary[level][node]):
-                    continue
-                occupied = [child for child in children[level][node]
-                            if bool(occupancy[level + 1][child])]
-                wl, wr = weights[level][position]
-                child_motion[occupied[0]] = -wr * contrasts[level][position]
-                child_motion[occupied[1]] = wl * contrasts[level][position]
+            pairs = [(position, *[child for child in children[level][node]
+                                 if occupied_values[level + 1][child]])
+                     for position, node in enumerate(layout['refine_rows'][level].tolist())
+                     if binary_values[level][node]]
+            if pairs:
+                pair_rows = torch.tensor(pairs, device=base_xyz.device, dtype=torch.long)
+                position, left, right = pair_rows.unbind(-1)
+                values = contrasts[level][position]
+                child_motion[left] = -weights[level][position, 1, None] * values
+                child_motion[right] = weights[level][position, 0, None] * values
             regions.append(child_motion)
         # Unary branches pass automatically; binary branches use decoded gates.
         paths = [occupancy[0].to(base_xyz)]
@@ -956,7 +1144,8 @@ class CommonContrastMotion(BinaryRefinementMotion):
             paths.append(paths[level][parent] * factor[parent] * occupancy[level + 1].to(base_xyz))
         terminal = terminal_node_rows(layout, paths, selected_only=True)
         xyz, rotation = node_conditional_transform(base_xyz, base_rotation, layout,
-            regions, paths, selected_only=True, terminal=terminal)
+            regions, paths, selected_only=True, terminal=terminal,
+            rotate_positions=header['rotation_moves_positions'])
         if coding_state is not None:
             coding_state.update(root_symbols=coded_root, split_symbols=coded_splits,
                                 contrasts=contrasts, paths=paths)
@@ -970,16 +1159,26 @@ class CommonContrastMotion(BinaryRefinementMotion):
                 bool(((source < 0) | (source >= old_count)).any())):
             raise ValueError('Materialized newborn count does not match source rows')
         computed = _nearest_source_rows(materialized_xyz[:old_count], materialized_xyz[old_count:])
+        self.birth_layout_sources = computed
         full_index = torch.cat((self.index, self.index[:, computed]), dim=1)
         self.materialized_layout = _copy_layout(_binary_layout(full_index, self.counts,
             self.parents, materialized_xyz, self.active_layout['pivots']))
         return self.materialized_layout
 
-    def compensation_deletions(self, opacity, previous_new_count):
+    def compensation_deletions(self, opacity, previous_new_count, birth_frames=None):
         if not self.committed:
             raise ValueError('Common/contrast deletion selection needs a committed prior frame')
         if len(opacity) != len(self.base_xyz) + previous_new_count:
             raise ValueError('Deletion count disagrees with the previous common/contrast tree')
+        if self.config.birth_lifetime_enabled:
+            from .birth_lifetime import expiration_deletions
+            xyz, rotation = self(self.config.motion_steps)
+            changed = ((xyz != self.base_xyz).any(-1) | (rotation != self.base_rotation).any(-1))
+            if birth_frames is None:
+                raise ValueError('Birth lifetime deletion requires point origins')
+            deleted, report = expiration_deletions(opacity, previous_new_count, changed,
+                birth_frames, self.config.birth_lifetime_expire_opacity)
+            return deleted, dict(report, enabled=True)
         if previous_new_count == 0:
             return torch.empty(0, dtype=torch.long, device=opacity.device), dict(
                 enabled=True, protected_keep_old_count=0, eligible_count=len(opacity),
@@ -1102,17 +1301,32 @@ class CommonContrastDecoder:
         self.last_pose_rotation = None
         self.retain_frame_state = retain_frame_state
         self.last_frame_state = None
+        self.birth_frames = None
 
-    def advance(self, motion_path, birth_path, raw):
+    def advance(self, motion_path, birth_path, raw, appearance_path=None, opacity_path=None):
         header = CommonContrastMotion.read_header(motion_path)
         frame = header['frame']
         if frame != self.last_frame + 1:
             raise ValueError(f'Expected frame {self.last_frame + 1}, received {frame}')
         if len(raw['xyz']) != header['previous_count'] or reference_digest(raw) != header['previous_digest']:
             raise ValueError('Previous Gaussian state disagrees with common/contrast stream')
-        if header['deleted_count'] != self.previous_birth_count:
+        if not header['lifetime_enabled'] and header['deleted_count'] != self.previous_birth_count:
             raise ValueError('Deletion count does not match prior birth count')
-        deleted = _delete_rows(raw, self.previous_birth_count, self.previous_changed)
+        if self.birth_frames is None:
+            self.birth_frames = torch.zeros(len(raw['xyz']), device=raw['xyz'].device, dtype=torch.long)
+        if header['lifetime_enabled']:
+            from .birth_lifetime import expiration_deletions
+            if not self.config.birth_lifetime_enabled:
+                raise ValueError('Birth lifetime stream requires matching configuration')
+            changed = self.previous_changed
+            if changed is None and frame == 1:
+                changed = torch.zeros(len(raw['xyz']), device=raw['xyz'].device, dtype=torch.bool)
+            deleted, _ = expiration_deletions(raw['opacity'], self.previous_birth_count, changed,
+                self.birth_frames, self.config.birth_lifetime_expire_opacity)
+        else:
+            deleted = _delete_rows(raw, self.previous_birth_count, self.previous_changed)
+        if len(deleted) != header['deleted_count']:
+            raise ValueError('Deterministic deleted count disagrees with stream')
         rows = survivor_rows(len(raw['xyz']), deleted)
         base = {name: raw[name][rows].clone() for name in RAW_FIELDS}
         if len(base['xyz']) != header['base_count']:
@@ -1147,14 +1361,37 @@ class CommonContrastDecoder:
                 regions=regions, coding=coding, header=decoded)
         changed = ((xyz != base['xyz']).any(-1) | (rotation != base['rotation']).any(-1)).detach()
         base['xyz'], base['rotation'] = xyz, rotation
+        if header['appearance_present']:
+            if appearance_path is None:
+                raise ValueError('Sparse color stream is required by motion header')
+            from .sparse_color import apply_sparse_color_packet
+            base = apply_sparse_color_packet(appearance_path, base)
+        elif appearance_path is not None:
+            raise ValueError('Unexpected sparse color stream')
+        if header['opacity_present']:
+            if opacity_path is None:
+                raise ValueError('Historical birth opacity stream is required')
+            from .birth_lifetime import apply_opacity_packet
+            base = apply_opacity_packet(opacity_path, base)
+        elif opacity_path is not None:
+            raise ValueError('Unexpected historical birth opacity stream')
         if reference_digest(base) != header['post_motion_digest']:
             raise ValueError('Decoded post-motion state digest mismatch')
-        births = (_load_birth_ply(birth_path, base['xyz'].device) if birth_path else
-                  {name: base[name].new_empty((0,) + base[name].shape[1:]) for name in RAW_FIELDS})
+        sources = None
+        if birth_path:
+            from .birth_codec import MAGIC as BIRTH_MAGIC, decode_birth_packet
+            birth_packet = Path(birth_path).read_bytes()
+            if birth_packet.startswith(BIRTH_MAGIC):
+                births, sources = decode_birth_packet(birth_packet, base)
+            else:
+                births = _load_birth_ply(birth_path, base['xyz'].device)
+        else:
+            births = {name: base[name].new_empty((0,) + base[name].shape[1:]) for name in RAW_FIELDS}
         if len(births['xyz']) != header['birth_count']:
             raise ValueError('Birth PLY count disagrees with stream')
         if len(births['xyz']):
-            sources = _nearest_source_rows(base['xyz'], births['xyz'])
+            if sources is None:
+                sources = _nearest_source_rows(base['xyz'], births['xyz'])
             full_index = torch.cat((layout['index'], layout['index'][:, sources]), dim=1)
             materialized_xyz = torch.cat((base['xyz'], births['xyz']), dim=0)
         else:
@@ -1165,6 +1402,8 @@ class CommonContrastDecoder:
             layout['counts'], layout['parents'], materialized_xyz, layout['pivots']))
         self.previous_changed = changed
         self.previous_birth_count = len(births['xyz'])
+        self.birth_frames = torch.cat((self.birth_frames[rows.to(self.birth_frames.device)],
+            torch.full((self.previous_birth_count,), frame, device=self.birth_frames.device, dtype=torch.long)))
         self.last_frame = frame
         self.last_pose_xyz = torch.cat((xyz, births['xyz'].to(xyz)), dim=0)
         self.last_pose_rotation = torch.cat((rotation, births['rotation'].to(rotation)), dim=0)

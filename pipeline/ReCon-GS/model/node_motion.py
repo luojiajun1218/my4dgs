@@ -30,12 +30,14 @@ def terminal_node_rows(layout, paths, *, selected_only, levels=None):
 
 def node_conditional_transform(base_xyz, base_rotation, layout, regions, paths,
                                *, selected_only=False, terminal=None,
-                               active_rows=None):
+                               active_rows=None, rotate_positions=True):
     """Compose world rotations and pivot displacements; inputs are float32/64.
 
     Joint STE training evaluates every node, including closed candidates. Fixed
     choices may omit unreachable nodes. The final exact-zero correction retains
     raw XYZ/quaternions while the differentiable expression keeps opening grads.
+    With rotate_positions=False, translations add along the path and rotations
+    affect covariance orientation only, matching ReCon-GS position semantics.
     """
     levels = len(regions)
     rotations, displacements, active = [], [], []
@@ -54,7 +56,8 @@ def node_conditional_transform(base_xyz, base_rotation, layout, regions, paths,
             parent_q = rotations[level - 1][parent]
             relative_center = (layout['pivots'][level][rows] -
                                layout['pivots'][level - 1][parent])
-            delta = (rotation_delta(parent_q, relative_center) +
+            delta = ((rotation_delta(parent_q, relative_center) +
+                      displacements[level - 1][parent] + values[:, :3]) if rotate_positions else
                      displacements[level - 1][parent] + values[:, :3])
             q = quaternion_multiply(local_q, parent_q)
             changed = active[level - 1][parent] | own_active
@@ -72,7 +75,8 @@ def node_conditional_transform(base_xyz, base_rotation, layout, regions, paths,
     center = torch.cat(layout['pivots'][:levels], dim=0)[terminal]
     delta = torch.cat(displacements, dim=0)[terminal]
     changed = torch.cat(active, dim=0)[terminal]
-    xyz = base_xyz + rotation_delta(q, base_xyz - center) + delta
+    xyz = (base_xyz + rotation_delta(q, base_xyz - center) + delta if rotate_positions else
+           base_xyz + delta)
     rotation = quaternion_multiply(q, base_rotation)
     exact_xyz = torch.where(changed[:, None], xyz, base_xyz)
     exact_rotation = torch.where(changed[:, None], rotation, base_rotation)

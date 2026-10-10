@@ -17,7 +17,8 @@ from .common_contrast import (CommonContrastMotion, _principal_rotation_vector,
 from .node_motion import rotation_delta, terminal_node_rows
 from .region_rigid import rotation_vector_quaternion
 from .split_region_scores import (PositionGradientEvidence, cluster_split_region,
-                                  score_split_regions, select_split_regions)
+                                  rigid_gradient_residual, score_split_regions,
+                                  select_split_regions)
 from .tree_edit_codec import MAGIC, decode_node_edits, replay_node_edits
 from libgs.utils.general import quaternion_multiply
 
@@ -93,6 +94,9 @@ def gradient_split_proposals(motion, xyz, evidence):
     counts = layout['counts']
     paths = [layout['index'].new_ones(count) for count in counts]
     owners = terminal_node_rows(layout, paths, selected_only=False)
+    if cfg.direct_split_score_mode == 'rigid_residual':
+        evidence = rigid_gradient_residual(xyz, evidence, owners, region_count=sum(counts),
+                                          rotation_moves_positions=cfg.rotation_moves_positions)
     scores = score_split_regions(evidence, owners, region_count=sum(counts))
     legal_flags, locations = [], []
     for level, count in enumerate(counts):
@@ -128,11 +132,16 @@ def gradient_split_proposals(motion, xyz, evidence):
         records.append(record)
     eligible = legal & torch.isfinite(scores.score) & (scores.score > 0)
     return proposals, dict(eligible_regions=int(eligible.sum()), legal_regions=int(legal.sum()),
+                           shared_position_field=(('rigid' if cfg.rotation_moves_positions else 'translation')
+                               if cfg.direct_split_score_mode == 'rigid_residual' else None),
                            selected_regions=records,
                            candidate_fraction=cfg.direct_split_candidate_fraction,
                            count_cap=cfg.direct_split_top_k,
                            supported_gs=int(evidence.supported.sum()),
-                           total_gs=len(xyz), score='mean of per-GS mean-visible-world-gradient norms')
+                           total_gs=len(xyz), score_mode=cfg.direct_split_score_mode,
+                           score=('mean residual gradient norm after shared infinitesimal rigid projection'
+                                  if cfg.direct_split_score_mode == 'rigid_residual' else
+                                  'mean of per-GS mean-visible-world-gradient norms'))
 
 
 def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence=None):
@@ -215,7 +224,7 @@ def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence
         if a in used or b in used:
             continue
         changed = []
-        if chosen:
+        if chosen and cfg.direct_enable_swaps:
             # Swap one whole subtree; its unique GS descendants move together.
             left = child[1]
             right = child[2 if chosen == 1 else 3]
@@ -224,7 +233,7 @@ def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence
             index[0, old['index'][1] == right] = a
             changed.append('cross_boundary_regroup')
             operations.append(dict(kind='swap', left=left, right=right))
-        elif (cfg.direct_enable_merges and len(counts) == 4 and
+        elif (not chosen and cfg.direct_enable_merges and len(counts) == 4 and
               not bool((index[3, (index[0] == a) | (index[0] == b)] >= 0).any())):
             if cfg.direct_merge_max_disagreement is not None:
                 left_mean = descriptor[old['index'][0] == a].mean(0)
@@ -314,7 +323,19 @@ def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence
     terminal = terminal_node_rows(layout, [index.new_ones(n) for n in counts], selected_only=False)
     pivot = torch.cat(layout['pivots'])[terminal]
     terminal_delta = world_b + rotation_delta(q, pivot)
-    roots_value, new_contrasts = decompose_terminal_transforms(layout, q, terminal_delta, affected_roots=used)
+    preserved_split_roots = set()
+    if cfg.direct_preserve_split_motion:
+        regrouped = {root for record in records for root in record['roots']
+                     if any(action in record['actions'] for action in
+                            ('cross_boundary_regroup', 'common_parent_merge_preserving_children'))}
+        preserved_split_roots = used - regrouped
+    factor_roots = used - preserved_split_roots
+    if factor_roots:
+        roots_value, new_contrasts = decompose_terminal_transforms(
+            layout, q, terminal_delta, affected_roots=factor_roots)
+    else:
+        roots_value = raw_root_values.clone()
+        new_contrasts = [raw_root_values.new_zeros(len(rows), 6) for rows in layout['refine_rows']]
     # Preserve every unrelated raw parameter exactly, avoiding quantizer
     # boundary changes from a mathematically equivalent global factorization.
     untouched_roots = torch.tensor([node not in used for node in range(counts[0])],
@@ -330,6 +351,24 @@ def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence
         for position, node in enumerate(rows.cpu().tolist()):
             if owners[node] not in used and node in old_positions:
                 new_contrasts[level][position] = old_raw[old_positions[node]]
+    if cfg.direct_preserve_split_motion:
+        # A pure split changes no existing membership/pivot. Re-factorizing
+        # its already fitted ancestors needlessly moves quantizer buckets.
+        # Swaps/merges still require the complete world-transform factorization.
+        for root in preserved_split_roots:
+            roots_value[root] = raw_root_values[root]
+        for level, rows in enumerate(layout['refine_rows']):
+            old_positions = {int(node): pos for pos, node in enumerate(old['refine_rows'][level])}
+            raw = torch.cat((motion.contrast_translation[level], motion.contrast_rotation[level]), -1).detach()
+            effective = paths[level][old['refine_rows'][level]] * gates[level]
+            for position, node in enumerate(rows.tolist()):
+                if int(root_owner[level][node]) not in preserved_split_roots:
+                    continue
+                if node in old_positions:
+                    previous = old_positions[node]
+                    new_contrasts[level][position] = raw[previous] * effective[previous]
+                else:
+                    new_contrasts[level][position].zero_()
     candidate = CommonContrastMotion(copy.deepcopy(cfg))
     candidate.setup(motion.base_xyz, motion.base_rotation, motion.extent,
                     frame_index=motion.previous_frame_index, layout_override=layout)
@@ -381,8 +420,12 @@ def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence
     candidate.last_step = motion.last_step
     candidate.stage_seconds = dict(motion.stage_seconds)
     # The normal gate_refine transition resets motion Adam in both branches.
-    candidate._make_optimizers()
-    motion._make_optimizers()
+    if cfg.direct_preserve_optimizer_moments:
+        regrouped = used - preserved_split_roots
+        preserve_adam_rows(motion, candidate, regrouped)
+    else:
+        candidate._make_optimizers()
+        motion._make_optimizers()
     candidate.current_phase = motion.current_phase = None
     compare_step = (cfg.dense_fit_steps + cfg.gate_compress_steps + 1
                     if motion.last_step >= cfg.dense_fit_steps + cfg.gate_compress_steps else motion.last_step)
@@ -390,11 +433,57 @@ def propose_local_batch(motion, saliency=None, *, split_xyz=None, split_evidence
     new_xyz, new_q = candidate(compare_step)
     report = dict(windows=records, reason='proposed', old_counts=old['counts'], new_counts=counts,
                   split_selection=split_report,
+                  preserved_split_roots=sorted(preserved_split_roots),
+                  optimizer_moments_preserved=cfg.direct_preserve_optimizer_moments,
                   changed_owners=int((old['index'] != layout['index']).any(0).sum()),
                   initialization_xyz_max_abs=float((old_xyz - new_xyz).abs().max()),
                   initialization_quaternion_max_abs=float(torch.minimum((old_q - new_q).abs().amax(-1),
                                                                             (old_q + new_q).abs().amax(-1)).max()))
     return candidate, report
+
+
+def preserve_adam_rows(source, target, reset_roots):
+    """Transfer Adam moments by persistent node IDs; new/edited bases start at zero.
+
+    Source/control moments are cleared on the same reparameterized roots so
+    both branches keep matched continuation state without resetting the rest.
+    """
+    source_owner = [torch.arange(source.counts[0], device=source.base_xyz.device)]
+    target_owner = [torch.arange(target.counts[0], device=target.base_xyz.device)]
+    for parent in source.parents:
+        source_owner.append(source_owner[-1][parent])
+    for parent in target.parents:
+        target_owner.append(target_owner[-1][parent])
+    pairs = [(source.root_translation, target.root_translation,
+              torch.arange(target.counts[0], device=target.base_xyz.device), target_owner[0]),
+             (source.root_rotation, target.root_rotation,
+              torch.arange(target.counts[0], device=target.base_xyz.device), target_owner[0])]
+    for level, rows in enumerate(target.active_layout['refine_rows']):
+        positions = {int(node): i for i, node in enumerate(source.active_layout['refine_rows'][level].tolist())}
+        mapping = torch.tensor([positions.get(int(node), -1) for node in rows.tolist()],
+                               device=target.base_xyz.device, dtype=torch.long)
+        for name in ('contrast_translation', 'contrast_rotation'):
+            pairs.append((getattr(source, name)[level], getattr(target, name)[level],
+                          mapping, target_owner[level][rows]))
+    for old, new, mapping, roots in pairs:
+        state = source.motion_optimizer.state.get(old)
+        if not state:
+            continue
+        keep = torch.tensor([int(root) not in reset_roots for root in roots.tolist()],
+                            device=new.device, dtype=torch.bool) & (mapping >= 0)
+        copied = {}
+        for key, value in state.items():
+            if torch.is_tensor(value) and value.shape == old.shape:
+                tensor = torch.zeros_like(new)
+                tensor[keep] = value[mapping[keep]]
+                copied[key] = tensor
+                # Every old row maps to at most one preserved target row.
+                retained = torch.zeros(len(old), device=old.device, dtype=torch.bool)
+                retained[mapping[keep]] = True
+                value[~retained] = 0
+            else:
+                copied[key] = value.clone() if torch.is_tensor(value) else copy.deepcopy(value)
+        target.motion_optimizer.state[new] = copied
 
 
 @torch.no_grad()

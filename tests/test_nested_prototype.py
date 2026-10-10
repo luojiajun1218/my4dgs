@@ -56,6 +56,8 @@ SPLIT_SCORES = importlib.import_module('pipeline.ReCon-GS.model.split_region_sco
 DIRECT_TREE = importlib.import_module('pipeline.ReCon-GS.model.direct_tree')
 DIRECT_TRANSACTION = importlib.import_module('pipeline.ReCon-GS.direct_transaction')
 NODE_EDITS = importlib.import_module('pipeline.ReCon-GS.model.tree_edit_codec')
+BIRTH = importlib.import_module('pipeline.ReCon-GS.model.birth_candidates')
+COLOR = importlib.import_module('pipeline.ReCon-GS.model.sparse_color')
 
 
 class WorkerOnlyPairView(SimpleNamespace):
@@ -4557,6 +4559,74 @@ def common_contrast_fixture(**overrides):
     return raw, motion
 
 
+def test_common_contrast_sub_half_step_records_are_exact_identity():
+    raw, motion = common_contrast_fixture(component_modes=True, rotation_moves_positions=False)
+    with torch.no_grad():
+        motion.root_translation.fill_(float(motion._steps[0]) * .49)
+        motion.root_rotation.fill_(float(motion._steps[3]) * .49)
+        for value in motion.contrast_translation:
+            value.fill_(float(motion._steps[0]) * .49)
+        for value in motion.contrast_rotation:
+            value.fill_(float(motion._steps[3]) * .49)
+        for value in motion.refine_logits:
+            value.fill_(20.)
+    _, _, root_symbols, contrast_symbols, _, _ = motion._quantized_parameters()
+    assert not bool(root_symbols.ne(0).any())
+    assert all(not bool(value.ne(0).any()) for value in contrast_symbols)
+    xyz, rotation = motion(motion.config.motion_steps)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    torch.testing.assert_close(rotation, raw['rotation'], rtol=0, atol=0)
+    assert float(motion.storage_parts(motion.config.motion_steps, hard=True)['fixed_symbol_bytes']) == 0
+    metadata = motion.motion_quantization_metadata()
+    assert metadata['translation_step_extent'] == .01
+    assert metadata['rotation_step_rad'] == .005
+    assert metadata['unused_legacy_motion_fields'] == ['motion_xyz_step_extent', 'motion_rotation_step_rad']
+
+
+def test_common_contrast_zero_local_records_inherit_one_shared_motion():
+    raw, motion = common_contrast_fixture(component_modes=True, rotation_moves_positions=False)
+    with torch.no_grad():
+        motion.root_translation[:, 0] = float(motion._steps[0]) * 1.25
+        for value in motion.contrast_translation:
+            value.fill_(float(motion._steps[0]) * .49)
+        for value in motion.refine_logits:
+            value.fill_(20.)
+    _, _, root_symbols, contrast_symbols, _, _ = motion._quantized_parameters()
+    assert bool(root_symbols[:, 0].eq(1).all())
+    assert all(not bool(value.ne(0).any()) for value in contrast_symbols)
+    xyz, _ = motion(motion.config.motion_steps)
+    expected = raw['xyz'].clone()
+    expected[:, 0] += motion._steps[0]
+    torch.testing.assert_close(xyz, expected, rtol=0, atol=0)
+    assert int((xyz != raw['xyz']).any(-1).sum()) == len(xyz)
+    assert int(root_symbols.ne(0).any(-1).sum()) == motion.counts[0] < len(xyz)
+
+
+def test_common_contrast_member_weights_produce_subgrid_displacements():
+    raw, motion = common_contrast_fixture(component_modes=True, rotation_moves_positions=False,
+                                          min_child_gs=1)
+    level, pair_position = next(
+        (level, position)
+        for level, weights in enumerate(motion._cached_split_weights)
+        for position in range(len(weights))
+        if float(weights[position].min()) < .5)
+    parameter_position = int(motion._cached_split_positions[level][pair_position])
+    with torch.no_grad():
+        motion.contrast_translation[level][parameter_position, 0] = float(motion._steps[0]) * .75
+        for value in motion.refine_logits:
+            value.fill_(20.)
+    weights = motion._cached_split_weights[level][pair_position]
+    side = 0 if weights[1] < weights[0] else 1
+    child = motion._cached_split_children[level][pair_position, side]
+    members = motion.index[level + 1] == child
+    xyz, _ = motion(motion.config.motion_steps)
+    delta = xyz[members, 0] - raw['xyz'][members, 0]
+    expected = (-weights[1] if side == 0 else weights[0]) * motion._steps[0]
+    torch.testing.assert_close(delta, expected.expand_as(delta), rtol=1e-5, atol=1e-7)
+    assert bool(delta.ne(0).all())
+    assert bool((delta.abs() < motion._steps[0] * .5).all())
+
+
 def test_common_contrast_config_matches_full_run_protocol():
     import yaml
     config = yaml.safe_load((legacy_config_root /
@@ -6736,7 +6806,7 @@ def test_split_region_scores_preserve_unknown_support_and_normalize_size():
 
 def gradient_split_fixture(**overrides):
     import yaml
-    values = yaml.safe_load((project_root / 'config' /
+    values = yaml.safe_load((legacy_config_root /
         'fs_gradient_cluster_tree_30f.yaml').read_text())['module']['common_contrast_binary']
     # Small deterministic fixture budgets, separate from experiment settings.
     values.update(coarse_region_gs=12, min_child_gs=1, coarse_fit_steps=2,
@@ -7184,6 +7254,965 @@ def test_node_edit_swap_replay_matches_full_four_level_motion():
             post_motion_digest=target_state, previous_count=len(xyz), deleted_count=0, birth_count=0)
         decoded, _ = CC.CommonContrastDecoder(candidate.config).advance(path, None, raw)
         assert Q.reference_digest(decoded) == target_state
+
+
+def test_rigid_gradient_projection_removes_shared_translation_rotation_and_unknowns():
+    xyz = torch.tensor([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.],
+                        [0., 0., 1.], [1., 1., 1.], [500., 500., 500.]], dtype=torch.float64)
+    omega = torch.tensor([.3, -.2, .4], dtype=torch.float64)
+    gradients = torch.cross(omega.expand_as(xyz), xyz, dim=-1) + torch.tensor([2., -1., 3.])
+    gradients[-1] = float('nan')
+    support = torch.tensor([True, True, True, True, True, False])
+    evidence = SPLIT_SCORES.PositionGradientEvidence(gradients, support.long() * 2, support)
+    owners = torch.zeros(6, dtype=torch.long)
+    residual = SPLIT_SCORES.rigid_gradient_residual(xyz, evidence, owners, region_count=2)
+    torch.testing.assert_close(residual.mean, torch.zeros_like(xyz), rtol=0, atol=0)
+    assert torch.equal(residual.supported, support)
+    scores = SPLIT_SCORES.score_split_regions(residual, owners, region_count=2)
+    torch.testing.assert_close(scores.score, torch.zeros(2, dtype=torch.float64), rtol=0, atol=0)
+    assert scores.supported_gs.tolist() == [5, 0]
+
+
+def test_rigid_gradient_projection_keeps_internal_conflict_and_is_scale_invariant():
+    xyz = torch.zeros(8, 3, dtype=torch.float64)
+    xyz[:, 0] = torch.arange(8, dtype=torch.float64)
+    gradient = torch.zeros_like(xyz)
+    gradient[:, 0] = torch.tensor([-1., -1., -1., -1., 1., 1., 1., 1.])
+    evidence = SPLIT_SCORES.PositionGradientEvidence(
+        gradient, torch.full((8,), 2), torch.ones(8, dtype=torch.bool))
+    owners = torch.zeros(8, dtype=torch.long)
+    residual = SPLIT_SCORES.rigid_gradient_residual(xyz, evidence, owners, region_count=1)
+    shifted = SPLIT_SCORES.rigid_gradient_residual(xyz * 100 + 17, evidence, owners, region_count=1)
+    torch.testing.assert_close(residual.mean, gradient, rtol=0, atol=1e-12)
+    torch.testing.assert_close(shifted.mean, residual.mean, rtol=0, atol=1e-12)
+    child_owners = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1])
+    child = SPLIT_SCORES.rigid_gradient_residual(xyz, evidence, child_owners, region_count=2)
+    torch.testing.assert_close(child.mean, torch.zeros_like(xyz), rtol=0, atol=0)
+    # Collinear/zero-radius groups use a pseudoinverse, without NaNs.
+    coincident = SPLIT_SCORES.rigid_gradient_residual(torch.zeros_like(xyz), evidence,
+                                                   owners, region_count=1)
+    assert bool(torch.isfinite(coincident.mean).all())
+
+
+def test_rigid_split_rejects_shared_field_and_preserves_existing_motion_parameters():
+    raw, source, evidence = node_edit_fixture(direct_split_score_mode='rigid_residual',
+        direct_preserve_split_motion=True, direct_candidate_windows=0)
+    evidence.mean.fill_(2.)
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is None and report['split_selection']['eligible_regions'] == 0
+    evidence.mean.zero_()
+    evidence.mean[:, 0] = torch.linspace(1., 2., len(raw['xyz']))
+    with torch.no_grad():
+        source.root_translation[:, 1].fill_(.0001234)
+        source.root_rotation[:, 2].fill_(.0012345)
+        source.contrast_translation[0][:, 2].fill_(.0002345)
+    candidate, report = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is not None and report['preserved_split_roots']
+    assert report['split_selection']['score_mode'] == 'rigid_residual'
+    torch.testing.assert_close(candidate.root_translation, source.root_translation, rtol=0, atol=0)
+    torch.testing.assert_close(candidate.root_rotation, source.root_rotation, rtol=0, atol=0)
+    for level, rows in enumerate(candidate.active_layout['refine_rows']):
+        previous = {int(node): pos for pos, node in enumerate(source.active_layout['refine_rows'][level])}
+        for position, node in enumerate(rows.tolist()):
+            for name in ('contrast_translation', 'contrast_rotation'):
+                value = getattr(candidate, name)[level][position]
+                expected = (getattr(source, name)[level][previous[node]] if node in previous else
+                            torch.zeros_like(value))
+                torch.testing.assert_close(value, expected, rtol=0, atol=0)
+    old_xyz, old_q = source(source.last_step)
+    new_xyz, new_q = candidate(candidate.last_step)
+    torch.testing.assert_close(new_xyz, old_xyz, rtol=0, atol=2e-6)
+    torch.testing.assert_close(new_q, old_q, rtol=0, atol=2e-6)
+
+
+def test_rigid_gradient_projection_and_adaptive_codec_on_cuda_when_available():
+    if not torch.cuda.is_available():
+        return
+    raw, previous, evidence = node_edit_fixture(direct_split_score_mode='rigid_residual',
+        direct_preserve_split_motion=True, direct_candidate_windows=0)
+    owners = torch.zeros(len(raw['xyz']), dtype=torch.long)
+    expected = SPLIT_SCORES.rigid_gradient_residual(raw['xyz'], evidence, owners, region_count=1)
+    gpu_raw = {name: value.cuda() for name, value in raw.items()}
+    gpu_evidence = SPLIT_SCORES.PositionGradientEvidence(
+        evidence.mean.cuda(), evidence.visible_views.cuda(), evidence.supported.cuda())
+    actual = SPLIT_SCORES.rigid_gradient_residual(gpu_raw['xyz'], gpu_evidence,
+                                               owners.cuda(), region_count=1)
+    torch.testing.assert_close(actual.mean.cpu(), expected.mean, rtol=1e-5, atol=1e-8)
+    motion = CC.CommonContrastMotion(copy.deepcopy(previous.config))
+    motion.setup(gpu_raw['xyz'], gpu_raw['rotation'], 1., frame_index=1)
+    motion.last_step = motion.config.dense_fit_steps
+    with torch.no_grad():
+        motion.root_translation[:, 1].fill_(.0001234)
+        motion.root_rotation[:, 2].fill_(.0012345)
+    candidate, _ = DIRECT_TREE.propose_local_batch(motion, split_xyz=gpu_raw['xyz'],
+                                                  split_evidence=gpu_evidence)
+    assert candidate is not None and candidate.counts[-1] > 0
+    with torch.no_grad():
+        candidate.contrast_translation[-1][:, 0].fill_(.00005)
+    xyz, rotation = candidate(candidate.config.motion_steps)
+    target = dict(gpu_raw, xyz=xyz, rotation=rotation)
+    packet, _ = candidate.encode_motion(frame_index=1,
+        previous_state_digest=Q.reference_digest(gpu_raw), post_motion_digest=Q.reference_digest(target),
+        previous_count=len(xyz), deleted_count=0, birth_count=0)
+    decoded, _ = CC.CommonContrastDecoder(candidate.config).advance(packet, None, gpu_raw)
+    assert Q.reference_digest(decoded) == Q.reference_digest(target)
+
+
+def test_common_contrast_memory_packet_matches_file_and_validates_corruption():
+    raw, source, evidence = node_edit_fixture()
+    candidate, _ = DIRECT_TREE.propose_local_batch(source,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    xyz, rotation = candidate(candidate.config.motion_steps)
+    target = dict(raw, xyz=xyz, rotation=rotation)
+    arguments = dict(frame_index=1, previous_state_digest=Q.reference_digest(raw),
+        post_motion_digest=Q.reference_digest(target), previous_count=len(xyz),
+        deleted_count=0, birth_count=0)
+    packet, report = candidate.encode_motion(**arguments)
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / 'motion.bin'
+        exported = candidate.export_motion(path, **arguments)
+        assert packet == path.read_bytes()
+        assert report['archive_bytes'] == exported['archive_bytes'] == len(packet)
+        layout = DIRECT_TREE.apply_layout_edits(candidate._frame_coding_layout,
+            candidate.read_header(packet)['structure_edits'], raw['xyz'])
+        memory_xyz, memory_q, *_ = candidate.decode_motion(packet, raw['xyz'], raw['rotation'],
+                                                         candidate.config, layout)
+        file_xyz, file_q, *_ = candidate.decode_motion(path, raw['xyz'], raw['rotation'],
+                                                     candidate.config, layout)
+        torch.testing.assert_close(memory_xyz, file_xyz, rtol=0, atol=0)
+        torch.testing.assert_close(memory_q, file_q, rtol=0, atol=0)
+        assert Q.reference_digest(dict(raw, xyz=memory_xyz, rotation=memory_q)) == Q.reference_digest(target)
+    try:
+        candidate.read_header(packet[:-1])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Truncated in-memory packet was accepted')
+
+
+def test_direct_transaction_can_skip_trial_snapshots_without_skipping_decoded_selection():
+    raw, control, evidence = node_edit_fixture(direct_save_trial_artifacts=False,
+        direct_split_score_mode='rigid_residual', direct_preserve_split_motion=True)
+    candidate, proposal = DIRECT_TREE.propose_local_batch(control,
+        split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is not None
+    proposal['proposal_seconds'] = 0.
+    gaussians = SimpleNamespace(rigid_xyz=None, rigid_rotation=None,
+        xyz_gradient_accum=torch.zeros(len(raw['xyz']), 1), denom=torch.ones(len(raw['xyz']), 1))
+    for name, attribute in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(gaussians, attribute, torch.nn.Parameter(raw[name].clone()))
+    image = torch.ones(3, 16, 16)
+    views = []
+    for index in range(1, 21):
+        view = SimpleNamespace(path=Path(f'cam{index:02d}.png'), image=image)
+        view.to = lambda device, view=view: view
+        views.append(view)
+    with tempfile.TemporaryDirectory() as temporary:
+        module = SimpleNamespace(residual_motion=candidate, gaussians=gaussians,
+            output_dir=Path(temporary), current_frame=1, device=torch.device('cpu'),
+            quant_previous_reference=raw, quant_previous_sha256=Q.reference_digest(raw),
+            quant_deleted_indices=torch.empty(0, dtype=torch.int32),
+            quant_first_frame_gs_count=len(raw['xyz']), quant_stats_window_initialized=False,
+            config=SimpleNamespace(lambda_dssim=.2), background=torch.zeros(3),
+            trainer=SimpleNamespace(synchronize=lambda: None),
+            datamodule=SimpleNamespace(train_dataloader=lambda random=False: views),
+            renderer=lambda view, background: dict(render=image))
+        transaction = DIRECT_TRANSACTION.DirectTransaction(module, control, proposal)
+        with patch.object(torch, 'save', side_effect=AssertionError('Unexpected trial snapshot')):
+            transaction.finish(module)
+        directory = Path(temporary) / 'direct_tree_trials' / 'frame_001'
+        assert {path.name for path in directory.iterdir()} == {'report.json'}
+        report = json.loads((directory / 'report.json').read_text())
+        assert not report['trial_artifacts_saved'] and report['trial_artifact_write_seconds'] == 0
+        assert report['trial_codec_seconds'] > 0
+        assert set(report['branches']) == {'control', 'candidate'}
+        assert not report['accepted'] and module.residual_motion is control
+
+
+def test_periodic_birth_retention_preserves_low_opacity_fitting_and_final_storage():
+    reference = residual_raw_fixture(3)
+    model = SimpleNamespace()
+    for name, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(model, attr, torch.nn.Parameter(reference[name][:1].clone()))
+    with torch.no_grad():
+        model._opacity.fill_(-5.3)  # About 0.005, below the 0.01 keep threshold.
+        model._features_dc.fill_(.4)
+    legacy = Q.QuantizedNewGaussianView(model, residual_test_config(), 1., reference)
+    signal = legacy.get_features.sum((1, 2)) + legacy.get_xyz.sum(-1)
+    (legacy.get_opacity.flatten() * signal).sum().backward()
+    assert not legacy.keep.any()
+    torch.testing.assert_close(model._features_dc.grad, torch.zeros_like(model._features_dc), rtol=0, atol=0)
+    torch.testing.assert_close(model._xyz.grad, torch.zeros_like(model._xyz), rtol=0, atol=0)
+    for attr in Q.RAW_ATTRIBUTES:
+        getattr(model, attr).grad = None
+    config = residual_test_config(birth_retention_mode='periodic_prune')
+    config.validate()
+    view = Q.QuantizedNewGaussianView(model, config, 1., reference)
+    assert view.keep.all() and not view.keep_st.requires_grad
+    assert float(view.get_opacity.max()) < config.opacity_keep_threshold
+    signal = view.get_features.sum((1, 2)) + view.get_xyz.sum(-1)
+    (view.get_opacity.flatten() * signal).sum().backward()
+    assert bool((model._features_dc.grad != 0).all())
+    assert bool((model._xyz.grad != 0).all())
+    assert bool(torch.isfinite(model._opacity.grad).all())
+    # Every rendered candidate costs one stored row and survives finalization.
+    assert float(view.keep_st.sum()) == int(view.keep.sum()) == 1
+    report = view.apply_retention_budget(None)
+    assert report['eligible'] == 1 and report['pruned'] == 0
+    raw, sources = Q.materialize_quantized_gaussians(reference, view)
+    assert len(raw['xyz']) == 4 and len(sources) == 1
+    for field in Q.RAW_FIELDS:
+        expected = view.raw_value(field)
+        if field == 'rotation':
+            expected = F.normalize(expected, dim=-1)
+        torch.testing.assert_close(raw[field][-1:], expected, rtol=0, atol=0)
+
+
+def test_periodic_birth_retention_preserves_explicit_budget_and_empty_pool():
+    reference = residual_raw_fixture(3)
+    config = residual_test_config(birth_retention_mode='periodic_prune')
+    model = SimpleNamespace()
+    for name, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(model, attr, torch.nn.Parameter(reference[name].clone()))
+    with torch.no_grad():
+        model._opacity[:, 0] = torch.tensor([-6., -5., -7.])
+    view = Q.QuantizedNewGaussianView(model, config, 1., reference)
+    assert view.keep.all()  # All are below 0.01, but no periodic prune happened.
+    report = view.apply_retention_budget(1)
+    assert report['eligible'] == 3 and report['pruned'] == 2
+    assert view.keep.tolist() == [False, True, False]
+    assert int((view.get_opacity > 0).sum()) == 1
+    empty = SimpleNamespace()
+    for attr in Q.RAW_ATTRIBUTES:
+        setattr(empty, attr, torch.nn.Parameter(getattr(model, attr)[:0].detach().clone()))
+    empty_view = Q.QuantizedNewGaussianView(empty, config, 1., reference)
+    assert empty_view.get_opacity.shape == (0, 1)
+    raw, sources = Q.materialize_quantized_gaussians(reference, empty_view)
+    assert len(raw['xyz']) == len(reference['xyz']) and not len(sources)
+
+
+def test_periodic_birth_retention_matches_stream_bytes_and_sequential_decoding():
+    raw, motion = common_contrast_fixture(birth_retention_mode='periodic_prune')
+    xyz, rotation = motion(motion.config.motion_steps)
+    moved = dict(raw, xyz=xyz, rotation=rotation)
+    model = SimpleNamespace()
+    for field, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+        setattr(model, attr, torch.nn.Parameter(moved[field][:1].clone()))
+    with torch.no_grad():
+        model._opacity.fill_(-5.3)
+    view = Q.QuantizedNewGaussianView(model, motion.config, 1., moved)
+    final, _ = Q.materialize_quantized_gaussians(moved, view)
+    assert len(final['xyz']) == len(raw['xyz']) + 1
+    assert float(torch.sigmoid(final['opacity'][-1])) < motion.config.opacity_keep_threshold
+    module_ast = ast.parse((project_root / 'pipeline/ReCon-GS/module.py').read_text())
+    module_class = next(node for node in module_ast.body if isinstance(node, ast.ClassDef) and node.name == 'Module')
+    storage_function = next(node for node in module_class.body if isinstance(node, ast.FunctionDef)
+                            and node.name == 'quantized_storage')
+    scope = dict(torch=torch, np=np, birth_ply_size=SAB.birth_ply_size,
+                 SPARSE_MOTION_MODES={'common_contrast_binary'})
+    exec(compile(ast.Module(body=[storage_function], type_ignores=[]), 'module_storage', 'exec'), scope)
+    fake = SimpleNamespace(residual_motion=motion, global_step=motion.config.total_steps,
+        config=SimpleNamespace(motion_mode='common_contrast_binary', sh_degree=1),
+        quant_deleted_indices=torch.empty(0, dtype=torch.int32))
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary)
+        birth_model = GAUSS.GaussianModel(1)
+        for field, attr in zip(Q.RAW_FIELDS, Q.RAW_ATTRIBUTES):
+            setattr(birth_model, attr, torch.nn.Parameter(final[field][-1:].clone()))
+        birth_path = path / 'birth.ply'
+        birth_model.save_ply(birth_path)
+        motion_path = path / 'motion.bin'
+        motion.export_motion(motion_path, frame_index=1,
+            previous_state_digest=Q.reference_digest(raw), post_motion_digest=Q.reference_digest(moved),
+            previous_count=len(raw['xyz']), deleted_count=0, birth_count=1)
+        expected, expected_parts = scope['quantized_storage'](fake, view, hard=False)
+        hard, hard_parts = scope['quantized_storage'](fake, view, hard=True)
+        assert int(hard_parts['new_bytes']) == int(expected_parts['new_bytes']) == birth_path.stat().st_size
+        assert int(hard) == motion_path.stat().st_size + birth_path.stat().st_size
+        torch.testing.assert_close(expected, hard, rtol=0, atol=.875)  # Byte padding is hard-only.
+        decoded, _ = CC.CommonContrastDecoder(motion.config).advance(motion_path, birth_path, raw)
+        assert Q.reference_digest(decoded) == Q.reference_digest(final)
+
+
+def test_birth_retention_mode_validates_and_old_checkpoint_keeps_legacy_behavior():
+    for mode in ('unknown', None, False, [], {}):
+        try:
+            residual_test_config(birth_retention_mode=mode).validate()
+        except ValueError as error:
+            assert 'birth_retention_mode' in str(error)
+        else:
+            raise AssertionError(f'Invalid birth retention mode accepted: {mode!r}')
+    raw = residual_raw_fixture()
+    config = residual_test_config()
+    motion = Q.QuantizedResidualMotion(config)
+    motion.setup(raw['xyz'], raw['rotation'], 1.)
+    packet = copy.deepcopy(motion.capture())
+    packet['config'].pop('birth_retention_mode')
+    restored = Q.QuantizedResidualMotion(config)
+    restored.restore(packet)
+    assert restored.config.birth_retention_mode == 'opacity_threshold'
+    try:
+        Q.QuantizedResidualMotion(residual_test_config(birth_retention_mode='periodic_prune')).restore(packet)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Changing birth retention across a checkpoint was accepted')
+
+
+def test_appearance_birth_budget_is_independent_and_stable_without_geometry_signal():
+    scores = torch.tensor([0., 4., 4., 9., 1., 0., 0., 0.], dtype=torch.float64)
+    eligible = torch.tensor([True, True, True, False, True, True, True, True])
+    selected = BIRTH.select_appearance_birth_sources(scores, eligible, .25)
+    assert selected.tolist() == [1, 2]
+    assert not len(BIRTH.select_appearance_birth_sources(scores, eligible, 0.))
+    assert not len(BIRTH.select_appearance_birth_sources(torch.zeros_like(scores), eligible, 1.))
+    for bad in (-.1, 1.1, float('nan'), True):
+        try:
+            BIRTH.select_appearance_birth_sources(scores, eligible, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'Invalid appearance fraction accepted: {bad!r}')
+
+
+def test_position_gradient_births_exclude_zero_gradient_sources_and_obey_optional_budget():
+    def model(geometry=True):
+        fake = SimpleNamespace(_xyz=torch.arange(12, dtype=torch.float64).reshape(4, 3),
+            xyz_gradient_accum=torch.tensor([[.2], [0.], [.3], [0.]], dtype=torch.float64)
+                if geometry else torch.zeros(4, 1, dtype=torch.float64),
+            denom=torch.ones(4, 1, dtype=torch.float64), percent_dense=.01,
+            _features_dc=torch.arange(12, dtype=torch.float64).reshape(4, 1, 3),
+            _features_rest=torch.zeros(4, 3, 3, dtype=torch.float64),
+            _opacity=torch.zeros(4, 1, dtype=torch.float64),
+            _scaling=torch.full((4, 3), -20., dtype=torch.float64),
+            _rotation=torch.tensor([[1., 0., 0., 0.]], dtype=torch.float64).repeat(4, 1))
+        fake.get_scaling = fake._scaling.exp()
+        fake.densification_postfix = lambda *values: setattr(fake, 'births', values)
+        return fake
+    torch.manual_seed(117)
+    fake = model()
+    result = GAUSS.GaussianModel.adaptive_densify_and_clone(fake, .1, 1.)
+    assert result == dict(eligible=2, added=2, blocked=0)
+    torch.testing.assert_close(fake.births[0], fake._xyz[[0, 2]], rtol=0, atol=1e-7)
+    torch.testing.assert_close(fake.births[1], fake._features_dc[[0, 2]], rtol=0, atol=0)
+    limited = model()
+    result = GAUSS.GaussianModel.adaptive_densify_and_clone(limited, .1, 1.,
+        max_new_gaussians=1)
+    assert result == dict(eligible=2, added=1, blocked=1)
+    torch.testing.assert_close(limited.births[1], limited._features_dc[[2]], rtol=0, atol=0)
+    inactive = model(geometry=False)
+    result = GAUSS.GaussianModel.adaptive_densify_and_clone(inactive, .1, 1.)
+    assert result == dict(eligible=0, added=0, blocked=0)
+    assert len(inactive.births[0]) == 0
+
+
+def test_appearance_birth_probe_is_read_only_and_excludes_validation_views():
+    cfg = residual_test_config(birth_appearance_fraction=.25,
+                              birth_appearance_camera_names=['cam01.png', 'cam02.png'])
+    cfg.validate()
+    model = SimpleNamespace(_xyz=torch.zeros(4, 3),
+        _features_dc=torch.nn.Parameter(torch.zeros(4, 1, 3), requires_grad=False),
+        get_scaling=torch.full((4, 3), .005), percent_dense=.01)
+    model.get_xyz = model._xyz
+    original_dc = model._features_dc
+    original_binding = object()
+    class ProbeRenderer:
+        gaussians = original_binding
+        def __call__(self, view, background):
+            weights = torch.tensor([1., 3., 0., 2.])
+            rgb = (self.gaussians._features_dc[:, 0] * weights[:, None]).sum(0)
+            return dict(render=rgb[:, None, None].expand(3, 16, 16),
+                        visibility_filter=torch.ones(4, dtype=torch.bool))
+    views = []
+    for name in ['cam01.png', 'cam02.png']:
+        view = SimpleNamespace(path=Path(name), image=torch.ones(3, 16, 16))
+        view.to = lambda device, view=view: view
+        views.append(view)
+    dataset = SimpleNamespace(items=views)
+    def loader(random, indices):
+        torch.rand(1)  # Simulate a worker seed without changing the main RNG.
+        return [views[index] for index in indices]
+    datamodule = SimpleNamespace(config=SimpleNamespace(training_camera_names=['cam01.png','cam02.png'],
+        validation_camera_names=['cam00.png']), cameras_extent=1., get_train_dataset=lambda: dataset,
+        _camera_indices=DATA.DataModule._camera_indices, train_dataloader=loader)
+    module = SimpleNamespace(gaussians=model, renderer=ProbeRenderer(), datamodule=datamodule,
+        residual_motion=SimpleNamespace(config=cfg), config=SimpleNamespace(lambda_dssim=.2),
+        device=torch.device('cpu'), background=torch.zeros(3), trainer=SimpleNamespace(synchronize=lambda: None))
+    before = torch.random.get_rng_state().clone()
+    rows, report = BIRTH.collect_appearance_birth_sources(module)
+    assert rows.tolist() == [1] and report['extra_renders'] == 2
+    assert model._features_dc is original_dc and not original_dc.requires_grad and original_dc.grad is None
+    assert module.renderer.gaussians is original_binding
+    torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
+    class FailedRenderer(ProbeRenderer):
+        def __call__(self, view, background):
+            raise RuntimeError('probe failure')
+    module.renderer = FailedRenderer()
+    try:
+        BIRTH.collect_appearance_birth_sources(module)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('Probe failure did not propagate')
+    assert model._features_dc is original_dc and module.renderer.gaussians is original_binding
+    cfg.birth_appearance_camera_names = ['cam00.png']
+    try:
+        BIRTH.collect_appearance_birth_sources(module)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Validation camera was allowed to select births')
+
+
+def test_appearance_birth_config_and_old_checkpoint_defaults():
+    for values in (dict(birth_appearance_fraction=-.1), dict(birth_appearance_fraction=1.1),
+                   dict(birth_appearance_fraction=True), dict(birth_appearance_fraction=.1),
+                   dict(birth_appearance_fraction=.1,birth_appearance_camera_names='cam'),
+                   dict(birth_appearance_fraction=.1,birth_appearance_camera_names=['cam01.png','cam01.png'])):
+        try:
+            residual_test_config(**values).validate()
+        except ValueError as error:
+            assert 'birth_appearance' in str(error)
+        else:
+            raise AssertionError('Invalid appearance-birth configuration accepted')
+    config = residual_test_config()
+    raw = residual_raw_fixture()
+    motion = Q.QuantizedResidualMotion(config)
+    motion.setup(raw['xyz'], raw['rotation'], 1.)
+    packet = copy.deepcopy(motion.capture())
+    packet['config'].pop('birth_appearance_fraction')
+    packet['config'].pop('birth_appearance_camera_names')
+    restored = Q.QuantizedResidualMotion(config)
+    restored.restore(packet)
+    assert restored.config.birth_appearance_fraction == 0.
+
+
+def test_sparse_color_reuse_changes_only_selected_rows_and_codec_is_exact():
+    raw = residual_raw_fixture(12)
+    update = COLOR.SparseColorUpdate(raw['sh_dc'], torch.tensor([5, 1, 8]), .001, .0375, .1)
+    with torch.no_grad():
+        update.delta[0] = torch.tensor([.0113, -.0036, 0.])
+        update.delta[2] = torch.tensor([.1234, .0056, -.0087])
+    color = update(raw['sh_dc'])
+    changed = color.ne(raw['sh_dc']).any(-1).any(-1)
+    assert torch.where(changed)[0].tolist() == [5, 8]
+    color.sum().backward()
+    torch.testing.assert_close(update.delta.grad, torch.ones_like(update.delta), rtol=0, atol=0)
+    packet = update.encode()
+    assert int(update.storage_bytes(hard=True)) == len(packet)
+    decoded = COLOR.apply_sparse_color_packet(packet, raw)
+    torch.testing.assert_close(decoded['sh_dc'], color.detach(), rtol=0, atol=0)
+    for key in Q.RAW_FIELDS:
+        if key != 'sh_dc':
+            torch.testing.assert_close(decoded[key], raw[key], rtol=0, atol=0)
+    for bad in (packet[:12], packet[:-2], packet[:COLOR.HEADER.size] + b'corrupt'):
+        try:
+            COLOR.apply_sparse_color_packet(bad, raw)
+        except (ValueError, __import__('zlib').error):
+            pass
+        else:
+            raise AssertionError('Corrupt sparse color stream was accepted')
+
+
+def test_sparse_color_checkpoint_restores_next_optimizer_step_and_zero_cost():
+    raw = residual_raw_fixture(8)
+    update = COLOR.SparseColorUpdate(raw['sh_dc'], torch.tensor([1, 3]), .001, .02, .1)
+    assert update.encode() == b'' and float(update.storage_bytes(hard=True)) == 0.
+    loss = (update(raw['sh_dc']) - .2).square().mean()
+    loss.backward(); update.optimizer_step()
+    restored = COLOR.SparseColorUpdate.restore(copy.deepcopy(update.capture()), raw['sh_dc'])
+    for obj in (update, restored):
+        loss = (obj(raw['sh_dc']) - .2).square().mean()
+        loss.backward(); obj.optimizer_step()
+    torch.testing.assert_close(update.delta, restored.delta, rtol=0, atol=0)
+    assert update.encode() == restored.encode()
+
+
+def test_common_contrast_v5_requires_and_applies_sparse_color_before_state_hash():
+    raw, motion = common_contrast_fixture(birth_appearance_action='color_update', component_modes=True)
+    update = COLOR.SparseColorUpdate(raw['sh_dc'], torch.tensor([2, 4]), .001, .02, .1)
+    with torch.no_grad():
+        update.delta[:, 0] = .02
+    xyz, rotation = motion(motion.config.motion_steps)
+    moved = dict(raw, xyz=xyz, rotation=rotation)
+    target = dict(moved, sh_dc=update(moved['sh_dc']).detach())
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary)
+        appearance = path / 'appearance.bin'
+        update.export(appearance)
+        stream = path / 'motion.bin'
+        motion.export_motion(stream, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(target), previous_count=len(xyz), deleted_count=0,
+            birth_count=0, appearance_present=True)
+        assert motion.read_header(stream)['codec'] == 'common_contrast_sparse_color_v5'
+        try:
+            CC.CommonContrastDecoder(motion.config).advance(stream, None, raw)
+        except ValueError as error:
+            assert 'color stream' in str(error)
+        else:
+            raise AssertionError('Missing appearance stream was accepted')
+        decoded, _ = CC.CommonContrastDecoder(motion.config).advance(stream, None, raw, appearance)
+        assert Q.reference_digest(decoded) == Q.reference_digest(target)
+    if torch.cuda.is_available():
+        gpu = {key: value.cuda() for key, value in raw.items()}
+        gpu_update = COLOR.SparseColorUpdate(gpu['sh_dc'], torch.tensor([2, 4]), .001, .02, .1)
+        with torch.no_grad():
+            gpu_update.delta[:, 0] = .02
+        decoded = COLOR.apply_sparse_color_packet(gpu_update.encode(), gpu)
+        torch.testing.assert_close(decoded['sh_dc'], gpu_update(gpu['sh_dc']), rtol=0, atol=0)
+
+
+def test_common_motion_prior_inherits_only_reached_quantized_motion():
+    raw, motion = common_contrast_fixture(motion_prior_decay=.6, direct_tree_enabled=True,
+        direct_initial_levels=3, component_modes=True)
+    with torch.no_grad():
+        motion.root_translation[:, 0] = .03
+        motion.contrast_translation[0][:, 1] = .05
+        for gate in motion.refine_logits:
+            gate.fill_(-20.)
+    xyz, rotation = motion(motion.config.motion_steps)
+    previous_root, *_ = motion._quantized_parameters()
+    motion.committed = True
+    motion.register_materialized_layout(xyz, torch.empty(0, dtype=torch.long))
+    motion.setup(xyz, rotation, 1., frame_index=2, previous_rows=torch.arange(len(xyz)), previous_new_count=0)
+    torch.testing.assert_close(motion.root_translation, previous_root[:, :3].detach()*.6, rtol=0, atol=0)
+    assert all(not bool(value.any()) for value in motion.contrast_translation)
+    assert motion.tree_setup['initialization_decay'] == .6
+
+
+def test_pure_tree_split_preserves_existing_adam_moments():
+    raw, source, evidence = node_edit_fixture(direct_preserve_optimizer_moments=True,
+        direct_preserve_split_motion=True, direct_enable_swaps=False, direct_candidate_windows=0)
+    source.prepare_step(source.last_step)
+    loss = sum(parameter.sum() for parameter in source.motion_parameters())
+    loss.backward(); source.optimizer_step()
+    before = copy.deepcopy(source.motion_optimizer.state[source.root_translation])
+    candidate, report = DIRECT_TREE.propose_local_batch(source, split_xyz=raw['xyz'], split_evidence=evidence)
+    assert candidate is not None and report['optimizer_moments_preserved']
+    for key in ('exp_avg','exp_avg_sq','step'):
+        torch.testing.assert_close(candidate.motion_optimizer.state[candidate.root_translation][key], before[key], rtol=0, atol=0)
+        torch.testing.assert_close(source.motion_optimizer.state[source.root_translation][key], before[key], rtol=0, atol=0)
+
+
+def test_motion_entropy_envelope_roundtrip_and_dispatch_preserve_old_stream():
+    raw, motion = common_contrast_fixture(motion_entropy_compression=True)
+    xyz, rotation = motion(motion.config.motion_steps)
+    target = dict(raw, xyz=xyz, rotation=rotation)
+    args = dict(frame_index=1, previous_state_digest=Q.reference_digest(raw),
+        post_motion_digest=Q.reference_digest(target), previous_count=len(xyz), deleted_count=0, birth_count=0)
+    packet, report = motion.encode_motion(**args)
+    assert packet.startswith(CC.ENTROPY_MAGIC) and report['entropy_compressed']
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary)/'motion.bin'
+        path.write_bytes(packet)
+        decoded, _ = SAB.decoder_for_binary_stream(path,motion.config).advance(path,None,raw)
+        assert Q.reference_digest(decoded) == Q.reference_digest(target)
+    try:
+        motion.read_header(packet[:-1])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Truncated entropy stream was accepted')
+
+
+def test_batched_bit_reader_preserves_unaligned_fields_and_end_checks():
+    widths = [1, 2, 16, 32, 3, 5, 31, 1, 16, 2, 7, 32]
+    values = [(index * 198731 + 95127) & ((1 << width) - 1)
+              for index, width in enumerate(widths)]
+    writer = SAB._BitWriter()
+    for value, width in zip(values, widths):
+        writer.write(value, width)
+    reader = SAB._BitReader(writer.finish(), sum(widths))
+    assert [reader.read(width) for width in widths] == values
+    assert reader.cursor == sum(widths)
+    try:
+        reader.read()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Reader accepted a field beyond the declared bit count')
+
+
+def test_batched_effective_splits_match_scalar_weights_with_empty_children():
+    raw, source = common_contrast_fixture()
+    original = source.active_layout
+    removed_child = original['parents'][0].tolist().index(0)
+    keep = original['index'][1] != removed_child
+    keep[1::7] = False
+    subset = torch.where(keep)[0]
+    devices = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
+    for device in devices:
+        for dtype in (torch.float32, torch.float64):
+            layout = BR._binary_layout(original['index'][:, subset].to(device),
+                original['counts'], original['parents'], raw['xyz'][subset].to(device=device, dtype=dtype),
+                [value.to(device=device, dtype=dtype) for value in original['pivots']])
+            occupancy, children, members, positions, binary, unary, weights = CC._effective_splits(layout)
+            for level, groups in enumerate(children):
+                expected = torch.zeros_like(weights[level])
+                for node, group in enumerate(groups):
+                    occupied = [child for child in group if bool(occupancy[level + 1][child])]
+                    assert bool(binary[level][node]) == (len(occupied) == 2)
+                    assert int(unary[level][node]) == (occupied[0] if len(occupied) == 1 else -1)
+                    if len(occupied) == 2:
+                        left, right = occupied
+                        total = members[level + 1][left] + members[level + 1][right]
+                        expected[positions[level][node], 0] = members[level + 1][left] / total
+                        expected[positions[level][node], 1] = members[level + 1][right] / total
+                torch.testing.assert_close(weights[level], expected, rtol=0, atol=0)
+
+
+def test_lossless_birth_packet_replays_attributes_and_tree_attachment():
+    birth_codec = importlib.import_module('pipeline.ReCon-GS.model.birth_codec')
+    raw, motion = common_contrast_fixture(birth_export_format='raw_zlib')
+    xyz, rotation = motion(motion.config.motion_steps)
+    base = dict(raw, xyz=xyz, rotation=rotation)
+    births = {name: value[:3].detach().clone() for name, value in base.items()}
+    births['xyz'] += .0001
+    final = {name: torch.cat((base[name], births[name])) for name in Q.RAW_FIELDS}
+    layout = motion.register_materialized_layout(final['xyz'], torch.arange(3))
+    packet = birth_codec.encode_birth_packet(births, motion.birth_layout_sources, len(xyz))
+    assert birth_codec.HEADER.size + birth_codec.HEADER.unpack_from(packet)[4] == birth_codec.raw_birth_size(3, 1)
+    decoded_births, rows = birth_codec.decode_birth_packet(packet, base)
+    for name in Q.RAW_FIELDS:
+        torch.testing.assert_close(decoded_births[name], births[name], rtol=0, atol=0)
+    assert torch.equal(rows, motion.birth_layout_sources)
+    with tempfile.TemporaryDirectory() as temporary:
+        birth_path, path = Path(temporary)/'birth.bin', Path(temporary)/'motion.bin'
+        birth_path.write_bytes(packet)
+        motion.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(base), previous_count=len(xyz), deleted_count=0, birth_count=3)
+        decoder = SAB.decoder_for_binary_stream(path, motion.config)
+        actual, _ = decoder.advance(path, birth_path, raw)
+        for name in Q.RAW_FIELDS:
+            torch.testing.assert_close(actual[name], final[name], rtol=0, atol=0)
+        assert SAB.layout_digest(decoder.materialized_layout) == SAB.layout_digest(layout)
+    for invalid in (packet[:-1], packet + b'extra'):
+        try:
+            birth_codec.decode_birth_packet(invalid, base)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid lossless birth packet accepted')
+
+
+def test_bincount_pivots_match_sequential_add_at_for_mixed_magnitudes():
+    import numpy as np
+    torch.manual_seed(917)
+    xyz = torch.randn(48, 3).double()
+    xyz[::3] *= 1e8
+    xyz[1::3] *= 1e-8
+    _, source = common_contrast_fixture()
+    old = source.active_layout
+    layout = BR._binary_layout(old['index'], old['counts'], old['parents'], xyz)
+    for level, count in enumerate(old['counts']):
+        owners = old['index'][level].numpy()
+        valid = owners >= 0
+        sums = np.zeros((count, 3), dtype=np.float64)
+        np.add.at(sums, owners[valid], xyz.numpy()[valid])
+        sizes = np.bincount(owners[valid], minlength=count)[:, None]
+        expected = torch.from_numpy(sums / np.maximum(sizes, 1))
+        torch.testing.assert_close(layout['pivots'][level], expected, rtol=0, atol=0)
+
+
+def test_simple_clone_uses_recongs_jitter_and_raw_initialization():
+    scales = torch.tensor([[.02, .001, .003], [.01, .002, .004]], dtype=torch.float64)
+    rotation = torch.tensor([[2 ** -.5, 0., 0., 2 ** -.5], [1., 0., 0., 0.]], dtype=torch.float64)
+    model = SimpleNamespace(_xyz=torch.tensor([[1., 2., 3.], [4., 5., 6.]], dtype=torch.float64),
+        xyz_gradient_accum=torch.ones(2, 1), denom=torch.ones(2, 1), percent_dense=.1,
+        get_scaling=scales, _features_dc=torch.zeros(2, 1, 3, dtype=torch.float64),
+        _features_rest=torch.zeros(2, 3, 3, dtype=torch.float64), _opacity=torch.zeros(2, 1, dtype=torch.float64),
+        _scaling=scales.log(), _rotation=rotation)
+    model.densification_postfix = lambda *values: setattr(model, 'births', values)
+    torch.manual_seed(377)
+    expected_legacy = torch.normal(model._xyz, scales * .5)
+    torch.manual_seed(377)
+    report = GAUSS.GaussianModel.adaptive_densify_and_clone(model, .1, 1., sigma_scale=.5)
+    assert report == dict(eligible=2, added=2, blocked=0)
+    torch.testing.assert_close(model.births[0], expected_legacy, rtol=0, atol=0)
+    torch.testing.assert_close(model.births[3], torch.full((2, 1), .1,
+                                dtype=torch.float64), rtol=0, atol=0)
+    torch.testing.assert_close(model.births[4], model._scaling, rtol=0, atol=0)
+    torch.testing.assert_close(model.births[-1], torch.tensor([[1., 0., 0., 0.]],
+                                dtype=torch.float64).repeat(2, 1), rtol=0, atol=0)
+
+
+def test_split_residual_matches_covariance_only_position_sharing():
+    xyz = torch.tensor([[-1., 0., 0.], [1., 0., 0.], [0., -1., 0.],
+                        [0., 1., 0.], [0., 0., -1.], [0., 0., 1.]], dtype=torch.float64)
+    translation = torch.tensor([.2, -.3, .1], dtype=torch.float64)
+    omega = torch.tensor([.1, .2, .3], dtype=torch.float64)
+    gradient = translation + torch.cross(omega.expand_as(xyz), xyz, dim=-1)
+    supported = torch.ones(len(xyz), dtype=torch.bool)
+    evidence = SPLIT_SCORES.PositionGradientEvidence(gradient,
+        torch.full((len(xyz),), 2, dtype=torch.long), supported)
+    owners = torch.zeros(len(xyz), dtype=torch.long)
+    rigid = SPLIT_SCORES.rigid_gradient_residual(xyz, evidence, owners, region_count=1)
+    covariance_only = SPLIT_SCORES.rigid_gradient_residual(xyz, evidence, owners,
+        region_count=1, rotation_moves_positions=False)
+    torch.testing.assert_close(rigid.mean, torch.zeros_like(gradient), rtol=0, atol=1e-14)
+    torch.testing.assert_close(covariance_only.mean, gradient - translation, rtol=0, atol=1e-14)
+    assert float(covariance_only.mean.norm()) > 0
+    constant = SPLIT_SCORES.PositionGradientEvidence(translation.expand_as(xyz),
+        evidence.visible_views, supported)
+    for rotates in (False, True):
+        residual = SPLIT_SCORES.rigid_gradient_residual(xyz, constant, owners,
+            region_count=1, rotation_moves_positions=rotates)
+        torch.testing.assert_close(residual.mean, torch.zeros_like(gradient), rtol=0, atol=0)
+
+
+def test_simple_birth_training_rejects_old_extensions_without_breaking_decoder_config():
+    raw, motion = common_contrast_fixture(component_modes=True)
+    cfg = motion.config
+    cfg.require_simple_birth_training()
+    for name, value in [('birth_appearance_fraction', .002),
+                        ('birth_appearance_action', 'color_update'),
+                        ('birth_residual_enabled', True),
+                        ('birth_lifetime_enabled', True),
+                        ('birth_clone_geometry', 'parent_covariance')]:
+        old = getattr(cfg, name)
+        setattr(cfg, name, value)
+        try:
+            cfg.require_simple_birth_training()
+        except ValueError as error:
+            assert 'position-gradient cloning only' in str(error)
+        else:
+            raise AssertionError(f'Old birth experiment option remained trainable: {name}')
+        setattr(cfg, name, old)
+    # Old settings remain valid when a v6/v7 reader replays an existing stream.
+    cfg.birth_lifetime_enabled = True
+    cfg.validate()
+
+
+def test_residual_birth_pixel_centers_roundtrip_row_camera_matrices():
+    residual_birth = importlib.import_module('pipeline.ReCon-GS.model.residual_birth')
+    projection = torch.zeros(4, 4, dtype=torch.float64)
+    projection[0, 0] = projection[1, 1] = projection[2, 2] = projection[2, 3] = 1.
+    world = torch.eye(4, dtype=torch.float64)
+    world[3, :3] = torch.tensor([.3, -.2, .1])
+    view = SimpleNamespace(image=torch.zeros(3, 6, 8, dtype=torch.float64),
+        fovx=math.pi / 2, fovy=math.pi / 2, world_view_transform=world,
+        full_proj_transform=world @ projection)
+    pixels = torch.tensor([[0., 0.], [7., 5.], [3., 2.]], dtype=torch.float64)
+    depth = torch.tensor([1., 2., 3.], dtype=torch.float64)
+    xyz = residual_birth.backproject_pixels(pixels, depth, view)
+    ndc, eye_z = residual_birth.project_points(xyz, view)
+    expected = (pixels + .5) * torch.tensor([2 / 8, 2 / 6]) - 1
+    torch.testing.assert_close(ndc, expected, rtol=0, atol=1e-7)
+    torch.testing.assert_close(eye_z, depth, rtol=0, atol=1e-12)
+
+
+def test_residual_birth_multiview_support_rejects_occlusion_and_duplicate_peaks():
+    residual_birth = importlib.import_module('pipeline.ReCon-GS.model.residual_birth')
+    projection = torch.zeros(4, 4)
+    projection[0, 0] = projection[1, 1] = projection[2, 2] = projection[2, 3] = 1.
+    rgb = torch.tensor([.4, .5, .6])[:, None, None].expand(3, 8, 8).clone()
+    view = SimpleNamespace(image=rgb, world_view_transform=torch.eye(4), full_proj_transform=projection)
+    package = (view, torch.full((8, 8), .3), torch.full((8, 8), 3.), torch.ones(8, 8))
+    xyz = torch.tensor([[0., 0., 2.], [.001, 0., 2.], [0., 0., 4.], [100., 0., 2.]])
+    scores, colors, support = residual_birth.multiview_birth_evidence(xyz, [package, package], .1, .05, .03)
+    assert support.tolist() == [2, 2, 0, 0]
+    torch.testing.assert_close(colors[:2], torch.tensor([[.4, .5, .6]]).repeat(2, 1), rtol=0, atol=1e-7)
+    selected = residual_birth.select_spaced_births(xyz, torch.full((4,), .01), scores, support, 2, 4, 1.5)
+    assert selected.tolist() == [0]
+    peaks = residual_birth.grid_error_peaks(torch.full((8, 8), .3), 4, 4, .1)
+    assert peaks.tolist() == [[0., 0.], [4., 0.], [0., 4.], [4., 4.]]
+
+
+def test_birth_opacity_stream_updates_only_selected_rows_and_resumes_adam():
+    lifetime = importlib.import_module('pipeline.ReCon-GS.model.birth_lifetime')
+    raw = residual_raw_fixture(7)
+    update = lifetime.BirthOpacityUpdate(raw['opacity'], torch.tensor([2, 5]), .01, .1, .1)
+    with torch.no_grad():
+        update.delta[:] = torch.tensor([[.015], [-2.007]])
+    decoded = lifetime.apply_opacity_packet(update.encode(), raw)
+    expected = update(raw['opacity'])
+    torch.testing.assert_close(decoded['opacity'], expected, rtol=0, atol=0)
+    for name in Q.RAW_FIELDS:
+        if name != 'opacity':
+            assert torch.equal(decoded[name], raw[name])
+    assert torch.equal(decoded['opacity'][[0, 1, 3, 4, 6]], raw['opacity'][[0, 1, 3, 4, 6]])
+    update.values().square().sum().backward()
+    update.optimizer_step()
+    restored = lifetime.BirthOpacityUpdate.restore(copy.deepcopy(update.capture()), raw['opacity'])
+    for model in (update, restored):
+        model.values().square().sum().backward()
+        model.optimizer_step()
+    torch.testing.assert_close(update.delta, restored.delta, rtol=0, atol=0)
+
+
+def test_birth_expiration_prioritizes_dead_births_and_preserves_visible_keep():
+    lifetime = importlib.import_module('pipeline.ReCon-GS.model.birth_lifetime')
+    opacity = torch.tensor([[-20.], [-20.], [1.], [-20.], [-20.], [-20.]])
+    origins = torch.tensor([0, 0, 0, 1, 1, 2])
+    changed = torch.zeros(5, dtype=torch.bool)
+    deleted, report = lifetime.expiration_deletions(opacity, 1, changed, origins, .0039)
+    assert deleted.tolist() == [3, 4, 5]
+    assert report['expired_births'] == 3 and report['deleted_keep_count'] == 2
+    opacity[3:] = 1.
+    deleted, report = lifetime.expiration_deletions(opacity, 1, changed, origins, .0039)
+    assert deleted.tolist() == [0] and report['expired_births'] == 0
+    assert report['capacity_deleted_invisible_first_frame'] == 1
+
+
+def test_v6_opacity_packet_and_expiration_replay_preserve_state_and_layout():
+    lifetime = importlib.import_module('pipeline.ReCon-GS.model.birth_lifetime')
+    birth_codec = importlib.import_module('pipeline.ReCon-GS.model.birth_codec')
+    raw, motion = common_contrast_fixture(component_modes=True, birth_lifetime_enabled=True,
+                                          birth_export_format='raw_zlib')
+    raw['opacity'][:4] = -20.
+    decoder = CC.CommonContrastDecoder(motion.config)
+    with tempfile.TemporaryDirectory() as temporary:
+        folder = Path(temporary)
+        origins = torch.zeros(len(raw['xyz']), dtype=torch.long)
+        previous_birth_count = 0
+        for frame in range(1, 4):
+            previous = {name: value.detach().clone() for name, value in raw.items()}
+            if frame > 1:
+                deleted, _ = motion.compensation_deletions(raw['opacity'], previous_birth_count, origins)
+                rows = Q.survivor_rows(len(raw['xyz']), deleted)
+                raw = {name: value[rows] for name, value in raw.items()}
+                origins = origins[rows]
+                motion.setup(raw['xyz'], raw['rotation'], 1., frame_index=frame,
+                    previous_rows=rows, previous_new_count=previous_birth_count)
+            else:
+                deleted = torch.empty(0, dtype=torch.long)
+            xyz, rotation = motion(motion.config.motion_steps)
+            base = dict(raw, xyz=xyz, rotation=rotation)
+            update_path = None
+            if frame == 2:
+                update = lifetime.BirthOpacityUpdate(base['opacity'], torch.where(origins > 0)[0], .01, .1, .1)
+                with torch.no_grad():
+                    update.delta.fill_(-20.)
+                base = dict(base, opacity=update(base['opacity']).detach())
+                update_path = folder/f'opacity_{frame}.bin'
+                update.export(update_path)
+            born_count = 2 if frame < 3 else 0
+            births = {name: value[:born_count].detach().clone() for name, value in base.items()}
+            if frame == 1:
+                births['opacity'].zero_()
+            if frame == 2:
+                births['opacity'].fill_(-20.)
+            final = {name: torch.cat((base[name], births[name])) for name in Q.RAW_FIELDS}
+            layout = motion.register_materialized_layout(final['xyz'], torch.arange(born_count))
+            birth_path = None
+            if born_count:
+                birth_path = folder/f'birth_{frame}.bin'
+                birth_codec.export_birth_packet(birth_path, births, motion.birth_layout_sources, len(base['xyz']))
+            path = folder/f'motion_{frame}.bin'
+            motion.export_motion(path, frame_index=frame, previous_state_digest=Q.reference_digest(previous),
+                post_motion_digest=Q.reference_digest(base), previous_count=len(previous['xyz']),
+                deleted_count=len(deleted), birth_count=born_count, opacity_present=update_path is not None)
+            actual, info = decoder.advance(path, birth_path, previous, opacity_path=update_path)
+            for name in Q.RAW_FIELDS:
+                torch.testing.assert_close(actual[name], final[name], rtol=0, atol=0)
+            assert SAB.layout_digest(decoder.materialized_layout) == SAB.layout_digest(layout)
+            assert torch.equal(decoder.birth_frames[:len(origins)], origins)
+            if frame == 3:
+                assert len(info['deleted_rows']) == 4 > previous_birth_count
+            motion.committed = True
+            raw = final
+            origins = torch.cat((origins, torch.full((born_count,), frame, dtype=torch.long)))
+            previous_birth_count = born_count
+
+
+def test_covariance_only_rotation_preserves_positions_and_decodes_v7():
+    raw, motion = common_contrast_fixture(component_modes=True, rotation_moves_positions=False)
+    with torch.no_grad():
+        motion.root_rotation[:, 2] = .7
+    xyz, rotation = motion(motion.config.motion_steps)
+    torch.testing.assert_close(xyz, raw['xyz'], rtol=0, atol=0)
+    assert not torch.equal(rotation, raw['rotation'])
+    target = dict(raw, xyz=xyz, rotation=rotation)
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary)/'motion.bin'
+        motion.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(target), previous_count=len(xyz), deleted_count=0, birth_count=0)
+        header = motion.read_header(path)
+        assert header['codec'] == 'common_contrast_covariance_rotation_v7'
+        assert not header['rotation_moves_positions']
+        actual, _ = SAB.decoder_for_binary_stream(path, motion.config).advance(path, None, raw)
+        for name in Q.RAW_FIELDS:
+            torch.testing.assert_close(actual[name], target[name], rtol=0, atol=0)
+
+
+def test_v7_decoder_honors_old_rigid_stream_position_semantics():
+    raw, motion = common_contrast_fixture(component_modes=True)
+    with torch.no_grad():
+        motion.root_rotation[:, 2] = .7
+    xyz, rotation = motion(motion.config.motion_steps)
+    assert not torch.equal(xyz, raw['xyz'])
+    target = dict(raw, xyz=xyz, rotation=rotation)
+    config = copy.deepcopy(motion.config)
+    config.rotation_moves_positions = False
+    config.validate()
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary)/'motion.bin'
+        motion.export_motion(path, frame_index=1, previous_state_digest=Q.reference_digest(raw),
+            post_motion_digest=Q.reference_digest(target), previous_count=len(xyz), deleted_count=0, birth_count=0)
+        actual, _ = SAB.decoder_for_binary_stream(path, config).advance(path, None, raw)
+        for name in Q.RAW_FIELDS:
+            torch.testing.assert_close(actual[name], target[name], rtol=0, atol=0)
+
+
+def test_canonical_camera_order_pairs_differently_shuffled_frame_datasets():
+    class CameraNames(torch.utils.data.Dataset):
+        def __init__(self, names):
+            self.items = [SimpleNamespace(path=Path(name), frame=3) for name in names]
+
+        def __len__(self):
+            return len(self.items)
+
+        def __getitem__(self, index):
+            return self.items[index].path.name
+
+    names = [f'cam{index:02d}.png' for index in range(1, 21)]
+    data = DATA.DataModule.__new__(DATA.DataModule)
+    data.current_frame = 3
+    data.config = SimpleNamespace(training_view_seed=0,
+        canonical_training_view_order=True,
+        extra_dataloader_kwargs=dict(num_workers=0, pin_memory=False))
+    sequences = []
+    for order in (names, list(reversed(names))):
+        dataset = CameraNames(order)
+        data.get_train_dataset = lambda scale: dataset
+        loader = data.train_dataloader()
+        fetcher = DATA.PairedFetcher(loader, True, None, seed=3)
+        sequences.append([fetcher.next() for _ in range(60)])
+        assert [item.path.name for item in dataset.items] == order
+    assert sequences[0] == sequences[1]
+    assert all(sorted(sequences[0][offset:offset + 20]) == names
+               for offset in (0, 20, 40))
+    assert list(data.train_dataloader(random=False, indices=[])) == names
+    data.config.training_camera_names = ['cam20.png', 'cam01.png']
+    data.config.validation_camera_names = ['cam11.png']
+    assert list(data.train_dataloader(random=False)) == ['cam01.png', 'cam20.png']
+    data.config.training_camera_names = None
+    data.config.validation_camera_names = None
+    # Default/legacy order stays tied to the original dataset permutation.
+    data.config.canonical_training_view_order = False
+    legacy = []
+    for order in (names, list(reversed(names))):
+        dataset = CameraNames(order)
+        data.get_train_dataset = lambda scale: dataset
+        legacy.append(list(data.train_dataloader()))
+    assert legacy[0] != legacy[1]
+
+
+def test_canonical_training_order_rejects_missing_sampling_seed():
+    data = DATA.DataModule.__new__(DATA.DataModule)
+    data.current_frame = 3
+    data.config = SimpleNamespace(training_view_seed=None,
+        canonical_training_view_order=True,
+        extra_dataloader_kwargs=dict(num_workers=0, pin_memory=False))
+    data.get_train_dataset = lambda scale: list(range(20))
+    try:
+        data.train_dataloader()
+    except ValueError as error:
+        assert 'training_view_seed' in str(error)
+    else:
+        raise AssertionError('Canonical sampling must have an explicit seed')
 
 
 if __name__ == '__main__':

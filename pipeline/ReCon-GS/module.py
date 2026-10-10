@@ -14,7 +14,6 @@ from libgs.model.merged_gaussian import MergedGaussianModel
 from libgs.pipeline import Module as BaseModule
 from libgs.pipeline import ModuleConfig as BaseModuleConfig
 from libgs.renderer import Renderer, RendererConfig
-from libgs.renderer.network_gui import interact_with_gui
 from libgs.utils.time import Timer
 from libgs.utils.general import quaternion_multiply
 
@@ -233,6 +232,10 @@ class Module(BaseModule):
             self.quant_stats_window_initialized = False
             self.quant_birth_control = None
             self.quant_point_birth_frame = None
+            self.sparse_color_update = None
+            self.birth_opacity_update = None
+            if cfg.birth_appearance_action == 'color_update' and self.config.motion_mode != 'common_contrast_binary':
+                raise ValueError('Sparse color reuse currently requires common_contrast_binary')
         white_background = self.datamodule.config.white_background
         bg_color_fn = torch.ones if white_background else torch.zeros
         self.register_buffer("background", bg_color_fn(3, device=self.device))
@@ -278,6 +281,10 @@ class Module(BaseModule):
                 deleted_indices=self.quant_deleted_indices, report=self.quant_report, finalized=self.quant_finalized,
                 stats_window_initialized=self.quant_stats_window_initialized,
                 birth_control=self.quant_birth_control,
+                sparse_color_update=(self.sparse_color_update.capture() if
+                    getattr(self, 'sparse_color_update', None) is not None and not self.quant_finalized else None),
+                birth_opacity_update=(self.birth_opacity_update.capture() if
+                    getattr(self, 'birth_opacity_update', None) is not None and not self.quant_finalized else None),
                 point_birth_frame=self.quant_point_birth_frame)
 
     def on_load_checkpoint(self, ckpt: dict):
@@ -309,6 +316,17 @@ class Module(BaseModule):
                     'stats_window_initialized', packet['last_step'] >= self.quant_stats_window_start())
                 self.quant_birth_control = frame_state.get('birth_control')
                 self.quant_point_birth_frame = frame_state.get('point_birth_frame')
+                color_packet = frame_state.get('sparse_color_update')
+                # Compatibility for rendering old mid-frame checkpoints only.
+                if color_packet is not None:
+                    from .model.sparse_color import SparseColorUpdate
+                self.sparse_color_update = (SparseColorUpdate.restore(color_packet, self.gaussians._features_dc)
+                                            if color_packet is not None else None)
+                opacity_packet = frame_state.get('birth_opacity_update')
+                if opacity_packet is not None:
+                    from .model.birth_lifetime import BirthOpacityUpdate
+                self.birth_opacity_update = (BirthOpacityUpdate.restore(opacity_packet, self.gaussians._opacity)
+                                             if opacity_packet is not None else None)
                 if self.quant_point_birth_frame is None:
                     self.quant_point_birth_frame = torch.full(
                         (len(self.gaussians.get_xyz),), -1, dtype=torch.long)
@@ -499,13 +517,17 @@ class Module(BaseModule):
         return results
 
     def pre_training_step(self):
-        interact_with_gui(
-            self.global_step,
-            self.renderer.config,  # can be modified
-            self,
-            self.datamodule.config.root,
-            self.num_steps,
-        )
+        if self.config.motion_mode in QUANTIZED_MOTION_MODES and self.trainer.is_first_step:
+            self.config.quantized_residual.require_simple_birth_training()
+        if getattr(self, 'gui_enabled', True):
+            from libgs.renderer.network_gui import interact_with_gui
+            interact_with_gui(
+                self.global_step,
+                self.renderer.config,  # can be modified
+                self,
+                self.datamodule.config.root,
+                self.num_steps,
+            )
 
         if self.trainer.is_first_step:
             self.timer.clock("frame").start()
@@ -1027,6 +1049,13 @@ class Module(BaseModule):
                 self.renderer.gaussians = self.gaussians
                 results['quantized_stage'] = motion.stage(self.global_step)
             elif not self.quant_finalized and self.config.quantized_residual.enable_incremental:
+                # Old checkpoint overlays; current birth training creates neither.
+                color = getattr(self, 'sparse_color_update', None)
+                if color is not None:
+                    self.gaussians.updated_features_dc = color(self.gaussians._features_dc)
+                opacity_update = getattr(self, 'birth_opacity_update', None)
+                if opacity_update is not None:
+                    self.gaussians.updated_opacity = opacity_update(self.gaussians._opacity)
                 view = self.make_quantized_new_view(training=training)
                 self.renderer.gaussians = MergedGaussianModel([self.gaussians, view])
                 results['quantized_new_view'] = view
@@ -1036,6 +1065,8 @@ class Module(BaseModule):
             results.update(self.renderer(viewpoint, self.background, **kwargs))
         finally:
             self.gaussians.rigid_xyz = self.gaussians.rigid_rotation = None
+            self.gaussians.updated_features_dc = None
+            self.gaussians.updated_opacity = None
             self.renderer.gaussians = original_renderer_model
         return results
 
@@ -1045,6 +1076,12 @@ class Module(BaseModule):
         if self.quant_predictor_tree is None:
             self.quant_predictor_tree = cKDTree(self.gaussians.get_xyz_ori.detach().cpu().numpy())
         reference = {name: getattr(self.gaussians, attr).detach() for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)}
+        dc = getattr(self.gaussians, 'updated_features_dc', None)
+        if dc is not None:
+            reference['sh_dc'] = dc.detach()
+        opacity = getattr(self.gaussians, 'updated_opacity', None)
+        if opacity is not None:
+            reference['opacity'] = opacity.detach()
         view = QuantizedNewGaussianView(self.gaussians_incr, self.config.quantized_residual,
             self.datamodule.cameras_extent, reference, self.quant_predictor_tree)
         key = 'birth_prediction_train_cpu' if training else 'birth_prediction_eval_cpu'
@@ -1337,6 +1374,8 @@ class Module(BaseModule):
     @torch.no_grad()
     def prepare_quantized_frame(self):
         started = time.perf_counter()
+        self.sparse_color_update = None
+        self.birth_opacity_update = None
         self.quant_control_diagnostics = {}
         self.quant_gradient_diagnostics = []
         self.quant_last_sampled_gates = None
@@ -1357,8 +1396,12 @@ class Module(BaseModule):
             deletion_score = (self.gaussians._opacity
                               if getattr(self.config, 'motion_mode', 'legacy') in {'storage_aware_binary', 'common_contrast_binary'}
                               else self.gaussians.get_opacity)
-            deleted, deletion_protection = self.residual_motion.compensation_deletions(
-                deletion_score, count)
+            if getattr(self.config.quantized_residual, 'birth_lifetime_enabled', False):
+                deleted, deletion_protection = self.residual_motion.compensation_deletions(
+                    deletion_score, count, birth_frames=self.quant_point_birth_frame)
+            else:
+                deleted, deletion_protection = self.residual_motion.compensation_deletions(
+                    deletion_score, count)
         else:
             deleted = torch.argsort(self.gaussians.get_opacity.detach().flatten(), stable=True)[:count]
             deletion_protection = dict(
@@ -1366,6 +1409,8 @@ class Module(BaseModule):
                 eligible_count=len(self.gaussians.get_xyz), requested_count=count,
                 deleted_count=len(deleted), deleted_keep_count=0,
                 semantics='No previous learned gate decisions are available.')
+        previous_birth_count = count
+        count = len(deleted)
         self.quant_deleted_indices = deleted.to(torch.int32).cpu()
         previous_rows = survivor_rows(len(self.quant_previous_reference['xyz']), deleted)
         if self.quant_point_birth_frame is None:
@@ -1414,13 +1459,13 @@ class Module(BaseModule):
         prior_motion_count = (len(self.residual_motion.base_xyz)
                               if self.residual_motion.index is not None else None)
         if (self.config.quantized_residual.motion_init_decay and prior_motion_count is not None and
-                len(self.quant_previous_reference['xyz']) != prior_motion_count + count):
+                len(self.quant_previous_reference['xyz']) != prior_motion_count + previous_birth_count):
             raise ValueError('Motion warm start previous reference count disagrees with old motion and newborn count')
         tree_kwargs = (dict(frame_index=self.current_frame)
                        if self.config.quantized_residual.enable_learned_gates else {})
         self.residual_motion.setup(self.gaussians.get_xyz_ori, self.gaussians._rotation,
             self.datamodule.cameras_extent, previous_rows=previous_rows,
-            previous_new_count=count, **tree_kwargs)
+            previous_new_count=previous_birth_count, **tree_kwargs)
         self.quant_predictor_tree = None
         self.quant_report = None
         self.quant_finalized = False
@@ -1467,6 +1512,7 @@ class Module(BaseModule):
             enabled=cfg.enable_incremental,
             stats_window_start=self.quant_stats_window_start(), stats_window_end=cfg.motion_steps,
             stats_steps_observed=0, clone_eligible=0, clone_added=0,
+            clone_geometry_added=0, clone_appearance_added=0,
             clone_blocked=0, split_added=0, split_blocked=0,
             split_eligible=0, candidate_pool_peak=0, candidate_pruned=0,
             candidate_prune_reasons=dict(low_opacity=0, screen_size=0, world_size=0, multiple=0),
@@ -1474,6 +1520,11 @@ class Module(BaseModule):
             final_candidate_count=0, opacity_pruned=0,
             final_retained=0, max_new_gaussians=cfg.max_new_gaussians,
             max_retained_gaussians=cfg.max_retained_gaussians, retention_budget_pruned=0,
+            birth_retention_mode=cfg.birth_retention_mode,
+            birth_render_semantics=('Quantized opacity times hard retention support; final opacity '
+                'threshold also determines storage.' if cfg.birth_retention_mode == 'opacity_threshold' else
+                'Surviving candidates render with continuous quantized opacity and all cost stored '
+                'birth rows; only periodic model pruning or an explicit final budget removes them.'),
             motion_history=None,
             point_origins={},
             budget_touched=False, previous_compensation_deleted=int(self.quant_deleted_indices.numel()),
@@ -1485,10 +1536,22 @@ class Module(BaseModule):
         parts = self.residual_motion.storage_parts(self.global_step, hard=hard)
         zero = next(iter(parts.values())) * 0
         if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}:
+            raw_births = (self.config.motion_mode == 'common_contrast_binary' and
+                          self.residual_motion.config.birth_export_format == 'raw_zlib')
+            color = getattr(self, 'sparse_color_update', None)
+            if color is not None:
+                parts['appearance_bytes'] = color.storage_bytes(hard=hard)
+            opacity_update = getattr(self, 'birth_opacity_update', None)
+            if opacity_update is not None:
+                parts['birth_opacity_bytes'] = opacity_update.storage_bytes(hard=hard)
             if view is None:
                 birth_bytes = zero
             elif hard:
-                birth_bytes = zero + birth_ply_size(int(view.keep.sum()), self.config.sh_degree)
+                if raw_births:
+                    from .model.birth_codec import raw_birth_size
+                    birth_bytes = zero + raw_birth_size(int(view.keep.sum()), self.config.sh_degree)
+                else:
+                    birth_bytes = zero + birth_ply_size(int(view.keep.sum()), self.config.sh_degree)
             else:
                 expected_count = view.keep_st.sum()
                 coefficient_count = (self.config.sh_degree + 1) ** 2
@@ -1496,6 +1559,10 @@ class Module(BaseModule):
                 row_bytes = property_count * 4
                 hard_count = int(view.keep.sum())
                 header_bytes = birth_ply_size(hard_count, self.config.sh_degree) - hard_count * row_bytes
+                if raw_births:
+                    from .model.birth_codec import raw_birth_size
+                    row_bytes -= 8  # Drop three zero normals; add one source row ID.
+                    header_bytes = raw_birth_size(hard_count, self.config.sh_degree) - hard_count * row_bytes
                 birth_bytes = expected_count * row_bytes + header_bytes
             details = dict(parts, new_bytes=birth_bytes, deletion_bytes=zero)
             return sum(details.values()), details
@@ -1570,9 +1637,12 @@ class Module(BaseModule):
                     clone = self.gaussians.adaptive_densify_and_clone(self.deform.config.densify_grad_threshold,
                         self.datamodule.cameras_extent, sigma_scale=cfg.clone_sigma_scale,
                         max_new_gaussians=cfg.max_new_gaussians)
+                    birth['clone_geometry_mode'] = 'legacy'
                     birth['clone_eligible'] = clone['eligible']
                     birth['clone_added'] = clone['added']
                     birth['clone_blocked'] = clone['blocked']
+                    birth['clone_geometry_added'] = clone['added']
+                    birth['clone_appearance_added'] = 0
                     birth['candidate_pool_peak'] = clone['added']
                     self.gaussians_incr.restore(self.gaussians.capture(), self.config.gaussian_stage2)
                     mask = torch.arange(len(self.gaussians.get_xyz), device=self.device) >= before
@@ -1623,6 +1693,9 @@ class Module(BaseModule):
     def finalize_quantized_frame(self):
         finalize_started = time.perf_counter()
         cfg = self.config.quantized_residual
+        cfg.require_simple_birth_training()
+        appearance_export = None
+        opacity_export = None
         view = self.make_quantized_new_view() if cfg.enable_incremental else None
         self.quantized_quality_snapshot('before_retention', view)
         opacity_eligible = int(view.keep.sum()) if view is not None else 0
@@ -1654,25 +1727,42 @@ class Module(BaseModule):
         if cfg.enable_learned_gates:
             self.residual_motion.register_materialized_layout(raw['xyz'], retained_sources)
         self.install_quantized_raw(raw)
+        stream_export_seconds = 0.
         if self.config.motion_mode in SPARSE_MOTION_MODES and retained_count:
-            birth_model = GaussianModel(self.config.sh_degree)
-            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-                setattr(birth_model, attr, torch.nn.Parameter(raw[name][-retained_count:].detach().clone()))
+            export_started = time.perf_counter()
             storage_dir.mkdir(parents=True, exist_ok=True)
-            incremental_path = storage_dir / f'incremental_{self.current_frame:03d}.ply'
-            birth_model.save_ply(incremental_path)
-            incremental_export = dict(path=str(incremental_path),
-                                      archive_bytes=incremental_path.stat().st_size,
-                                      rows=retained_count)
+            if self.config.motion_mode == 'common_contrast_binary' and cfg.birth_export_format == 'raw_zlib':
+                from .model.birth_codec import export_birth_packet
+                incremental_path = storage_dir / f'incremental_{self.current_frame:03d}.bin'
+                incremental_export = export_birth_packet(incremental_path,
+                    {name: raw[name][-retained_count:] for name in RAW_FIELDS},
+                    self.residual_motion.birth_layout_sources, len(raw['xyz']) - retained_count)
+            else:
+                birth_model = GaussianModel(self.config.sh_degree)
+                for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
+                    setattr(birth_model, attr, torch.nn.Parameter(raw[name][-retained_count:].detach().clone()))
+                incremental_path = storage_dir / f'incremental_{self.current_frame:03d}.ply'
+                birth_model.save_ply(incremental_path)
+                incremental_export = dict(path=str(incremental_path),
+                                          archive_bytes=incremental_path.stat().st_size,
+                                          rows=retained_count, format='birth_ply_float32')
+            self.trainer.synchronize()
+            stream_export_seconds += time.perf_counter() - export_started
         if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}:
+            export_started = time.perf_counter()
             motion_export = self.residual_motion.export_motion(motion_path,
                 frame_index=self.current_frame,
                 previous_state_digest=self.quant_previous_sha256,
                 post_motion_digest=post_motion_base_digest,
                 previous_count=len(self.quant_previous_reference['xyz']),
                 deleted_count=int(self.quant_deleted_indices.numel()),
-                birth_count=retained_count)
+                birth_count=retained_count,
+                **(dict(appearance_present=appearance_export is not None, opacity_present=opacity_export is not None)
+                   if self.config.motion_mode == 'common_contrast_binary' else {}))
+            self.trainer.synchronize()
+            stream_export_seconds += time.perf_counter() - export_started
         if self.config.motion_mode in SPARSE_MOTION_MODES:
+            export_started = time.perf_counter()
             manifest_path = storage_dir / f'frame_{self.current_frame:03d}.json'
             if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}:
                 manifest = dict(
@@ -1687,6 +1777,8 @@ class Module(BaseModule):
                     post_motion_base_sha256=post_motion_base_digest,
                     deleted_count=int(self.quant_deleted_indices.numel()),
                     motion_export=motion_export,
+                    appearance_export=appearance_export,
+                    opacity_export=opacity_export,
                     incremental_export=incremental_export)
             else:
                 manifest = dict(
@@ -1707,7 +1799,18 @@ class Module(BaseModule):
             frame_manifest = dict(path=str(manifest_path), archive_bytes=manifest_path.stat().st_size,
                 deleted_count=manifest['deleted_count'] if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}
                 else len(manifest['deleted_indices']))
+            stream_export_seconds += time.perf_counter() - export_started
+        self.residual_motion.stage_seconds['stream_export'] = stream_export_seconds
         self.quantized_quality_snapshot('after_retention')
+        uncompressed_hard_storage = None
+        if (self.config.motion_mode == 'common_contrast_binary' and
+                (cfg.motion_entropy_compression or cfg.birth_export_format == 'raw_zlib' or cfg.birth_lifetime_enabled) and
+                motion_export is not None):
+            actual_bytes = sum(item['archive_bytes'] for item in
+                               (motion_export, incremental_export, appearance_export, opacity_export) if item is not None)
+            uncompressed_hard_storage = float(hard_storage)
+            hard_parts['entropy_adjustment_bytes'] = hard_storage.new_tensor(actual_bytes) - hard_storage
+            hard_storage = hard_storage.new_tensor(actual_bytes)
         self.trainer.synchronize()
         state_update_seconds = time.perf_counter() - state_started
         self.residual_motion.stage_seconds['state_update'] = state_update_seconds
@@ -1809,10 +1912,13 @@ class Module(BaseModule):
             state_update_seconds=state_update_seconds,
             expected_storage_bytes=float(expected_storage),
             hard_storage_bytes=float(hard_storage),
+            uncompressed_hard_storage_bytes=uncompressed_hard_storage,
             storage_bytes_by_class={name: float(value) for name, value in hard_parts.items()},
             expected_storage_bytes_by_class={name: float(value) for name, value in expected_parts.items()},
             reference_storage_bytes=reference_bytes,
             motion_export=motion_export,
+            appearance_export=appearance_export,
+            opacity_export=opacity_export,
             incremental_export=incremental_export,
             frame_manifest=frame_manifest,
             dense_motion_training_parameter_bytes=(self.residual_motion.dense_training_parameter_bytes()
@@ -1822,11 +1928,11 @@ class Module(BaseModule):
                 'uncompressed_inference_arrays_v1'
                 if self.config.motion_mode in SPARSE_MOTION_MODES else None),
             inference_file_bytes=(sum(item['archive_bytes'] for item in
-                ((motion_export, incremental_export) if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}
+                ((motion_export, incremental_export, appearance_export, opacity_export) if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'}
                  else (motion_export, incremental_export, frame_manifest)) if item is not None)
                 if sparse_mode else None),
             inference_file_semantics=(
-                'Necessary preorder motion bitstream and retained birth PLY bytes. The motion header is '
+                'Necessary motion, optional sparse-color stream and retained birth stream bytes. The motion header is '
                 'included; diagnostic JSON is excluded. Shared first-frame model, images, checkpoints and logs '
                 'are excluded.' if self.config.motion_mode in {'storage_aware_binary', 'common_contrast_binary'} else
                 'Necessary motion NPZ, retained birth PLY and deletion/frame manifest file bytes for this '
@@ -1896,6 +2002,8 @@ class Module(BaseModule):
                 'frames and must not be added again. Topology includes row/pose validation and pivots. '
                 'finalize includes quantized state materialization/model installation/report preparation; '
                 'state_update is a subcomponent. birth_prediction_train_cpu is included in training; '
+                'appearance_birth_probe includes extra source-selection renders/backward and is already '
+                'inside training_loop_including_state_update, not an additional wall-time component. '
                 'birth_prediction_eval_cpu is included in evaluation or finalization. '
                 'Reported pure training excludes frame_prepare and finalize; rendering/backward/data/storage '
                 'and optimizer remain included. Frame summary JSON writing is measured under saving.'),
@@ -1932,7 +2040,10 @@ class Module(BaseModule):
                     'Actual quantized old-GS pose changes, without an independent m gate.')
         elif self.config.motion_mode == 'common_contrast_binary':
             cfg = self.residual_motion.config
-            codec = ('common_contrast_node_edits_v4' if cfg.direct_tree_enabled and cfg.direct_edit_encoding == 'node_ops' else
+            codec = ('common_contrast_covariance_rotation_v7' if not cfg.rotation_moves_positions else
+                     'common_contrast_birth_lifetime_v6' if cfg.birth_lifetime_enabled else
+                     'common_contrast_sparse_color_v5' if cfg.birth_appearance_action == 'color_update' else
+                     'common_contrast_node_edits_v4' if cfg.direct_tree_enabled and cfg.direct_edit_encoding == 'node_ops' else
                      'common_contrast_direct_tree_v3' if cfg.direct_tree_enabled else
                      'common_contrast_component_v2' if cfg.component_modes else
                      'common_contrast_preorder_v1')
@@ -1946,15 +2057,20 @@ class Module(BaseModule):
                 'root and one zero-mean contrast per open effective binary split. Unary branches inherit '
                 'without parameters. A closed learned subtree gate truncates all descendants; a zero local '
                 'contrast does not close the gate, so deeper differences remain representable.')
+            if not cfg.rotation_moves_positions:
+                semantics += (' Rotation changes GS covariance orientation only; positions receive summed '
+                              'hierarchical translations. Spatial pivots do not couple rotations to positions.')
             self.quant_report.update(
                 method_semantics=semantics,
                 storage_accounting=codec,
                 storage_semantics=(
                     f'Exact inference files use a {self.residual_motion.__class__.__name__} stream with '
-                    'a 132-byte verified header and byte-padded preorder payload plus retained birth PLY. '
+                    'a 132-byte verified header and byte-padded preorder payload plus retained birth stream. '
                     'Split member weights are reconstructed from deterministic post-deletion membership; '
                     'empty and unary branches consume no contrast record. v2/v3 omit zero translation '
-                    'and rotation blocks independently; dynamic streams include their actual tree edit bytes.'),
+                    'and rotation blocks independently; dynamic streams include their actual tree edit bytes. '
+                    'Optional lossless motion/birth envelopes are counted by their real file sizes; '
+                    'the differentiable storage proxy uses costs before entropy compression.'),
                 candidate_fit=dict(enabled=trial.get('reason') == 'proposed', extra_renders=extra_renders,
                     report=trial or None, semantics=(
                         'One decoded whole-batch comparison after equal remaining motion/gate budgets. '
@@ -1968,9 +2084,10 @@ class Module(BaseModule):
                     dense_fit='fit roots first, then expose the complete contrast tree',
                     gate_compress='jointly optimize fixed-16-bit motion and hard-forward subtree gates',
                     gate_refine='freeze subtree choices and refine only reached roots/open contrasts',
-                    incremental='freeze old motion and fit newborn Gaussians'), semantics=semantics))
+                    incremental='freeze old motion; fit newborn GS and selected old-GS DC updates'), semantics=semantics))
             if actual_motion is not None:
                 actual_motion['semantics'] = 'Actual fixed-precision old-GS pose changes under the committed subtree cut.'
+            self.quant_report['motion_quantization'] = self.residual_motion.motion_quantization_metadata()
         elif self.config.motion_mode == 'storage_aware_binary':
             semantics = (
                 'Storage-aware preorder bitstream. Every reached region carries a motion-presence flag; '
