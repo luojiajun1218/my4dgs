@@ -34,6 +34,7 @@ class RigidTreeConfig:
     region_rotation_lr: float = 1e-3
     gs_translation_lr: float = 1e-3
     gs_rotation_lr: float = 1e-3
+    motion_lr_final_ratio: float = 1.0
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
@@ -67,6 +68,11 @@ class RigidTreeConfig:
             value = getattr(self, name)
             if not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name} must be finite and nonnegative')
+        if (isinstance(self.motion_lr_final_ratio, bool) or
+                not isinstance(self.motion_lr_final_ratio, (float, int)) or
+                not math.isfinite(self.motion_lr_final_ratio) or
+                not 0 < self.motion_lr_final_ratio <= 1):
+            raise ValueError('motion_lr_final_ratio must be in (0, 1]')
         for name in ('gs_xyz_step_extent', 'gs_rotation_step_rad'):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, (float, int)) or
@@ -80,6 +86,13 @@ class RigidTreeConfig:
             raise ValueError('Invalid rate warmup/ramp schedule')
         if len(self.adam_betas) != 2 or any(not 0 <= v < 1 for v in self.adam_betas):
             raise ValueError('adam_betas must contain two values in [0, 1)')
+
+
+def saved_config_with_default_motion_lr(saved_config):
+    """Compare pre-schedule checkpoints without changing their saved payload."""
+    if isinstance(saved_config, dict) and 'motion_lr_final_ratio' not in saved_config:
+        return {**saved_config, 'motion_lr_final_ratio': 1.0}
+    return saved_config
 
 
 def rotation_vector_quaternion(vector):
@@ -443,6 +456,13 @@ class RigidResidualTree(nn.Module):
         if self.last_step <= self.config.shared_steps:
             self.gs_translation.grad = None
             self.gs_rotation.grad = None
+        factor = self._motion_lr_factor(self.last_step)
+        base_lrs = (self.config.region_translation_lr,
+                    self.config.region_rotation_lr,
+                    self.config.gs_translation_lr,
+                    self.config.gs_rotation_lr)
+        for group, base_lr in zip(self.optimizer.param_groups, base_lrs):
+            group['lr'] = base_lr * factor
         self.optimizer.step()
         projected = 0
         for parameter, scale in ((self.region_translation, self.steps[:3]),
@@ -457,6 +477,15 @@ class RigidResidualTree(nn.Module):
             self._proximal_gs_blocks()
         self.last_metrics['motion/int16_projected_blocks'] = projected
         self.optimizer.zero_grad(set_to_none=True)
+
+    def _motion_lr_factor(self, step):
+        """One cosine decay over the second half of motion fitting."""
+        start = self.config.motion_steps // 2
+        progress = min(max((step - start) /
+                           max(1, self.config.motion_steps - start), 0.), 1.)
+        cosine = (1 + math.cos(math.pi * progress)) / 2
+        return (self.config.motion_lr_final_ratio +
+                (1 - self.config.motion_lr_final_ratio) * cosine)
 
     @torch.no_grad()
     def _proximal_blocks(self, translation, rotation, step_t, step_r,
@@ -507,19 +536,21 @@ class RigidResidualTree(nn.Module):
 
     @torch.no_grad()
     def _proximal_region_blocks(self):
+        groups = self.optimizer.param_groups
         pruned_t, pruned_r = self._proximal_blocks(
             self.region_translation, self.region_rotation,
             self.steps[:3], self.steps[3:], self._region_id_lengths,
-            self.config.region_translation_lr, self.config.region_rotation_lr, 1)
+            groups[0]['lr'], groups[1]['lr'], 1)
         self.last_metrics['motion/prox_zero_region_translation_blocks'] = pruned_t
         self.last_metrics['motion/prox_zero_region_rotation_blocks'] = pruned_r
 
     @torch.no_grad()
     def _proximal_gs_blocks(self):
+        groups = self.optimizer.param_groups
         pruned_t, pruned_r = self._proximal_blocks(
             self.gs_translation, self.gs_rotation,
             self.gs_steps[:3], self.gs_steps[3:], self._gs_id_lengths,
-            self.config.gs_translation_lr, self.config.gs_rotation_lr, 0)
+            groups[2]['lr'], groups[3]['lr'], 0)
         self.last_metrics['motion/prox_zero_translation_blocks'] = pruned_t
         self.last_metrics['motion/prox_zero_rotation_blocks'] = pruned_r
 
@@ -938,7 +969,7 @@ class RigidResidualTree(nn.Module):
     def restore(self, packet):
         if packet is None:
             return
-        if packet['config'] != asdict(self.config):
+        if saved_config_with_default_motion_lr(packet['config']) != asdict(self.config):
             raise ValueError('Rigid tree checkpoint configuration differs')
         from .rigid_tree_codec import DecodedState
         state = packet['codec_previous_state']

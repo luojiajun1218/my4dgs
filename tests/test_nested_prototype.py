@@ -8335,6 +8335,24 @@ def test_rigid_tree_stage_and_first_layout_are_deterministic():
     assert model.update_topology(59) == []
 
 
+def test_rigid_tree_motion_cosine_lr_has_exact_endpoints_and_default_identity():
+    overrides = dict(motion_steps=100, shared_steps=20, tree_edit_step=60,
+                     region_translation_lr=.004, region_rotation_lr=.003,
+                     gs_translation_lr=.002, gs_rotation_lr=.001)
+    model = rigid_tree_fixture(motion_lr_final_ratio=.1, **overrides)
+    base = torch.tensor([.004, .003, .002, .001])
+    for step, factor in ((1, 1.), (50, 1.), (75, .55), (100, .1)):
+        model.last_step = step
+        model.optimizer_step()
+        actual = torch.tensor([group['lr'] for group in model.optimizer.param_groups])
+        torch.testing.assert_close(actual, base * factor, rtol=0, atol=1e-9)
+    legacy = rigid_tree_fixture(**overrides)
+    legacy.last_step = 100
+    legacy.optimizer_step()
+    actual = torch.tensor([group['lr'] for group in legacy.optimizer.param_groups])
+    torch.testing.assert_close(actual, base, rtol=0, atol=0)
+
+
 def test_rigid_tree_translation_rotation_symbols_and_relative_gradients_are_independent():
     model = rigid_tree_fixture()
     with torch.no_grad():
@@ -8430,6 +8448,31 @@ def test_rigid_tree_region_proximal_selects_four_sparse_block_choices():
     assert not bool(model.region_rotation[4].any())
     assert model.last_metrics['motion/prox_zero_region_translation_blocks'] == 2
     assert model.last_metrics['motion/prox_zero_region_rotation_blocks'] == 2
+
+
+def test_rigid_tree_proximal_uses_actual_optimizer_lr_for_region_and_gs():
+    for kind in ('region', 'gs'):
+        for component in ('translation', 'rotation'):
+            for actual_lr, expected in ((.001, 0.), (.0001, .02)):
+                model = rigid_tree_fixture(rate_loss_weight=.01,
+                                           region_translation_lr=.001,
+                                           region_rotation_lr=.001,
+                                           gs_translation_lr=.001,
+                                           gs_rotation_lr=.001)
+                parameter = getattr(model, kind + '_' + component)
+                row = 1 if kind == 'region' else 0
+                with torch.no_grad():
+                    parameter[row, 0] = .02
+                state = model.optimizer.state[parameter]
+                state['step'] = torch.tensor(1.)
+                state['exp_avg'] = torch.zeros_like(parameter)
+                state['exp_avg_sq'] = torch.full_like(parameter, 1e-8)
+                group_index = (0 if kind == 'region' else 2) + (component == 'rotation')
+                model.optimizer.param_groups[group_index]['lr'] = actual_lr
+                model.last_step = 60
+                getattr(model, '_proximal_' + kind + '_blocks')()
+                torch.testing.assert_close(parameter[row, 0], torch.tensor(expected),
+                                           rtol=0, atol=0)
 
 
 def test_rigid_tree_region_subgrid_motion_accumulates_through_proximal_step():
@@ -8635,6 +8678,79 @@ def test_rigid_tree_checkpoint_restores_pose_and_adam_next_step():
     for subject in (model, recovered):
         (subject.forward(2, training=True)[0] - subject.base_xyz - .07).square().sum().backward()
         subject.optimizer_step()
+    for name in ('region_translation', 'region_rotation',
+                 'gs_translation', 'gs_rotation'):
+        torch.testing.assert_close(getattr(recovered, name), getattr(model, name),
+                                   rtol=0, atol=0)
+
+
+def _assert_checkpoint_payload_unchanged(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    elif isinstance(expected, np.ndarray):
+        np.testing.assert_array_equal(actual, expected)
+    elif isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_checkpoint_payload_unchanged(actual[key], expected[key])
+    elif isinstance(expected, (list, tuple)):
+        assert type(actual) is type(expected) and len(actual) == len(expected)
+        for item, original in zip(actual, expected):
+            _assert_checkpoint_payload_unchanged(item, original)
+    else:
+        assert actual == expected
+
+
+def test_rigid_tree_legacy_lr_checkpoint_defaults_only_missing_ratio():
+    model = rigid_tree_fixture()
+    packet = copy.deepcopy(model.capture())
+    del packet['config']['motion_lr_final_ratio']
+    original = copy.deepcopy(packet)
+    restored = RIGID.RigidResidualTree(model.config)
+    restored.restore(packet)
+    for name in ('region_translation', 'region_rotation',
+                 'gs_translation', 'gs_rotation'):
+        torch.testing.assert_close(getattr(restored, name), getattr(model, name),
+                                   rtol=0, atol=0)
+    _assert_checkpoint_payload_unchanged(packet, original)
+
+    changed_ratio = rigid_tree_fixture(motion_lr_final_ratio=.1)
+    try:
+        changed_ratio.restore(packet)
+    except ValueError as error:
+        assert 'configuration differs' in str(error)
+    else:
+        raise AssertionError('Old checkpoint accepted a non-default LR ratio')
+    mismatched = copy.deepcopy(packet)
+    mismatched['config']['region_count'] += 1
+    try:
+        restored.restore(mismatched)
+    except ValueError as error:
+        assert 'configuration differs' in str(error)
+    else:
+        raise AssertionError('Old checkpoint accepted another config mismatch')
+    _assert_checkpoint_payload_unchanged(packet, original)
+
+
+def test_rigid_tree_cosine_lr_checkpoint_recomputes_next_step_identically():
+    model = rigid_tree_fixture(motion_steps=8, birth_steps=2, shared_steps=2,
+                               tree_edit_step=6, motion_lr_final_ratio=.1)
+    (model.forward(5, training=True)[0] - model.base_xyz - .03).square().sum().backward()
+    model.optimizer_step()
+    saved = copy.deepcopy(model.capture())
+    recovered = RIGID.RigidResidualTree(model.config)
+    recovered.restore(saved)
+    for original, clone in zip(model.optimizer.param_groups,
+                               recovered.optimizer.param_groups):
+        torch.testing.assert_close(torch.tensor(original['lr']),
+                                   torch.tensor(clone['lr']), rtol=0, atol=0)
+    for subject in (model, recovered):
+        (subject.forward(6, training=True)[0] - subject.base_xyz - .07).square().sum().backward()
+        subject.optimizer_step()
+    for original, clone in zip(model.optimizer.param_groups,
+                               recovered.optimizer.param_groups):
+        torch.testing.assert_close(torch.tensor(original['lr']),
+                                   torch.tensor(clone['lr']), rtol=0, atol=0)
     for name in ('region_translation', 'region_rotation',
                  'gs_translation', 'gs_rotation'):
         torch.testing.assert_close(getattr(recovered, name), getattr(model, name),
@@ -9133,6 +9249,56 @@ def test_rigid_pipeline_mid_birth_restore_freezes_motion_on_cpu():
     assert resumed.motion_committed and not resumed.motion.committed
     assert all(not parameter.requires_grad for parameter in resumed.motion.parameters())
     assert all(parameter.grad is None for parameter in resumed.motion.parameters())
+
+
+def test_rigid_pipeline_legacy_lr_config_checks_both_saved_copies():
+    model = rigid_tree_fixture()
+    config = RIGID_MODULE.ModuleConfig(rigid_tree=model.config)
+    checkpoint = dict(gaussians='base', rigid_tree_version=1,
+        rigid_tree_config=asdict(config.rigid_tree),
+        rigid_tree_module_config=asdict(config),
+        rigid_tree_frame=dict(prepared=True, finalized=False,
+            motion_committed=False, reference_count=4, report=None,
+            birth_control={}),
+        rigid_tree_motion=model.capture(), births=None)
+    del checkpoint['rigid_tree_config']['motion_lr_final_ratio']
+    del checkpoint['rigid_tree_module_config']['rigid_tree']['motion_lr_final_ratio']
+    del checkpoint['rigid_tree_motion']['config']['motion_lr_final_ratio']
+    original = copy.deepcopy(checkpoint)
+
+    def resume_with(tree_config, saved):
+        module_config = RIGID_MODULE.ModuleConfig(rigid_tree=tree_config)
+        fake = SimpleNamespace(config=module_config,
+            gaussians=SimpleNamespace(restore=lambda packet, cfg: None),
+            renderer=SimpleNamespace(gaussians=None),
+            motion=RIGID.RigidResidualTree(tree_config),
+            _freeze_base=lambda: None)
+        RIGID_MODULE.Module.on_load_checkpoint(fake, saved)
+        return fake
+
+    resumed = resume_with(model.config, checkpoint)
+    assert resumed.frame_prepared and not resumed.motion_committed
+    torch.testing.assert_close(resumed.motion.owner, model.owner, rtol=0, atol=0)
+    _assert_checkpoint_payload_unchanged(checkpoint, original)
+
+    nondefault = RIGID.RigidTreeConfig(**{
+        **asdict(model.config), 'motion_lr_final_ratio': .1})
+    try:
+        resume_with(nondefault, checkpoint)
+    except ValueError as error:
+        assert 'method configuration' in str(error)
+    else:
+        raise AssertionError('Old top-level config accepted non-default LR ratio')
+
+    nested_old = copy.deepcopy(checkpoint)
+    nested_old['rigid_tree_config']['motion_lr_final_ratio'] = .1
+    try:
+        resume_with(nondefault, nested_old)
+    except ValueError as error:
+        assert 'module configuration' in str(error)
+    else:
+        raise AssertionError('Old nested config accepted non-default LR ratio')
+    _assert_checkpoint_payload_unchanged(checkpoint, original)
 
 
 def test_rigid_pipeline_single_validation_loader_averages_its_views():

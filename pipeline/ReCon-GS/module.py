@@ -21,7 +21,8 @@ from .model.rigid_tree_birth_codec import export_birth_attributes
 from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     QuantizedNewGaussianView, materialize_quantized_gaussians, model_raw,
     reference_digest)
-from .model.rigid_residual_tree import RigidResidualTree, RigidTreeConfig
+from .model.rigid_residual_tree import (RigidResidualTree, RigidTreeConfig,
+    saved_config_with_default_motion_lr)
 
 
 @dataclass
@@ -196,11 +197,16 @@ class Module(BaseModule):
             self._freeze_base()
             return
         self._freeze_base()
-        if version != 1 or ckpt['rigid_tree_config'] != asdict(self.config.rigid_tree):
+        if (version != 1 or
+                saved_config_with_default_motion_lr(ckpt['rigid_tree_config']) !=
+                asdict(self.config.rigid_tree)):
             raise ValueError('Rigid-tree checkpoint needs the same method configuration')
         saved_config = ckpt.get('rigid_tree_module_config')
         if saved_config is not None and 'initial_opacity_threshold' not in saved_config:
             saved_config = {**saved_config, 'initial_opacity_threshold': 0.0}
+        if isinstance(saved_config, dict) and 'rigid_tree' in saved_config:
+            saved_config = {**saved_config, 'rigid_tree':
+                saved_config_with_default_motion_lr(saved_config['rigid_tree'])}
         if saved_config != asdict(self.config):
             raise ValueError('Rigid-tree checkpoint needs the same module configuration')
         state = ckpt['rigid_tree_frame']
