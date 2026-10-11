@@ -25,3 +25,5 @@ L2 三帧合计从 140,140 降至 110,785 字节，减少 20.95%。L1 三帧合�
 - `output/rigid_tree_diagnostics_20261012/codec_v2_l1_probe/results.json`
 
 对应原实验见 `20261012_rigid_tree_region3072_diagnostic.md` 和 `20261012_rigid_tree_relative_l1_diagnostic.md`。
+
+另完成了跨帧 zlib 字典的 CPU 检查。对 stableparent 已生成的连续 1–100 帧，分别用前一帧原始 motion 包的前、后 32 KiB 作为字典，计入新封装头、原始长度和字典选择标记。所有候选均逐字节解压一致，但没有一帧小于当前 auto 选择的 XZ。当前 auto 合计 2,325,528 字节，加入字典候选后不变，因此不添加该编码路径。此数值仅含运动包；结果在 `output/rigid_tree_diagnostics_20261012/temporal_dictionary_probe.json`。
