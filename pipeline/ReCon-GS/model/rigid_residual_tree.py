@@ -119,6 +119,19 @@ def quaternion_rotvec(q):
                            torch.full_like(norm, 2))
 
 
+def quaternion_angle_error(a, b):
+    """Shortest orientation difference in radians, stable near identity.
+
+    The tree edit tolerance is below float32 dot-product resolution. Promote
+    before normalization so even a quaternion compared with itself passes.
+    """
+    a = F.normalize(a.double(), dim=-1)
+    b = F.normalize(b.double(), dim=-1)
+    relative = quaternion_multiply(a, quaternion_inverse(b))
+    return 2 * torch.atan2(relative[..., 1:].norm(dim=-1),
+                           relative[..., 0].abs())
+
+
 def _identity(count, ref):
     q = ref.new_zeros((count, 4))
     q[:, 0] = 1
@@ -672,9 +685,8 @@ class RigidResidualTree(nn.Module):
                     quaternion_multiply(region_q, self.base_rotation[start:end]))
                 pose_ok = ((recovered_xyz - target_xyz[start:end]).norm(dim=-1) <=
                            math.sqrt(3) * float(self.gs_steps[0]) / 2 + 1e-6)
-                dot = (F.normalize(recovered_q, dim=-1) *
-                       F.normalize(target_q[start:end], dim=-1)).sum(-1).abs()
-                pose_ok &= dot >= math.cos(math.sqrt(3) * float(self.gs_steps[3]) / 4)
+                angle_error = quaternion_angle_error(recovered_q, target_q[start:end])
+                pose_ok &= angle_error <= math.sqrt(3) * float(self.gs_steps[3]) / 2
                 active_t, active_r = t.ne(0).any(-1), r.ne(0).any(-1)
                 row_id_bytes = self._gs_id_lengths[start:end]
                 cost = (6 * (active_t.to(self.base_xyz) +
@@ -707,9 +719,7 @@ class RigidResidualTree(nn.Module):
         after_bytes = float(self._hard_motion_bytes()) + self._metadata_bytes()
         final_xyz, final_q = self.forward(step)
         position_error = float((final_xyz - target_xyz).norm(dim=-1).amax())
-        orientation_dot = (F.normalize(final_q, dim=-1) *
-                           F.normalize(target_q, dim=-1)).sum(-1).abs().clamp(max=1)
-        rotation_error = float((2 * torch.acos(orientation_dot)).amax())
+        rotation_error = float(quaternion_angle_error(final_q, target_q).amax())
         self.last_metrics.update({
             'tree_edit/uncompressed_bytes_before': before_bytes,
             'tree_edit/uncompressed_bytes_after': after_bytes,
@@ -781,10 +791,9 @@ class RigidResidualTree(nn.Module):
                 self.gs_rotation.copy_(candidate_gr.to(self.gs_rotation) * self.gs_steps[3:])
                 decoded_xyz, decoded_q = self.forward(self.config.motion_steps)
                 xyz_error = (decoded_xyz - target_xyz).norm(dim=-1).amax()
-                q_dot = (F.normalize(decoded_q, dim=-1) *
-                         F.normalize(target_q, dim=-1)).sum(-1).abs()
+                angle_error = quaternion_angle_error(decoded_q, target_q)
                 if (xyz_error <= math.sqrt(3) * float(self.gs_steps[0]) / 2 + 1e-6 and
-                        bool((q_dot >= math.cos(math.sqrt(3) * float(self.gs_steps[3]) / 4)).all())):
+                        bool((angle_error <= math.sqrt(3) * float(self.gs_steps[3]) / 2).all())):
                     edit_bytes = _varint_length(node) + _varint_length(parent)
                     relative = float(((self.region_translation[1:] / self.extent).square().sum(-1) +
                                       self.region_rotation[1:].square().sum(-1)).mean())

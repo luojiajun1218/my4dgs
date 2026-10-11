@@ -8463,6 +8463,37 @@ def test_rigid_tree_reparent_deduplicates_shared_rigid_motion_without_pose_drift
     torch.testing.assert_close(after_q, before_q, rtol=0, atol=.0051)
 
 
+def test_rigid_tree_rotation_tolerance_uses_true_angle_for_parent_candidates():
+    raw_q = torch.tensor([-.3029974103, -1.7618416548,
+                          .6348446012, -.8043590784])
+    q = raw_q.repeat(4, 1)
+    # Float32 self-dot fails the old near-one cosine check even with no edit.
+    old_dot = (F.normalize(q, dim=-1) * F.normalize(q, dim=-1)).sum(-1)
+    assert bool((old_dot < math.cos(math.sqrt(3) * .001 / 4)).all())
+    same = RIGID.quaternion_angle_error(q, q)
+    negated = RIGID.quaternion_angle_error(q, -q)
+    torch.testing.assert_close(same, torch.zeros_like(same), rtol=0, atol=1e-12)
+    torch.testing.assert_close(negated, torch.zeros_like(negated), rtol=0, atol=1e-12)
+    outside = RIGID.rotation_vector_quaternion(
+        torch.tensor([[0., 0., .002]]))
+    assert float(RIGID.quaternion_angle_error(
+        torch.tensor([[1., 0., 0., 0.]]), outside)) > math.sqrt(3) * .001 / 2
+
+    model = rigid_tree_fixture(gs_xyz_step_extent=.01,
+                               gs_rotation_step_rad=.001)
+    model.frame_index = 10
+    model.base_rotation = q.clone()
+    with torch.no_grad():
+        model.region_translation[1, 0] = .2
+        model.region_translation[2, 0] = .2
+    before_xyz, before_q = (value.detach().clone() for value in model.forward(60))
+    edits = model.update_topology(60)
+    assert sum(edit['kind'] == 'parent' for edit in edits) == 1
+    after_xyz, after_q = model.forward(60)
+    torch.testing.assert_close(after_xyz, before_xyz, rtol=0, atol=.0051)
+    assert float(RIGID.quaternion_angle_error(after_q, before_q).amax()) < 1e-6
+
+
 def test_rigid_tree_checkpoint_restores_pose_and_adam_next_step():
     model = rigid_tree_fixture()
     (model.forward(1, training=True)[0] - model.base_xyz - .03).square().sum().backward()
