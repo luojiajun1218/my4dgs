@@ -447,8 +447,16 @@ class Module(BaseModule):
         if len(sources):
             birth_path = stream_dir / f'birth_{self.current_frame:03d}.bin'
             birth_info = export_birth_attributes(birth_path,
-                {name: raw[name][-len(sources):] for name in RAW_FIELDS},
-                len(raw['xyz']) - len(sources))
+                {name: raw[name][-len(sources):] for name in
+                 ('logscale', 'opacity', 'sh_dc', 'sh_rest')},
+                len(raw['xyz']) - len(sources),
+                symbols={name: view.symbols[name] for name in
+                         ('logscale', 'opacity', 'sh_dc', 'sh_rest')},
+                steps={name: view.steps[name] for name in
+                       ('logscale', 'opacity', 'sh_dc', 'sh_rest')},
+                predictor={name: view.predictor[name] for name in
+                           ('logscale', 'opacity', 'sh_dc', 'sh_rest')},
+                source_rows=sources)
         for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
             setattr(self.gaussians, attr,
                     torch.nn.Parameter(raw[name].detach().clone()))

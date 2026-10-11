@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib
+import lzma
 import sys
 import tempfile
 from pathlib import Path
@@ -46,7 +47,7 @@ def test_compressed_and_legacy_packets_replay_identically():
     legacy = CODEC.encode_motion(*args)
     packed = CODEC.encode_motion(*args, compression='auto')
     assert legacy.startswith(CODEC.MAGIC)
-    assert packed.startswith(CODEC.COMPRESSED_MAGIC)
+    assert packed.startswith((CODEC.COMPRESSED_MAGIC, CODEC.LZMA_COMPRESSED_MAGIC))
     assert len(packed) < len(legacy)
     old_state = CODEC.decode_motion(legacy, prior)
     new_state = CODEC.decode_motion(packed, prior)
@@ -55,7 +56,9 @@ def test_compressed_and_legacy_packets_replay_identically():
                                    rtol=0, atol=0)
     assert new_state.digest() == old_state.digest()
     info = CODEC.motion_packet_info(packed)
-    assert info == dict(format='RRC1-zlib', stored_bytes=len(packed),
+    assert info == dict(format=('RRC1-zlib' if packed.startswith(
+                            CODEC.COMPRESSED_MAGIC) else 'RRL1-lzma'),
+                        stored_bytes=len(packed),
                         raw_stream_bytes=len(legacy),
                         compression_savings_bytes=len(legacy) - len(packed))
 
@@ -83,6 +86,27 @@ def test_compressed_packet_rejects_mutation_truncation_trailing_and_bomb():
             pass
         else:
             raise AssertionError('Damaged compressed stream was accepted')
+
+
+def test_lzma_packet_roundtrips_and_rejects_damage_trailers_and_expansion():
+    prior, args = packet_fixture()
+    raw = CODEC.encode_motion(*args)
+    packet = (CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(raw)) +
+              lzma.compress(raw, format=lzma.FORMAT_XZ, preset=9))
+    assert CODEC.uncompressed_motion_packet(packet) == raw
+    assert CODEC.decode_motion(packet, prior).digest() == (
+        CODEC.decode_motion(raw, prior).digest())
+    assert CODEC.motion_packet_info(packet)['stored_bytes'] == len(packet)
+    for bad in (packet[:-1], packet + b'X',
+                packet[:5] + CODEC._uvar(len(raw) - 1) + packet[6:],
+                CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(
+                    CODEC.MAX_RAW_PACKET_BYTES + 1) + packet[6:]):
+        try:
+            CODEC.uncompressed_motion_packet(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Damaged LZMA stream was accepted')
 
 
 def test_export_reports_actual_stored_and_uncompressed_bytes():
@@ -150,7 +174,7 @@ def test_dual_step_stream_replays_distinct_region_and_gs_grids():
     model.register_materialized_layout(xyz, rotation)
     with tempfile.TemporaryDirectory() as directory:
         info = model.export_motion(Path(directory) / 'motion.bin')
-        assert info['format'] in ('RRT2-raw', 'RRC2-zlib')
+        assert info['format'] in ('RRT2-raw', 'RRC2-zlib', 'RRL2-lzma')
         torch.testing.assert_close(
             torch.tensor([info['region_translation_step_world'],
                           info['gs_translation_step_world'],

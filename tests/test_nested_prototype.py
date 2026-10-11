@@ -8923,6 +8923,40 @@ def test_rigid_birth_appearance_stream_roundtrips_and_rejects_bad_counts():
             raise AssertionError('Corrupt birth appearance packet was accepted')
 
 
+def test_rigid_birth_source_symbols_reconstruct_float32_bytes_and_fallback():
+    source = torch.tensor([2, 0], dtype=torch.long)
+    old = dict(xyz=torch.zeros(3, 3), rotation=torch.tensor([[1., 0., 0., 0.]] * 3),
+               logscale=torch.arange(9, dtype=torch.float32).reshape(3, 3) / 8,
+               opacity=torch.arange(3, dtype=torch.float32).reshape(3, 1) / 8,
+               sh_dc=torch.arange(9, dtype=torch.float32).reshape(3, 1, 3) / 8,
+               sh_rest=torch.arange(18, dtype=torch.float32).reshape(3, 2, 3) / 8)
+    symbols = dict(logscale=torch.tensor([[0., -2., 32768.], [3., 4., -5.]]),
+                   opacity=torch.tensor([[-3.], [0.]]),
+                   sh_dc=torch.tensor([[[1., 0., -1.]], [[2., -2., 0.]]]),
+                   sh_rest=torch.arange(-6, 6, dtype=torch.float32).reshape(2, 2, 3))
+    predictor = {name: old[name][source] for name in symbols}
+    steps = {name: .125 for name in symbols}
+    newborn = {name: predictor[name] + value * steps[name]
+               for name, value in symbols.items()}
+    xyz = torch.ones(2, 3)
+    rotation = old['rotation'][:2]
+    packet = RIGID_BIRTH_CODEC.encode_birth_symbols(
+        newborn, 3, symbols=symbols, steps=steps, predictor=predictor,
+        source_rows=source)
+    assert packet.startswith(RIGID_BIRTH_CODEC.SYMBOL_MAGIC)
+    assert RIGID_BIRTH_CODEC.SYMBOL_HEADER.unpack_from(packet)[4] == 4
+    decoded = RIGID_BIRTH_CODEC.decode_birth_attributes(
+        packet, old, xyz, rotation, source)
+    for name, expected in newborn.items():
+        torch.testing.assert_close(decoded[name], expected, rtol=0, atol=0)
+        assert decoded[name].numpy().tobytes() == expected.numpy().tobytes()
+    changed = {name: value.clone() for name, value in newborn.items()}
+    changed['opacity'][0, 0] += .01
+    assert RIGID_BIRTH_CODEC.encode_birth_symbols(
+        changed, 3, symbols=symbols, steps=steps, predictor=predictor,
+        source_rows=source) is None
+
+
 def test_rigid_birth_quantization_uses_lineage_and_keeps_periodic_survivors():
     birth_quantization = importlib.import_module(
         'pipeline.ReCon-GS.model.birth_quantization')

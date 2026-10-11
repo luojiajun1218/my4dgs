@@ -7,6 +7,7 @@ reconstructs the current pose from sparse signed-int16 motion symbols.
 
 from dataclasses import dataclass
 import hashlib
+import lzma
 import math
 import struct
 import zlib
@@ -21,8 +22,11 @@ MAGIC = b'RRT1'
 DUAL_STEP_MAGIC = b'RRT2'
 COMPRESSED_MAGIC = b'RRC1'
 DUAL_STEP_COMPRESSED_MAGIC = b'RRC2'
+LZMA_COMPRESSED_MAGIC = b'RRL1'
+DUAL_STEP_LZMA_COMPRESSED_MAGIC = b'RRL2'
 CHECKSUM_BYTES = 16
 MAX_RAW_PACKET_BYTES = 512 * 1024 * 1024
+MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
 
 
 @dataclass
@@ -82,11 +86,7 @@ def _uvar(value):
 
 
 def compress_motion_packet(raw_packet, mode='auto'):
-    """Wrap an RRT1 packet without changing its decoded symbols or topology.
-
-    ``auto`` keeps the old packet when a zlib wrapper would be larger. The
-    inner SHA-256 trailer and zlib checksum are checked on decode.
-    """
+    """Store the smallest exact raw, zlib, or XZ packet in automatic mode."""
     if mode not in ('none', 'auto', 'zlib'):
         raise ValueError('Motion compression must be none, auto, or zlib')
     raw_packet = bytes(raw_packet)
@@ -99,9 +99,15 @@ def compress_motion_packet(raw_packet, mode='auto'):
         return raw_packet
     compressed_magic = (DUAL_STEP_COMPRESSED_MAGIC
                         if raw_packet.startswith(DUAL_STEP_MAGIC) else COMPRESSED_MAGIC)
-    compressed = (compressed_magic + _uvar(len(raw_packet)) +
-                  zlib.compress(raw_packet, level=6))
-    return compressed if mode == 'zlib' or len(compressed) < len(raw_packet) else raw_packet
+    zlib_packet = (compressed_magic + _uvar(len(raw_packet)) +
+                   zlib.compress(raw_packet, level=6))
+    if mode == 'zlib':
+        return zlib_packet
+    lzma_magic = (DUAL_STEP_LZMA_COMPRESSED_MAGIC
+                  if raw_packet.startswith(DUAL_STEP_MAGIC) else LZMA_COMPRESSED_MAGIC)
+    lzma_packet = (lzma_magic + _uvar(len(raw_packet)) +
+                   lzma.compress(raw_packet, format=lzma.FORMAT_XZ, preset=9))
+    return min((raw_packet, zlib_packet, lzma_packet), key=len)
 
 
 def uncompressed_motion_packet(packet):
@@ -112,7 +118,9 @@ def uncompressed_motion_packet(packet):
             raise ValueError('Rigid motion packet exceeds decoder size limit')
         _verify_raw_checksum(packet)
         return packet
-    if not packet.startswith((COMPRESSED_MAGIC, DUAL_STEP_COMPRESSED_MAGIC)):
+    zlib_magic = (COMPRESSED_MAGIC, DUAL_STEP_COMPRESSED_MAGIC)
+    lzma_magic = (LZMA_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC)
+    if not packet.startswith(zlib_magic + lzma_magic):
         raise ValueError('Unsupported rigid motion stream')
     reader = _Reader(packet)
     reader.take(len(COMPRESSED_MAGIC))
@@ -121,14 +129,22 @@ def uncompressed_motion_packet(packet):
         raise ValueError('Invalid uncompressed rigid motion size')
     compressed = bytes(reader.take(len(packet) - reader.cursor))
     try:
-        decoder = zlib.decompressobj()
-        raw = decoder.decompress(compressed, raw_length + 1)
-    except zlib.error as error:
+        if packet[:4] in zlib_magic:
+            decoder = zlib.decompressobj()
+            raw = decoder.decompress(compressed, raw_length + 1)
+            extra = decoder.unconsumed_tail
+        else:
+            decoder = lzma.LZMADecompressor(
+                format=lzma.FORMAT_XZ, memlimit=MAX_LZMA_MEMORY_BYTES)
+            raw = decoder.decompress(compressed, max_length=raw_length + 1)
+            extra = b''
+    except (zlib.error, lzma.LZMAError, EOFError) as error:
         raise ValueError('Damaged compressed rigid motion stream') from error
     if (len(raw) != raw_length or not decoder.eof or
-            decoder.unused_data or decoder.unconsumed_tail or
-            not raw.startswith(DUAL_STEP_MAGIC if packet.startswith(
-                DUAL_STEP_COMPRESSED_MAGIC) else MAGIC)):
+            decoder.unused_data or extra or
+            not raw.startswith(DUAL_STEP_MAGIC if packet[:4] in (
+                DUAL_STEP_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC)
+                else MAGIC)):
         raise ValueError('Compressed rigid motion length or trailer mismatch')
     _verify_raw_checksum(raw)
     return raw
@@ -147,7 +163,9 @@ def motion_packet_info(packet):
     magic = bytes(packet[:4])
     formats = {MAGIC: 'RRT1-raw', DUAL_STEP_MAGIC: 'RRT2-raw',
                COMPRESSED_MAGIC: 'RRC1-zlib',
-               DUAL_STEP_COMPRESSED_MAGIC: 'RRC2-zlib'}
+               DUAL_STEP_COMPRESSED_MAGIC: 'RRC2-zlib',
+               LZMA_COMPRESSED_MAGIC: 'RRL1-lzma',
+               DUAL_STEP_LZMA_COMPRESSED_MAGIC: 'RRL2-lzma'}
     return dict(format=formats[magic], stored_bytes=len(packet),
                 raw_stream_bytes=len(raw), compression_savings_bytes=len(raw) - len(packet))
 

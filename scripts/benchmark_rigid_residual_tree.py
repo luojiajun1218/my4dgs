@@ -233,7 +233,8 @@ def _decode_frame(stream: Path, frame: int, state, raw):
     if birth_count:
         newborn = birth_codec.decode_birth_attributes(
             birth_file.read_bytes(), current,
-            decoded.xyz[old_count:], decoded.rotation[old_count:])
+            decoded.xyz[old_count:], decoded.rotation[old_count:],
+            decoded.birth_sources)
         sources = decoded.birth_sources
         if (sources is None or len(sources) != birth_count or
                 not torch.equal(decoded.owner[old_count:],
