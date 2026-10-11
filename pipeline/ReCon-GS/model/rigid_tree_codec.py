@@ -24,9 +24,26 @@ COMPRESSED_MAGIC = b'RRC1'
 DUAL_STEP_COMPRESSED_MAGIC = b'RRC2'
 LZMA_COMPRESSED_MAGIC = b'RRL1'
 DUAL_STEP_LZMA_COMPRESSED_MAGIC = b'RRL2'
+DELTA_MAGIC = b'RSD1'
+DUAL_STEP_DELTA_MAGIC = b'RSD2'
+DELTA_COMPRESSED_MAGIC = b'RSC1'
+DUAL_STEP_DELTA_COMPRESSED_MAGIC = b'RSC2'
+DELTA_LZMA_COMPRESSED_MAGIC = b'RSL1'
+DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC = b'RSL2'
 CHECKSUM_BYTES = 16
 MAX_RAW_PACKET_BYTES = 512 * 1024 * 1024
 MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
+
+RAW_MAGICS = (MAGIC, DUAL_STEP_MAGIC, DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC)
+WRAPPERS = {
+    MAGIC: (COMPRESSED_MAGIC, LZMA_COMPRESSED_MAGIC),
+    DUAL_STEP_MAGIC: (DUAL_STEP_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC),
+    DELTA_MAGIC: (DELTA_COMPRESSED_MAGIC, DELTA_LZMA_COMPRESSED_MAGIC),
+    DUAL_STEP_DELTA_MAGIC: (DUAL_STEP_DELTA_COMPRESSED_MAGIC,
+                            DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC),
+}
+INNER_MAGIC = {wrapper: raw for raw, pair in WRAPPERS.items()
+               for wrapper in pair}
 
 
 @dataclass
@@ -90,21 +107,18 @@ def compress_motion_packet(raw_packet, mode='auto'):
     if mode not in ('none', 'auto', 'zlib'):
         raise ValueError('Motion compression must be none, auto, or zlib')
     raw_packet = bytes(raw_packet)
-    if not raw_packet.startswith((MAGIC, DUAL_STEP_MAGIC)):
+    if raw_packet[:4] not in RAW_MAGICS:
         raise ValueError('Compression requires an uncompressed rigid motion packet')
     if len(raw_packet) > MAX_RAW_PACKET_BYTES:
         raise ValueError('Rigid motion packet exceeds decoder size limit')
     _verify_raw_checksum(raw_packet)
     if mode == 'none':
         return raw_packet
-    compressed_magic = (DUAL_STEP_COMPRESSED_MAGIC
-                        if raw_packet.startswith(DUAL_STEP_MAGIC) else COMPRESSED_MAGIC)
+    compressed_magic, lzma_magic = WRAPPERS[raw_packet[:4]]
     zlib_packet = (compressed_magic + _uvar(len(raw_packet)) +
                    zlib.compress(raw_packet, level=6))
     if mode == 'zlib':
         return zlib_packet
-    lzma_magic = (DUAL_STEP_LZMA_COMPRESSED_MAGIC
-                  if raw_packet.startswith(DUAL_STEP_MAGIC) else LZMA_COMPRESSED_MAGIC)
     lzma_packet = (lzma_magic + _uvar(len(raw_packet)) +
                    lzma.compress(raw_packet, format=lzma.FORMAT_XZ, preset=9))
     return min((raw_packet, zlib_packet, lzma_packet), key=len)
@@ -113,14 +127,12 @@ def compress_motion_packet(raw_packet, mode='auto'):
 def uncompressed_motion_packet(packet):
     """Return verified raw packet bytes from current or legacy storage."""
     packet = bytes(packet)
-    if packet.startswith((MAGIC, DUAL_STEP_MAGIC)):
+    if packet[:4] in RAW_MAGICS:
         if len(packet) > MAX_RAW_PACKET_BYTES:
             raise ValueError('Rigid motion packet exceeds decoder size limit')
         _verify_raw_checksum(packet)
         return packet
-    zlib_magic = (COMPRESSED_MAGIC, DUAL_STEP_COMPRESSED_MAGIC)
-    lzma_magic = (LZMA_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC)
-    if not packet.startswith(zlib_magic + lzma_magic):
+    if packet[:4] not in INNER_MAGIC:
         raise ValueError('Unsupported rigid motion stream')
     reader = _Reader(packet)
     reader.take(len(COMPRESSED_MAGIC))
@@ -129,7 +141,7 @@ def uncompressed_motion_packet(packet):
         raise ValueError('Invalid uncompressed rigid motion size')
     compressed = bytes(reader.take(len(packet) - reader.cursor))
     try:
-        if packet[:4] in zlib_magic:
+        if packet[:4] in (pair[0] for pair in WRAPPERS.values()):
             decoder = zlib.decompressobj()
             raw = decoder.decompress(compressed, raw_length + 1)
             extra = decoder.unconsumed_tail
@@ -142,9 +154,7 @@ def uncompressed_motion_packet(packet):
         raise ValueError('Damaged compressed rigid motion stream') from error
     if (len(raw) != raw_length or not decoder.eof or
             decoder.unused_data or extra or
-            not raw.startswith(DUAL_STEP_MAGIC if packet[:4] in (
-                DUAL_STEP_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC)
-                else MAGIC)):
+            raw[:4] != INNER_MAGIC[packet[:4]]):
         raise ValueError('Compressed rigid motion length or trailer mismatch')
     _verify_raw_checksum(raw)
     return raw
@@ -165,7 +175,13 @@ def motion_packet_info(packet):
                COMPRESSED_MAGIC: 'RRC1-zlib',
                DUAL_STEP_COMPRESSED_MAGIC: 'RRC2-zlib',
                LZMA_COMPRESSED_MAGIC: 'RRL1-lzma',
-               DUAL_STEP_LZMA_COMPRESSED_MAGIC: 'RRL2-lzma'}
+               DUAL_STEP_LZMA_COMPRESSED_MAGIC: 'RRL2-lzma',
+               DELTA_MAGIC: 'RSD1-raw',
+               DUAL_STEP_DELTA_MAGIC: 'RSD2-raw',
+               DELTA_COMPRESSED_MAGIC: 'RSC1-zlib',
+               DUAL_STEP_DELTA_COMPRESSED_MAGIC: 'RSC2-zlib',
+               DELTA_LZMA_COMPRESSED_MAGIC: 'RSL1-lzma',
+               DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC: 'RSL2-lzma'}
     return dict(format=formats[magic], stored_bytes=len(packet),
                 raw_stream_bytes=len(raw), compression_savings_bytes=len(raw) - len(packet))
 
@@ -204,9 +220,11 @@ def _sparse_write(result, t, r):
     active_r = r.ne(0).any(-1)
     active = torch.where(active_t | active_r)[0].tolist()
     result.extend(_uvar(len(active)))
+    last = -1
     for row in active:
         flags = int(active_t[row]) | (int(active_r[row]) << 1)
-        result.extend(_uvar(row))
+        result.extend(_uvar(row - last))
+        last = row
         result.append(flags)
         if flags & 1:
             result.extend(struct.pack('<3h', *t[row].tolist()))
@@ -214,7 +232,7 @@ def _sparse_write(result, t, r):
             result.extend(struct.pack('<3h', *r[row].tolist()))
 
 
-def _sparse_read(reader, count):
+def _sparse_read(reader, count, *, delta_rows=False):
     t = torch.zeros(count, 3, dtype=torch.int16)
     r = torch.zeros(count, 3, dtype=torch.int16)
     blocks = reader.integer()
@@ -222,7 +240,10 @@ def _sparse_read(reader, count):
         raise ValueError('More motion blocks than IDs')
     last = -1
     for _ in range(blocks):
-        row = reader.integer()
+        value = reader.integer()
+        if delta_rows and value < 1:
+            raise ValueError('Sparse row gap must be positive')
+        row = last + value if delta_rows else value
         flags = reader.take(1)[0]
         if row <= last or row >= count or flags not in (1, 2, 3):
             raise ValueError('Invalid sparse motion ID or block flags')
@@ -238,6 +259,76 @@ def _sparse_read(reader, count):
                 raise ValueError('Redundant zero rotation block')
             r[row] = torch.tensor(values, dtype=torch.int16)
     return t, r
+
+
+def repack_legacy_motion_packet(packet):
+    """Losslessly rewrite old absolute sparse IDs into the current stream.
+
+    This changes only the four-byte format magic, two sparse row-ID sequences,
+    and the mandatory checksum. All symbols, topology, quantization metadata,
+    birth attachments, and pose bytes retain their original representation.
+    """
+    raw = uncompressed_motion_packet(packet)
+    old_magic = raw[:4]
+    if old_magic not in (MAGIC, DUAL_STEP_MAGIC):
+        raise ValueError('Repacking requires a legacy absolute-row motion packet')
+    payload = raw[:-CHECKSUM_BYTES]
+    reader = _Reader(payload)
+    reader.take(4 + 32)
+    _, regions, count, births = [reader.integer() for _ in range(4)]
+    if regions < 2 or count < 1 or births > 10_000_000:
+        raise ValueError('Invalid legacy motion counts')
+    reader.take(40 if old_magic == DUAL_STEP_MAGIC else 24)
+    mode = reader.take(1)[0]
+    if mode == 1:
+        for _ in range(reader.integer()):
+            reader.integer()
+    elif mode != 0:
+        raise ValueError('Invalid legacy survivor mapping mode')
+    for _ in range(reader.integer()):
+        reader.integer()
+        reader.integer()
+    for _ in range(reader.integer()):
+        reader.integer()
+        reader.integer()
+    changes = []
+    for limit in (regions - 1, count):
+        blocks = reader.integer()
+        if blocks > limit:
+            raise ValueError('Too many legacy sparse motion blocks')
+        last = -1
+        for _ in range(blocks):
+            start = reader.cursor
+            row = reader.integer()
+            end = reader.cursor
+            if row <= last or row >= limit:
+                raise ValueError('Invalid legacy sparse row')
+            changes.append((start, end, _uvar(row - last)))
+            flags = reader.take(1)[0]
+            if flags not in (1, 2, 3):
+                raise ValueError('Invalid legacy sparse flags')
+            if flags & 1:
+                if not any(struct.unpack('<3h', reader.take(6))):
+                    raise ValueError('Redundant legacy translation block')
+            if flags & 2:
+                if not any(struct.unpack('<3h', reader.take(6))):
+                    raise ValueError('Redundant legacy rotation block')
+            last = row
+    for _ in range(births):
+        reader.integer()
+    reader.take(28 * births)
+    if reader.cursor != len(payload):
+        raise ValueError('Trailing legacy motion bytes')
+    result = bytearray(DUAL_STEP_DELTA_MAGIC if old_magic == DUAL_STEP_MAGIC
+                       else DELTA_MAGIC)
+    cursor = 4
+    for start, end, encoded_gap in changes:
+        result.extend(payload[cursor:start])
+        result.extend(encoded_gap)
+        cursor = end
+    result.extend(payload[cursor:])
+    result.extend(hashlib.sha256(result).digest()[:CHECKSUM_BYTES])
+    return compress_motion_packet(result, mode='auto')
 
 
 def _validate_state(state):
@@ -303,7 +394,7 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                       not math.isfinite(gs_rotation_step_rad) or
                       gs_rotation_step_rad <= 0):
         raise ValueError('Dual-step stream needs positive GS translation and rotation steps')
-    result = bytearray(DUAL_STEP_MAGIC if dual_step else MAGIC)
+    result = bytearray(DUAL_STEP_DELTA_MAGIC if dual_step else DELTA_MAGIC)
     result.extend(previous_state.digest())
     for value in (frame_index, regions, count, len(sources)):
         result.extend(_uvar(value))
@@ -359,7 +450,7 @@ def decode_motion(payload, prior_state):
         raise ValueError('Rigid motion stream checksum mismatch')
     reader = _Reader(payload[:-CHECKSUM_BYTES])
     stream_magic = bytes(reader.take(4))
-    if stream_magic not in (MAGIC, DUAL_STEP_MAGIC):
+    if stream_magic not in RAW_MAGICS:
         raise ValueError('Unsupported rigid motion stream')
     if bytes(reader.take(32)) != prior_state.digest():
         raise ValueError('Previous decoded state digest mismatch')
@@ -368,7 +459,8 @@ def decode_motion(payload, prior_state):
             regions != len(prior_state.parents) or count == 0 or
             count > len(prior_state.xyz) or birth_count > 10_000_000):
         raise ValueError('Invalid frame index, region count, or Gaussian count')
-    dual_step = stream_magic == DUAL_STEP_MAGIC
+    dual_step = stream_magic in (DUAL_STEP_MAGIC, DUAL_STEP_DELTA_MAGIC)
+    delta_rows = stream_magic in (DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC)
     quantization = struct.unpack('<5d' if dual_step else '<3d',
                                  reader.take(40 if dual_step else 24))
     if not all(math.isfinite(v) and v > 0 for v in quantization):
@@ -430,10 +522,10 @@ def decode_motion(payload, prior_state):
             raise ValueError('Invalid owner edit')
         owner[row] = new_owner
         last = row
-    rt, rr = _sparse_read(reader, regions - 1)
+    rt, rr = _sparse_read(reader, regions - 1, delta_rows=delta_rows)
     rt = torch.cat((torch.zeros(1, 3, dtype=torch.int16), rt))
     rr = torch.cat((torch.zeros(1, 3, dtype=torch.int16), rr))
-    gt, gr = _sparse_read(reader, count)
+    gt, gr = _sparse_read(reader, count, delta_rows=delta_rows)
     if birth_count > (len(reader.payload) - reader.cursor) // 29:
         raise ValueError('Birth count exceeds remaining stream bytes')
     sources = [reader.integer() for _ in range(birth_count)]

@@ -8877,6 +8877,56 @@ def test_rigid_tree_hard_rate_matches_actual_packet_without_double_penalty():
     assert info['bytes'] <= hard
 
 
+def test_rigid_tree_hard_bytes_count_independent_sparse_row_gaps():
+    config = RIGID.RigidTreeConfig(region_count=131,
+        gs_xyz_step_extent=.02, gs_rotation_step_rad=.02,
+        motion_xyz_step_extent=.01, motion_rotation_step_rad=.01)
+    model = RIGID.RigidResidualTree(config)
+    xyz = torch.zeros(260, 3)
+    xyz[:, 0] = torch.arange(260)
+    rotation = torch.zeros(260, 4)
+    rotation[:, 0] = 1
+    model.setup(xyz, rotation, 1., frame_index=1)
+    with torch.no_grad():
+        model.region_translation[1, 0] = .02
+        model.region_rotation[128, 2] = .03
+        model.region_translation[129, 0] = .01
+        model.region_rotation[129, 2] = .02
+        model.gs_translation[0, 0] = .02
+        model.gs_rotation[127, 2] = .02
+        model.gs_translation[128, 0] = .04
+        model.gs_rotation[128, 2] = .04
+        model.gs_translation[255, 0] = .02
+    # Region sparse rows are 0,127,128 and GS rows are 0,127,128,255.
+    # Each section starts its own positive gaps, all fitting one varint byte.
+    assert int(model._hard_motion_bytes()) == 70
+    rt, rr, gt, gr = model._values(hard=True)
+    raw = RIGID_CODEC.encode_motion(
+        model.frame_reference_state, 1, 1., model.previous_rows,
+        model.owner, model.parents, rt, rr, gt, gr,
+        torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+        torch.empty(0, 4), .01, .01,
+        gs_translation_step_extent=.02, gs_rotation_step_rad=.02)
+    assert raw[:4] == RIGID_CODEC.DUAL_STEP_DELTA_MAGIC
+    assert int(model.loss_terms(60)['rate_bytes_hard']) == len(raw)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        model.region_translation[128, 0] = .01
+        model.gs_translation[127, 0] = .02
+    # A first active sparse row 127 costs a two-byte gap of 128 in each
+    # section, even though its absolute zero-based ID costs one byte.
+    assert int(model._hard_motion_bytes()) == 20
+    rt, rr, gt, gr = model._values(hard=True)
+    raw = RIGID_CODEC.encode_motion(
+        model.frame_reference_state, 1, 1., model.previous_rows,
+        model.owner, model.parents, rt, rr, gt, gr,
+        torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+        torch.empty(0, 4), .01, .01,
+        gs_translation_step_extent=.02, gs_rotation_step_rad=.02)
+    assert int(model.loss_terms(60)['rate_bytes_hard']) == len(raw)
+
+
 def test_rigid_tree_birth_inherits_owner_across_survivor_deletions():
     model = rigid_tree_fixture()
     pose_xyz, pose_q = model.materialized_pose()

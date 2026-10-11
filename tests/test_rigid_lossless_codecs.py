@@ -206,6 +206,22 @@ class MotionEnvelopeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 MOTION.uncompressed_motion_packet(bad)
 
+    def test_delta_sparse_rows_reject_zero_gap_overflow_and_truncation(self):
+        for payload in (
+            MOTION._uvar(1) + MOTION._uvar(0) + b'\x01' + struct.pack('<3h', 1, 0, 0),
+            MOTION._uvar(1) + MOTION._uvar(3) + b'\x01' + struct.pack('<3h', 1, 0, 0),
+            MOTION._uvar(1) + MOTION._uvar(1) + b'\x01' + b'\x01\x00',
+        ):
+            with self.assertRaises(ValueError):
+                MOTION._sparse_read(MOTION._Reader(payload), 2, delta_rows=True)
+        valid = (MOTION._uvar(2) + MOTION._uvar(1) + b'\x01' +
+                 struct.pack('<3h', 1, 0, 0) + MOTION._uvar(1) + b'\x02' +
+                 struct.pack('<3h', 0, 1, 0))
+        translation, rotation = MOTION._sparse_read(
+            MOTION._Reader(valid), 2, delta_rows=True)
+        torch.testing.assert_close(translation[0], torch.tensor([1, 0, 0], dtype=torch.int16))
+        torch.testing.assert_close(rotation[1], torch.tensor([0, 1, 0], dtype=torch.int16))
+
 
 class FullReplayTests(unittest.TestCase):
     def test_rtb2_two_frame_owner_edit_and_birth_replay(self):

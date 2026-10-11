@@ -3,8 +3,11 @@
 import hashlib
 import importlib
 import lzma
+import struct
 import sys
 import tempfile
+from unittest import mock
+import zlib
 from pathlib import Path
 from types import ModuleType
 
@@ -42,25 +45,91 @@ def packet_fixture(count=256):
     return prior, args
 
 
+def legacy_packet(args, **kwargs):
+    """Build a pre-delta wire fixture without adding a legacy writer mode."""
+    def absolute_sparse_write(result, translation, rotation):
+        active_t = translation.ne(0).any(-1)
+        active_r = rotation.ne(0).any(-1)
+        active = torch.where(active_t | active_r)[0].tolist()
+        result.extend(CODEC._uvar(len(active)))
+        for row in active:
+            flags = int(active_t[row]) | (int(active_r[row]) << 1)
+            result.extend(CODEC._uvar(row))
+            result.append(flags)
+            if flags & 1:
+                result.extend(struct.pack('<3h', *translation[row].tolist()))
+            if flags & 2:
+                result.extend(struct.pack('<3h', *rotation[row].tolist()))
+
+    with mock.patch.object(CODEC, '_sparse_write', absolute_sparse_write):
+        new_raw = CODEC.encode_motion(*args, **kwargs)
+    old_magic = (CODEC.DUAL_STEP_MAGIC if new_raw.startswith(
+        CODEC.DUAL_STEP_DELTA_MAGIC) else CODEC.MAGIC)
+    content = old_magic + new_raw[4:-CODEC.CHECKSUM_BYTES]
+    return content + hashlib.sha256(content).digest()[:CODEC.CHECKSUM_BYTES]
+
+
 def test_compressed_and_legacy_packets_replay_identically():
     prior, args = packet_fixture()
-    legacy = CODEC.encode_motion(*args)
+    delta_raw = CODEC.encode_motion(*args)
+    legacy = legacy_packet(args)
     packed = CODEC.encode_motion(*args, compression='auto')
     assert legacy.startswith(CODEC.MAGIC)
-    assert packed.startswith((CODEC.COMPRESSED_MAGIC, CODEC.LZMA_COMPRESSED_MAGIC))
-    assert len(packed) < len(legacy)
+    assert delta_raw.startswith(CODEC.DELTA_MAGIC)
+    assert packed.startswith((CODEC.DELTA_COMPRESSED_MAGIC,
+                              CODEC.DELTA_LZMA_COMPRESSED_MAGIC))
+    assert len(packed) < len(delta_raw)
     old_state = CODEC.decode_motion(legacy, prior)
     new_state = CODEC.decode_motion(packed, prior)
+    assert CODEC.decode_motion(delta_raw, prior).digest() == old_state.digest()
     for name in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources'):
         torch.testing.assert_close(getattr(new_state, name), getattr(old_state, name),
                                    rtol=0, atol=0)
     assert new_state.digest() == old_state.digest()
     info = CODEC.motion_packet_info(packed)
-    assert info == dict(format=('RRC1-zlib' if packed.startswith(
-                            CODEC.COMPRESSED_MAGIC) else 'RRL1-lzma'),
+    assert info == dict(format=('RSC1-zlib' if packed.startswith(
+                            CODEC.DELTA_COMPRESSED_MAGIC) else 'RSL1-lzma'),
                         stored_bytes=len(packed),
-                        raw_stream_bytes=len(legacy),
-                        compression_savings_bytes=len(legacy) - len(packed))
+                        raw_stream_bytes=len(delta_raw),
+                        compression_savings_bytes=len(delta_raw) - len(packed))
+    for wrapper in (CODEC.compress_motion_packet(legacy, mode='zlib'),
+                    CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(legacy)) +
+                    lzma.compress(legacy, format=lzma.FORMAT_XZ, preset=9)):
+        assert CODEC.decode_motion(wrapper, prior).digest() == old_state.digest()
+
+
+def test_legacy_repack_preserves_decoded_state_and_all_symbols():
+    prior, args = packet_fixture()
+    legacy = legacy_packet(args)
+    for source in (legacy, CODEC.compress_motion_packet(legacy, mode='zlib'),
+                   CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(legacy)) +
+                   lzma.compress(legacy, format=lzma.FORMAT_XZ, preset=9)):
+        repacked = CODEC.repack_legacy_motion_packet(source)
+        raw = CODEC.uncompressed_motion_packet(repacked)
+        assert raw.startswith(CODEC.DELTA_MAGIC)
+        assert CODEC.decode_motion(repacked, prior).digest() == (
+            CODEC.decode_motion(source, prior).digest())
+    try:
+        CODEC.repack_legacy_motion_packet(repacked)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Repacking a new-format stream was accepted')
+    dual_old = legacy_packet(args, gs_translation_step_extent=.02,
+                             gs_rotation_step_rad=.03)
+    dual_new = CODEC.repack_legacy_motion_packet(dual_old)
+    assert CODEC.uncompressed_motion_packet(dual_new).startswith(
+        CODEC.DUAL_STEP_DELTA_MAGIC)
+    assert CODEC.decode_motion(dual_old, prior).digest() == (
+        CODEC.decode_motion(dual_new, prior).digest())
+    mislabeled = (CODEC.DELTA_COMPRESSED_MAGIC + CODEC._uvar(len(legacy)) +
+                  zlib.compress(legacy))
+    try:
+        CODEC.uncompressed_motion_packet(mislabeled)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Wrapper accepted the wrong inner wire version')
 
 
 def test_auto_compression_keeps_incompressible_legacy_packet():
@@ -78,7 +147,7 @@ def test_compressed_packet_rejects_mutation_truncation_trailing_and_bomb():
     damaged = bytearray(packet)
     damaged[len(damaged) // 2] ^= 1
     for candidate in (bytes(damaged), packet[:-1], packet + b'X',
-                      CODEC.COMPRESSED_MAGIC + CODEC._uvar(
+                      CODEC.DELTA_COMPRESSED_MAGIC + CODEC._uvar(
                           CODEC.MAX_RAW_PACKET_BYTES + 1) + packet[5:]):
         try:
             CODEC.decode_motion(candidate, prior)
@@ -91,7 +160,7 @@ def test_compressed_packet_rejects_mutation_truncation_trailing_and_bomb():
 def test_lzma_packet_roundtrips_and_rejects_damage_trailers_and_expansion():
     prior, args = packet_fixture()
     raw = CODEC.encode_motion(*args)
-    packet = (CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(raw)) +
+    packet = (CODEC.DELTA_LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(raw)) +
               lzma.compress(raw, format=lzma.FORMAT_XZ, preset=9))
     assert CODEC.uncompressed_motion_packet(packet) == raw
     assert CODEC.decode_motion(packet, prior).digest() == (
@@ -99,7 +168,7 @@ def test_lzma_packet_roundtrips_and_rejects_damage_trailers_and_expansion():
     assert CODEC.motion_packet_info(packet)['stored_bytes'] == len(packet)
     for bad in (packet[:-1], packet + b'X',
                 packet[:5] + CODEC._uvar(len(raw) - 1) + packet[6:],
-                CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(
+                CODEC.DELTA_LZMA_COMPRESSED_MAGIC + CODEC._uvar(
                     CODEC.MAX_RAW_PACKET_BYTES + 1) + packet[6:]):
         try:
             CODEC.uncompressed_motion_packet(bad)
@@ -174,7 +243,7 @@ def test_dual_step_stream_replays_distinct_region_and_gs_grids():
     model.register_materialized_layout(xyz, rotation)
     with tempfile.TemporaryDirectory() as directory:
         info = model.export_motion(Path(directory) / 'motion.bin')
-        assert info['format'] in ('RRT2-raw', 'RRC2-zlib', 'RRL2-lzma')
+        assert info['format'] in ('RSD2-raw', 'RSC2-zlib', 'RSL2-lzma')
         torch.testing.assert_close(
             torch.tensor([info['region_translation_step_world'],
                           info['gs_translation_step_world'],

@@ -565,15 +565,18 @@ class RigidResidualTree(nn.Module):
         r_r = rr[1:].ne(0).any(-1)
         g_t = gt.ne(0).any(-1)
         g_r = gr.ne(0).any(-1)
-        region_active, gs_active = r_t | r_r, g_t | g_r
-        rid = self._region_id_lengths
-        gid = self._gs_id_lengths
-        return ((region_active.to(rid) * (rid + 1)).sum() +
-                (r_t.sum() + r_r.sum()) * 6 +
-                (gs_active.to(gid) * (gid + 1)).sum() +
-                (g_t.sum() + g_r.sum()) * 6 +
-                _varint_length(int(region_active.sum())) +
-                _varint_length(int(gs_active.sum())))
+        def sparse_bytes(active_t, active_r):
+            rows = torch.where(active_t | active_r)[0]
+            # Each sparse section restarts at -1: first gap=row+1, then
+            # positive differences between consecutive active row IDs.
+            gaps = torch.diff(torch.cat((rows.new_tensor([-1]), rows)))
+            id_bytes = torch.ones_like(gaps)
+            for shift in range(7, 63, 7):
+                id_bytes += (gaps >= (1 << shift)).to(id_bytes)
+            return (id_bytes.sum() + rows.numel() +
+                    6 * (active_t.sum() + active_r.sum()) +
+                    _varint_length(rows.numel()))
+        return sparse_bytes(r_t, r_r) + sparse_bytes(g_t, g_r)
 
     def _metadata_bytes(self):
         if self._metadata_cache is not None:
@@ -619,6 +622,8 @@ class RigidResidualTree(nn.Module):
         rr = support(self.region_rotation[1:], region_scale_r)
         gt = support(self.gs_translation, gs_scale_t)
         gr = support(self.gs_rotation, gs_scale_r)
+        # Smooth/proximal and owner-edit decisions retain the absolute-ID
+        # proxy. Only _hard_motion_bytes is the exact gap stream.
         rid = self._region_id_lengths
         gid = self._gs_id_lengths
         region_soft_bytes = (((rt + rr - rt * rr) * (rid + 1)).sum() +
@@ -644,7 +649,7 @@ class RigidResidualTree(nn.Module):
                       rate_fraction=rate,
                       relative_motion=relative)
         if diagnostics:
-            # This is the exact size of the *uncompressed* RRT1 stream.
+            # This is the exact size of the uncompressed delta-row stream.
             # The actual stored size is known only after export_motion.
             result['rate_bytes_hard'] = self._hard_motion_bytes() + metadata
             result['rate_bytes_hard_uncompressed'] = result['rate_bytes_hard']
