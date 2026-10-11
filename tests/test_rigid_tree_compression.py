@@ -211,12 +211,13 @@ def test_proximal_gs_handles_one_optimizer_block_without_moments():
     assert bool(model.gs_translation[1].ne(0).any())
 
 
-def test_rate_gradient_charges_regions_while_gs_support_uses_proximal_step():
+def test_rate_is_diagnostic_while_relative_motion_has_region_gradient():
     model = dual_step_model()
     with torch.no_grad():
         model.region_translation[1, 0] = .015
         model.gs_translation[0, 0] = .03
-    model.loss_terms(2)['rate_loss'].backward()
+    assert not model.loss_terms(2)['rate_loss'].requires_grad
+    model.loss_terms(2)['relative_motion_loss'].backward()
     assert model.region_translation.grad[1].abs().sum() > 0
     assert model.gs_translation.grad is None
     assert model.loss_terms(2)['rate_bytes_surrogate'] > 0

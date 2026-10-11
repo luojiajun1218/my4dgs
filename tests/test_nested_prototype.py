@@ -8335,7 +8335,7 @@ def test_rigid_tree_stage_and_first_layout_are_deterministic():
     assert model.update_topology(59) == []
 
 
-def test_rigid_tree_translation_rotation_symbols_and_rate_gradients_are_independent():
+def test_rigid_tree_translation_rotation_symbols_and_relative_gradients_are_independent():
     model = rigid_tree_fixture()
     with torch.no_grad():
         model.region_translation[1, 0] = .02
@@ -8348,7 +8348,8 @@ def test_rigid_tree_translation_rotation_symbols_and_rate_gradients_are_independ
     assert gt[0].tolist() == [0, 4, 0] and not bool(gr[0].any())
     assert gr[3].tolist() == [5, 0, 0] and not bool(gt[3].any())
     rate = model.loss_terms(60)['rate_loss']
-    rate.backward()
+    assert not rate.requires_grad
+    model.loss_terms(60)['relative_motion_loss'].backward()
     for name in ('region_translation', 'region_rotation'):
         grad = getattr(model, name).grad
         assert grad is not None and torch.isfinite(grad).all()
@@ -8358,6 +8359,71 @@ def test_rigid_tree_translation_rotation_symbols_and_rate_gradients_are_independ
     diagnostics = model.loss_terms(60)
     assert diagnostics['gs_translation_active_blocks'] == 1
     assert diagnostics['gs_rotation_active_blocks'] == 1
+
+
+def test_rigid_tree_region_proximal_selects_four_sparse_block_choices():
+    model = rigid_tree_fixture(region_count=5, rate_loss_weight=1.,
+                               motion_xyz_step_extent=1e-4,
+                               motion_rotation_step_rad=1e-4)
+    with torch.no_grad():
+        model.region_translation[0, 0] = .5
+        model.region_rotation[0, 0] = .4
+        model.region_translation[1:, 0] = torch.tensor([.2, .2, .0002, .0002])
+        model.region_rotation[1:, 0] = torch.tensor([.1, .0002, .1, .0002])
+    for parameter, strong_rows in ((model.region_translation, (1, 2)),
+                                   (model.region_rotation, (1, 3))):
+        state = model.optimizer.state[parameter]
+        state['step'] = torch.tensor(1.)
+        state['exp_avg'] = torch.zeros_like(parameter)
+        state['exp_avg_sq'] = torch.full_like(parameter, 1e-12)
+        state['exp_avg_sq'][list(strong_rows)] = 1.
+    model.last_step = 60
+    model._proximal_region_blocks()
+    torch.testing.assert_close(model.region_translation[0, 0], torch.tensor(.5),
+                               rtol=0, atol=0)
+    torch.testing.assert_close(model.region_rotation[0, 0], torch.tensor(.4),
+                               rtol=0, atol=0)
+    assert model.region_translation[1, 0] == .2
+    assert model.region_rotation[1, 0] == .1
+    assert model.region_translation[2, 0] == .2
+    assert not bool(model.region_rotation[2].any())
+    assert not bool(model.region_translation[3].any())
+    assert model.region_rotation[3, 0] == .1
+    assert not bool(model.region_translation[4].any())
+    assert not bool(model.region_rotation[4].any())
+    assert model.last_metrics['motion/prox_zero_region_translation_blocks'] == 2
+    assert model.last_metrics['motion/prox_zero_region_rotation_blocks'] == 2
+
+
+def test_rigid_tree_region_subgrid_motion_accumulates_through_proximal_step():
+    model = rigid_tree_fixture(rate_loss_weight=.01,
+                               region_translation_lr=.001)
+    for _ in range(3):
+        model.last_step = 60
+        model.region_translation.grad = torch.zeros_like(model.region_translation)
+        model.region_translation.grad[1, 0] = -1.
+        model.optimizer_step()
+    assert 0 < float(model.region_translation[1, 0]) < .005
+    assert not bool(model._values(hard=True)[0][1].any())
+    for _ in range(3):
+        model.region_translation.grad = torch.zeros_like(model.region_translation)
+        model.region_translation.grad[1, 0] = -1.
+        model.optimizer_step()
+    assert model.region_translation[1, 0] > .005
+    assert bool(model._values(hard=True)[0][1].any())
+
+
+def test_rigid_tree_shared_steps_still_train_region_with_sparse_proximal():
+    model = rigid_tree_fixture(motion_steps=6, birth_steps=2,
+                               shared_steps=3, tree_edit_step=5,
+                               rate_warmup_steps=2,
+                               motion_xyz_step_extent=1e-4)
+    xyz, _ = model.forward(1, training=True)
+    (xyz - model.base_xyz - .1).square().sum().backward()
+    model.optimizer_step()
+    assert bool(model.region_translation[1:].ne(0).any())
+    assert not bool(model.gs_translation.any())
+    assert model.gs_translation not in model.optimizer.state
 
 
 def test_rigid_tree_proximal_rate_prunes_weak_gs_blocks():
@@ -8620,15 +8686,15 @@ def test_rigid_tree_all_zero_identity_stream_does_not_grow_with_gs_count():
     assert sizes[0] == sizes[1]
 
 
-def test_rigid_tree_hard_rate_matches_actual_packet_and_large_symbol_has_gradient():
+def test_rigid_tree_hard_rate_matches_actual_packet_without_double_penalty():
     model = rigid_tree_fixture()
     with torch.no_grad():
         model.region_translation[1, 0] = .02
         model.gs_translation[0, 1] = .99  # 99 signed grid units.
     hard = int(model.loss_terms(60)['rate_bytes_hard'])
     surrogate = model.loss_terms(60)['rate_loss']
-    surrogate.backward()
-    assert model.region_translation.grad[1, 0].abs() > 0
+    assert not surrogate.requires_grad
+    assert model.region_translation.grad is None
     assert model.gs_translation.grad is None
     xyz, q = model.materialized_pose()
     model.register_materialized_layout(xyz, q)

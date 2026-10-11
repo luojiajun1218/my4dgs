@@ -447,46 +447,46 @@ class RigidResidualTree(nn.Module):
             limit = 32767 * scale
             projected += int((parameter.abs() > limit).any(-1).sum())
             parameter.clamp_(min=-limit, max=limit)
+        self._proximal_region_blocks()
         if self.last_step > self.config.shared_steps:
             self._proximal_gs_blocks()
         self.last_metrics['motion/int16_projected_blocks'] = projected
         self.optimizer.zero_grad(set_to_none=True)
 
     @torch.no_grad()
-    def _proximal_gs_blocks(self):
-        """Choose zero/translation/rotation/both by Adam-metric L0 cost.
+    def _proximal_blocks(self, translation, rotation, step_t, step_r,
+                         id_lengths, lr_t, lr_r, first_row):
+        """Choose both, translation, rotation, or zero by Adam-metric L0 cost.
 
         The local quadratic uses Adam's bias-corrected second moment as its
-        diagonal metric. Its four candidates pay the actual sparse block and
-        row-ID bytes, normalized by raw six-float motion bytes. This prevents
-        a small normalized Adam step from opening a stored GS block merely
-        because Adam divided by a very small gradient RMS.
+        diagonal metric. Candidates pay actual sparse block and row-ID bytes,
+        normalized by raw six-float motion bytes. A region starts at row one
+        because the identity root never carries a stored motion block.
         """
         if self.config.rate_loss_weight == 0:
-            return
-        state_t = self.optimizer.state.get(self.gs_translation)
-        state_r = self.optimizer.state.get(self.gs_rotation)
+            return 0, 0
         ramp = min(max((self.last_step - self.config.rate_warmup_steps) /
                        self.config.rate_ramp_steps, 0.), 1.)
         if ramp == 0:
-            return
+            return 0, 0
+        state_t = self.optimizer.state.get(translation)
+        state_r = self.optimizer.state.get(rotation)
+        values_t, values_r = translation[first_row:], rotation[first_row:]
         beta2 = self.config.adam_betas[1]
 
         def zero_gain(parameter, state, lr):
             if not state or 'exp_avg_sq' not in state:
                 return parameter.new_zeros(len(parameter))
             step = int(state['step'])
-            variance = state['exp_avg_sq'] / (1 - beta2 ** step)
+            variance = state['exp_avg_sq'][first_row:] / (1 - beta2 ** step)
             metric = (variance.sqrt() + self.config.adam_eps) / lr
             return 0.5 * (metric * parameter.square()).sum(-1)
 
-        gain_t = zero_gain(self.gs_translation, state_t,
-                           self.config.gs_translation_lr)
-        gain_r = zero_gain(self.gs_rotation, state_r,
-                           self.config.gs_rotation_lr)
-        active_t = _integer(self.gs_translation, self.gs_steps[:3]).ne(0).any(-1)
-        active_r = _integer(self.gs_rotation, self.gs_steps[3:]).ne(0).any(-1)
-        index_cost = self._gs_id_lengths + 1
+        gain_t = zero_gain(values_t, state_t, lr_t)
+        gain_r = zero_gain(values_r, state_r, lr_r)
+        active_t = _integer(values_t, step_t).ne(0).any(-1)
+        active_r = _integer(values_r, step_r).ne(0).any(-1)
+        index_cost = id_lengths + 1
         price = self.config.rate_loss_weight * ramp / max(1, len(self.base_xyz) * 24)
         cost_both = price * ((active_t | active_r).to(index_cost) * index_cost +
                              6 * (active_t.to(index_cost) + active_r.to(index_cost)))
@@ -496,10 +496,27 @@ class RigidResidualTree(nn.Module):
         choice = torch.stack((cost_both, cost_t, cost_r, cost_none)).argmin(0)
         prune_t = (choice == 2) | (choice == 3)
         prune_r = (choice == 1) | (choice == 3)
-        self.gs_translation[prune_t] = 0
-        self.gs_rotation[prune_r] = 0
-        self.last_metrics['motion/prox_zero_translation_blocks'] = int(prune_t.sum())
-        self.last_metrics['motion/prox_zero_rotation_blocks'] = int(prune_r.sum())
+        values_t[prune_t] = 0
+        values_r[prune_r] = 0
+        return int(prune_t.sum()), int(prune_r.sum())
+
+    @torch.no_grad()
+    def _proximal_region_blocks(self):
+        pruned_t, pruned_r = self._proximal_blocks(
+            self.region_translation, self.region_rotation,
+            self.steps[:3], self.steps[3:], self._region_id_lengths,
+            self.config.region_translation_lr, self.config.region_rotation_lr, 1)
+        self.last_metrics['motion/prox_zero_region_translation_blocks'] = pruned_t
+        self.last_metrics['motion/prox_zero_region_rotation_blocks'] = pruned_r
+
+    @torch.no_grad()
+    def _proximal_gs_blocks(self):
+        pruned_t, pruned_r = self._proximal_blocks(
+            self.gs_translation, self.gs_rotation,
+            self.gs_steps[:3], self.gs_steps[3:], self._gs_id_lengths,
+            self.config.gs_translation_lr, self.config.gs_rotation_lr, 0)
+        self.last_metrics['motion/prox_zero_translation_blocks'] = pruned_t
+        self.last_metrics['motion/prox_zero_rotation_blocks'] = pruned_r
 
     def stage(self, step):
         return ('tree_edit' if (self.frame_index % self.config.tree_edit_interval == 0 and
@@ -572,10 +589,10 @@ class RigidResidualTree(nn.Module):
                              (rt.sum() + rr.sum()) * 6)
         gs_soft_bytes = (((gt + gr - gt * gr) * (gid + 1)).sum() +
                          (gt.sum() + gr.sum()) * 6)
-        # Region support uses a smooth gradient. GS support uses the discrete
-        # Adam-metric proximal choice after the optimizer step. Its soft value
-        # remains a diagnostic, detached to avoid charging it twice.
-        soft_bytes = region_soft_bytes + gs_soft_bytes.detach()
+        # Both region and GS blocks use the discrete Adam-metric proximal
+        # choice after the optimizer step. Their soft byte count is a
+        # diagnostic only, detached to avoid charging either block twice.
+        soft_bytes = (region_soft_bytes + gs_soft_bytes).detach()
         metadata = self._metadata_bytes()
         soft_bytes = soft_bytes + metadata
         raw_bytes = max(1, len(self.base_xyz) * 6 * 4)
