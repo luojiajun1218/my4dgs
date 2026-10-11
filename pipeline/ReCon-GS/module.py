@@ -22,7 +22,7 @@ from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     QuantizedNewGaussianView, materialize_quantized_gaussians, model_raw,
     reference_digest)
 from .model.rigid_residual_tree import (RigidResidualTree, RigidTreeConfig,
-    saved_config_with_default_motion_lr)
+    quaternion_angle_error, saved_config_with_default_motion_lr)
 
 
 @dataclass
@@ -123,6 +123,20 @@ def prune_native_initial_gaussians(model, threshold):
     return dict(source='native_frame0_checkpoint', threshold=float(threshold),
                 original_count=original_count, retained_count=retained_count,
                 removed_count=removed_count)
+
+
+def old_gaussian_pose_activity(decoded_xyz, decoded_rotation,
+                               prior_xyz, prior_rotation, region_steps, gs_steps):
+    """Count old GS with decoded pose changes above half a quantization step."""
+    translation_threshold = min(float(region_steps[0]), float(gs_steps[0])) / 2
+    rotation_threshold = min(float(region_steps[3]), float(gs_steps[3])) / 2
+    moved_xyz = (decoded_xyz - prior_xyz).norm(dim=-1)
+    moved_rotation = quaternion_angle_error(decoded_rotation, prior_rotation)
+    return dict(
+        old_gs_with_changed_pose=int(((moved_xyz > translation_threshold) |
+                                      (moved_rotation > rotation_threshold)).sum()),
+        changed_pose_translation_threshold_world=translation_threshold,
+        changed_pose_rotation_threshold_rad=rotation_threshold)
 
 
 class Module(BaseModule):
@@ -432,14 +446,9 @@ class Module(BaseModule):
         decoded = self.motion.codec_previous_state
         prior = self.motion.frame_reference_state
         old_count = len(self.motion.owner)
-        moved_xyz = (decoded.xyz[:old_count] - prior.xyz).norm(dim=-1)
-        orientation_dot = torch.nn.functional.normalize(
-            decoded.rotation[:old_count], dim=-1).mul(
-            torch.nn.functional.normalize(prior.rotation, dim=-1)).sum(-1).abs()
-        activity['old_gs_with_changed_pose'] = int((
-            (moved_xyz > self.datamodule.cameras_extent *
-             self.config.rigid_tree.motion_xyz_step_extent / 2) |
-            (orientation_dot < 1 - 1e-7)).sum())
+        activity.update(old_gaussian_pose_activity(
+            decoded.xyz[:old_count], decoded.rotation[:old_count],
+            prior.xyz, prior.rotation, self.motion.steps, self.motion.gs_steps))
         raw['xyz'] = decoded.xyz.to(device=self.device, dtype=raw['xyz'].dtype)
         raw['rotation'] = decoded.rotation.to(device=self.device,
                                                dtype=raw['rotation'].dtype)

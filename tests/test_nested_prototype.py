@@ -9191,6 +9191,39 @@ def test_rigid_pipeline_only_one_method_and_native_first_checkpoint_contract():
         raise AssertionError('Native frame-zero checkpoint accepted on later frame')
 
 
+def test_rigid_pipeline_old_pose_activity_uses_stable_half_grid_thresholds():
+    motion = rigid_tree_fixture(motion_xyz_step_extent=.02,
+        motion_rotation_step_rad=.01, gs_xyz_step_extent=.01,
+        gs_rotation_step_rad=.02)
+    prior_xyz = torch.zeros(7, 3)
+    prior_rotation = RIGID.rotation_vector_quaternion(
+        torch.tensor([[.2, -.3, .1]])).expand(7, -1).clone()
+    decoded_xyz = prior_xyz.clone()
+    decoded_rotation = prior_rotation.clone()
+    decoded_rotation[1] = -prior_rotation[1]
+    decoded_rotation[2] = 3 * prior_rotation[2]
+    for row, angle in ((3, .0051), (4, .0049)):
+        delta = RIGID.rotation_vector_quaternion(
+            torch.tensor([[0., 0., angle]]))
+        decoded_rotation[row] = RIGID.quaternion_multiply(
+            delta, prior_rotation[row:row + 1])[0]
+    decoded_xyz[5, 0] = .0049
+    decoded_xyz[6, 0] = .0051
+
+    activity = RIGID_MODULE.old_gaussian_pose_activity(
+        decoded_xyz, decoded_rotation, prior_xyz, prior_rotation,
+        motion.steps, motion.gs_steps)
+    assert activity['old_gs_with_changed_pose'] == 2
+    torch.testing.assert_close(torch.tensor([
+        activity['changed_pose_translation_threshold_world'],
+        activity['changed_pose_rotation_threshold_rad']]),
+        torch.tensor([.005, .005]), rtol=0, atol=1e-9)
+    unchanged = RIGID_MODULE.old_gaussian_pose_activity(
+        decoded_xyz[:3], decoded_rotation[:3], prior_xyz[:3],
+        prior_rotation[:3], motion.steps, motion.gs_steps)
+    assert unchanged['old_gs_with_changed_pose'] == 0
+
+
 def test_rigid_pipeline_mid_birth_checkpoint_restores_lineage_and_adam():
     if not torch.cuda.is_available():
         return  # The libgs Gaussian training setup allocates CUDA statistics.
