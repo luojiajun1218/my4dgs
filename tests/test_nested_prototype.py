@@ -8361,6 +8361,43 @@ def test_rigid_tree_translation_rotation_symbols_and_relative_gradients_are_inde
     assert diagnostics['gs_rotation_active_blocks'] == 1
 
 
+def test_rigid_tree_relative_motion_l1_value_sign_and_zero_gradients():
+    model = rigid_tree_fixture(relative_motion_loss_weight=1.)
+    model.extent = 2.
+    with torch.no_grad():
+        model.region_translation[0] = torch.tensor([100., 100., 100.])
+        model.region_rotation[0] = torch.tensor([100., 100., 100.])
+        model.region_translation[1] = torch.tensor([2., -4., 0.])
+        model.region_rotation[1] = torch.tensor([-.3, 0., .1])
+        model.region_translation[2] = torch.tensor([0., 2., -2.])
+        model.region_rotation[2] = torch.tensor([0., .2, 0.])
+    relative = model.loss_terms(1, diagnostics=False)['relative_motion_loss']
+    torch.testing.assert_close(relative, torch.tensor(2.8), rtol=0, atol=1e-6)
+    relative.backward()
+    expected_translation = torch.tensor([[0., 0., 0.],
+                                         [.25, -.25, 0.],
+                                         [0., .25, -.25]])
+    expected_rotation = torch.tensor([[0., 0., 0.],
+                                      [-.5, 0., .5],
+                                      [0., .5, 0.]])
+    torch.testing.assert_close(model.region_translation.grad, expected_translation,
+                               rtol=0, atol=1e-7)
+    torch.testing.assert_close(model.region_rotation.grad, expected_rotation,
+                               rtol=0, atol=1e-7)
+    with torch.no_grad():
+        model.region_translation.zero_()
+        model.region_rotation.zero_()
+    model.region_translation.grad = None
+    model.region_rotation.grad = None
+    zero = model.loss_terms(1, diagnostics=False)['relative_motion_loss']
+    zero.backward()
+    torch.testing.assert_close(zero, torch.tensor(0.), rtol=0, atol=0)
+    for parameter in (model.region_translation, model.region_rotation):
+        assert torch.isfinite(parameter.grad).all()
+        torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter.grad),
+                                   rtol=0, atol=0)
+
+
 def test_rigid_tree_region_proximal_selects_four_sparse_block_choices():
     model = rigid_tree_fixture(region_count=5, rate_loss_weight=1.,
                                motion_xyz_step_extent=1e-4,
@@ -8507,11 +8544,15 @@ def test_rigid_tree_owner_reassignment_preserves_decoded_target():
 
 
 def test_rigid_tree_reparent_deduplicates_shared_rigid_motion_without_pose_drift():
-    model = rigid_tree_fixture()
+    model = rigid_tree_fixture(relative_motion_loss_weight=.006)
     model.frame_index = 10
     with torch.no_grad():
         model.region_translation[1, 0] = .2
         model.region_translation[2, 0] = .2
+    before_relative = model.loss_terms(60, diagnostics=False)['relative_motion'].item()
+    torch.testing.assert_close(torch.tensor(before_relative), torch.tensor(.2),
+                               rtol=0, atol=1e-7)
+    before_bytes = float(model._hard_motion_bytes())
     before_xyz, before_q = (value.detach().clone() for value in model.forward(60))
     edits = model.update_topology(60)
     parents = [edit for edit in edits if edit['kind'] == 'parent']
@@ -8524,6 +8565,17 @@ def test_rigid_tree_reparent_deduplicates_shared_rigid_motion_without_pose_drift
                                rtol=0, atol=1e-6)
     torch.testing.assert_close(model.region_translation[parent, 0], torch.tensor(.2),
                                rtol=0, atol=1e-6)
+    after_relative = model.loss_terms(60, diagnostics=False)['relative_motion'].item()
+    torch.testing.assert_close(torch.tensor(after_relative), torch.tensor(.1),
+                               rtol=0, atol=1e-7)
+    raw_bytes = len(model.owner) * 24
+    edit_bytes = RIGID._varint_length(node) + RIGID._varint_length(parent)
+    before_score = (model.config.rate_loss_weight * before_bytes / raw_bytes +
+                    model.config.relative_motion_loss_weight * before_relative)
+    after_score = (model.config.rate_loss_weight *
+                   (float(model._hard_motion_bytes()) + edit_bytes) / raw_bytes +
+                   model.config.relative_motion_loss_weight * after_relative)
+    assert after_score < before_score
     after_xyz, after_q = model.forward(60)
     torch.testing.assert_close(after_xyz, before_xyz, rtol=0, atol=.0051)
     torch.testing.assert_close(after_q, before_q, rtol=0, atol=.0051)
@@ -8546,7 +8598,8 @@ def test_rigid_tree_rotation_tolerance_uses_true_angle_for_parent_candidates():
         torch.tensor([[1., 0., 0., 0.]]), outside)) > math.sqrt(3) * .001 / 2
 
     model = rigid_tree_fixture(gs_xyz_step_extent=.01,
-                               gs_rotation_step_rad=.001)
+                               gs_rotation_step_rad=.001,
+                               relative_motion_loss_weight=.006)
     model.frame_index = 10
     model.base_rotation = q.clone()
     with torch.no_grad():
@@ -8567,6 +8620,10 @@ def test_rigid_tree_checkpoint_restores_pose_and_adam_next_step():
     saved = copy.deepcopy(model.capture())
     recovered = RIGID.RigidResidualTree(model.config)
     recovered.restore(saved)
+    torch.testing.assert_close(
+        recovered.loss_terms(2, diagnostics=False)['relative_motion_loss'],
+        model.loss_terms(2, diagnostics=False)['relative_motion_loss'],
+        rtol=0, atol=0)
     for name in ('region_translation', 'region_rotation',
                  'gs_translation', 'gs_rotation'):
         torch.testing.assert_close(getattr(recovered, name), getattr(model, name),

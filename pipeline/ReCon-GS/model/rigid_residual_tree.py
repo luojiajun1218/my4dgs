@@ -258,6 +258,11 @@ def _id_lengths(count, reference):
     return length
 
 
+def relative_motion_magnitude(translation, rotvec, extent):
+    """L1 residual SE(3) magnitude per region, with translation scale-free."""
+    return (translation / extent).abs().sum(-1) + rotvec.abs().sum(-1)
+
+
 def compose_pose(base_xyz, base_rotation, owner, parents, pivots,
                  region_translation, region_rotvec, gs_translation, gs_rotvec):
     """Apply noncommuting parent-to-child SE(3), then GS pose residual."""
@@ -601,8 +606,7 @@ class RigidResidualTree(nn.Module):
                        self.config.rate_ramp_steps, 0.), 1.)
         # Relative transform is the only regional smoothness prior. Distinct
         # branches can move differently without a same-world-motion penalty.
-        relative = ((self.region_translation[1:] / self.extent).square().sum(-1) +
-                    self.region_rotation[1:].square().sum(-1)).mean()
+        relative = self._relative_motion()
         result = dict(rate_loss=rate * self.config.rate_loss_weight * ramp,
                       relative_motion_loss=relative * self.config.relative_motion_loss_weight,
                       rate_bytes_surrogate=soft_bytes,
@@ -636,6 +640,11 @@ class RigidResidualTree(nn.Module):
     def _global_regions(self):
         rt, rr, _, _ = self._values()
         return region_transforms(self.base_xyz, self.parents, self.pivots, rt, rr)
+
+    def _relative_motion(self):
+        return relative_motion_magnitude(
+            self.region_translation[1:], self.region_rotation[1:],
+            self.extent).mean()
 
     @torch.no_grad()
     def _residual_for_target(self, target_xyz, target_rotation, candidate_owner,
@@ -754,8 +763,7 @@ class RigidResidualTree(nn.Module):
         if not len(active):
             return []
         rt, rr, _, _ = self._values()
-        strength = ((rt[active] / self.extent).square().sum(-1) +
-                    rr[active].square().sum(-1))
+        strength = relative_motion_magnitude(rt[active], rr[active], self.extent)
         selected = active[strength.topk(min(self.config.tree_edit_region_trials,
                                              len(active))).indices]
         edits = []
@@ -771,8 +779,7 @@ class RigidResidualTree(nn.Module):
             original_gr = self.gs_rotation.detach().clone()
             baseline = (self.config.rate_loss_weight * float(self._hard_motion_bytes()) / raw_bytes +
                         self.config.relative_motion_loss_weight *
-                        float(((self.region_translation[1:] / self.extent).square().sum(-1) +
-                               self.region_rotation[1:].square().sum(-1)).mean()))
+                        float(self._relative_motion()))
             best = None
             distances = (self.pivots - self.pivots[node]).norm(dim=-1)
             near = distances.topk(min(len(self.parents), self.config.tree_edit_neighbors + 2),
@@ -812,8 +819,7 @@ class RigidResidualTree(nn.Module):
                 if (xyz_error <= math.sqrt(3) * float(self.gs_steps[0]) / 2 + 1e-6 and
                         bool((angle_error <= math.sqrt(3) * float(self.gs_steps[3]) / 2).all())):
                     edit_bytes = _varint_length(node) + _varint_length(parent)
-                    relative = float(((self.region_translation[1:] / self.extent).square().sum(-1) +
-                                      self.region_rotation[1:].square().sum(-1)).mean())
+                    relative = float(self._relative_motion())
                     score = (self.config.rate_loss_weight *
                              (float(self._hard_motion_bytes()) + edit_bytes) / raw_bytes +
                              self.config.relative_motion_loss_weight * relative)
