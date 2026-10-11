@@ -339,6 +339,21 @@ class Module(BaseModule):
         self._freeze_base()
 
     @torch.no_grad()
+    def _prune_terminal_births(self):
+        """Remove weak births without adding unfitted GS on the final step."""
+        model = self.births
+        cfg = self.config.birth
+        low_opacity = model.get_opacity.flatten() < cfg.opacity_threshold
+        big_screen = model.max_radii2D > cfg.new_max_screen_size
+        big_world = (model.get_scaling.max(dim=1).values >
+                     0.1 * self.datamodule.cameras_extent)
+        remove = low_opacity | big_screen | big_world
+        removed = int(remove.sum())
+        if removed:
+            model.prune_points(remove)
+        return removed
+
+    @torch.no_grad()
     def post_training_step(self, package):
         step = self.trainer.global_step
         if not self.motion_committed:
@@ -366,17 +381,24 @@ class Module(BaseModule):
                 self.births.add_densification_stats(
                     package['viewspace_points'], visible, align='right')
                 birth_step = step - self.motion_steps
-                if birth_step % self.config.birth.densify_interval == 0:
-                    result = self.births.adaptive_densify_and_prune(
-                        self.config.birth.densify_grad_threshold,
-                        self.config.birth.opacity_threshold,
-                        self.datamodule.cameras_extent,
-                        self.config.birth.new_max_screen_size,
-                        max_points=self.config.birth.max_new_gaussians)
-                    self.birth_control['split_added'] += result['added']
-                    self.birth_control['pruned'] += result['pruned']
-                self.births.optimizer.step()
-                self.births.optimizer.zero_grad(set_to_none=True)
+                if step == self.total_steps:
+                    # Apply the last fitted gradient before pruning replaces
+                    # optimizer parameters; no new GS may be born here.
+                    self.births.optimizer.step()
+                    self.births.optimizer.zero_grad(set_to_none=True)
+                    self.birth_control['pruned'] += self._prune_terminal_births()
+                else:
+                    if birth_step % self.config.birth.densify_interval == 0:
+                        result = self.births.adaptive_densify_and_prune(
+                            self.config.birth.densify_grad_threshold,
+                            self.config.birth.opacity_threshold,
+                            self.datamodule.cameras_extent,
+                            self.config.birth.new_max_screen_size,
+                            max_points=self.config.birth.max_new_gaussians)
+                        self.birth_control['split_added'] += result['added']
+                        self.birth_control['pruned'] += result['pruned']
+                    self.births.optimizer.step()
+                    self.births.optimizer.zero_grad(set_to_none=True)
             if step == self.total_steps:
                 self.finalize_frame()
 

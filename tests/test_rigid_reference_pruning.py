@@ -211,5 +211,81 @@ class ActiveRenderCacheTests(unittest.TestCase):
                                        torch.sigmoid(cached._opacity), rtol=0, atol=0)
 
 
+class TerminalBirthTests(unittest.TestCase):
+    def test_final_optimizer_update_precedes_prune_without_new_split(self):
+        quantization = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
+        events = []
+        births = gaussian.BirthGaussianModel(0)
+        fields = dict(_xyz=torch.zeros(2, 3),
+                      _rotation=torch.tensor([[1., 0., 0., 0.]] * 2),
+                      _scaling=torch.zeros(2, 3),
+                      _opacity=torch.logit(torch.tensor([[.005], [.002]])),
+                      _features_dc=torch.zeros(2, 1, 3),
+                      _features_rest=torch.zeros(2, 0, 3))
+        for name, value in fields.items():
+            setattr(births, name, torch.nn.Parameter(value))
+        births.max_radii2D = torch.zeros(2)
+        births.xyz_gradient_accum = torch.zeros(2, 1)
+        births.denom = torch.zeros(2, 1)
+        births.source_rows = torch.tensor([0, 1])
+        groups = [(key, attr) for key, attr in (
+            ('xyz', '_xyz'), ('f_dc', '_features_dc'),
+            ('f_rest', '_features_rest'), ('opacity', '_opacity'),
+            ('scaling', '_scaling'), ('rotation', '_rotation'))]
+        births.optimizer = torch.optim.Adam([
+            dict(name=key, params=[getattr(births, attr)])
+            for key, attr in groups], lr=1.)
+        births._opacity.grad = torch.tensor([[-1.], [0.]])
+        original_step = births.optimizer.step
+        original_zero = births.optimizer.zero_grad
+        original_prune = births.prune_points
+        def step():
+            events.append('step')
+            original_step()
+        def zero_grad(**kwargs):
+            events.append('zero')
+            original_zero(**kwargs)
+        def prune_points(remove):
+            events.append('prune')
+            original_prune(remove)
+        births.optimizer.step = step
+        births.optimizer.zero_grad = zero_grad
+        births.prune_points = prune_points
+        births.add_densification_stats = lambda *args, **kwargs: None
+        def fail_densify(*args, **kwargs):
+            raise AssertionError('Terminal step must not split')
+        births.adaptive_densify_and_prune = fail_densify
+        config = module.ModuleConfig()
+        config.rigid_tree.motion_steps = 100
+        config.rigid_tree.birth_steps = 200
+        config.birth.densify_interval = 40  # Final step is a former split point.
+        active = SimpleNamespace(config=config, motion_committed=True,
+            births=births, gaussians=SimpleNamespace(_xyz=torch.zeros(2, 3)),
+            trainer=SimpleNamespace(global_step=300), motion_steps=100,
+            total_steps=300, datamodule=SimpleNamespace(cameras_extent=20.),
+            birth_control=dict(pruned=0, split_added=0),
+            finalize_frame=lambda: events.append('finalize'))
+        active._prune_terminal_births = lambda: module.Module._prune_terminal_births(active)
+        package = dict(visibility_filter=torch.tensor([False, False, True, True]),
+                       radii=torch.zeros(4), viewspace_points=None)
+        module.Module.post_training_step(active, package)
+        self.assertEqual(events, ['step', 'zero', 'prune', 'finalize'])
+        self.assertEqual(active.birth_control['pruned'], 1)
+        self.assertEqual(active.birth_control['split_added'], 0)
+        torch.testing.assert_close(births.source_rows, torch.tensor([0]),
+                                   rtol=0, atol=0)
+        self.assertEqual(len(births._xyz), 1)
+        reference = dict(xyz=torch.zeros(2, 3),
+            rotation=torch.tensor([[1., 0., 0., 0.]] * 2),
+            logscale=torch.zeros(2, 3), opacity=torch.zeros(2, 1),
+            sh_dc=torch.zeros(2, 1, 3), sh_rest=torch.zeros(2, 0, 3))
+        view = quantization.QuantizedNewGaussianView(
+            births, config.birth, 20., reference, source_rows=births.source_rows)
+        materialized, sources = quantization.materialize_quantized_gaussians(
+            reference, view)
+        self.assertEqual(len(materialized['xyz']), 3)
+        torch.testing.assert_close(sources, torch.tensor([0]), rtol=0, atol=0)
+
+
 if __name__ == '__main__':
     unittest.main()
