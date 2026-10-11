@@ -1,12 +1,13 @@
-from typing import Literal, Optional, Union, Dict, Sequence
+"""Gaussian storage and newborn fitting for the active rigid residual tree."""
+
+from typing import Literal, Optional
 
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
 from libgs.model.gaussian import GaussianModel as BaseGaussianModel
-from libgs.utils.general import build_rotation, quaternion_multiply
-from .node_motion import rotation_delta
+from libgs.utils.general import build_rotation
 
 
 def select_budget_mask(mask: Tensor, scores: Tensor, limit: Optional[int]) -> Tensor:
@@ -21,10 +22,9 @@ def select_budget_mask(mask: Tensor, scores: Tensor, limit: Optional[int]) -> Te
 
 
 class GaussianModel(BaseGaussianModel):
-    delta_xyz: Optional[Tensor]
-    delta_rot: Optional[Tensor]
-    noise_scale: Optional[float]
-    render_attribute_cache = False
+    # Frozen canonical attributes are reused across full inference renders.
+    # _render_cached bypasses autograd sources and invalidates on tensor change.
+    render_attribute_cache = True
 
     def _render_cached(self, name, tensors, function):
         if (not self.render_attribute_cache or torch.is_inference_mode_enabled() or
@@ -47,10 +47,8 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_features(self):
-        dc = getattr(self, 'updated_features_dc', None)
-        dc = self._features_dc if dc is None else dc
-        return self._render_cached('features', (dc, self._features_rest),
-            lambda: torch.cat((dc, self._features_rest), dim=1))
+        return self._render_cached('features', (self._features_dc, self._features_rest),
+            lambda: torch.cat((self._features_dc, self._features_rest), dim=1))
 
     @property
     def get_scaling(self):
@@ -59,9 +57,8 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_opacity(self):
-        value = getattr(self, 'updated_opacity', None)
-        value = self._opacity if value is None else value
-        return self._render_cached('opacity', (value,), lambda: self.opacity_activation(value))
+        return self._render_cached('opacity', (self._opacity,),
+                                   lambda: self.opacity_activation(self._opacity))
 
     def initialize_incremental_optimizer(self, training_args) -> None:
         """Start newborn optimization with stage-two rates and fresh Adam moments.
@@ -73,63 +70,17 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_xyz(self) -> Float[Tensor, "n 3"]:
-        if (override := getattr(self, "rigid_xyz", None)) is not None:
-            return override
-        xyz = super().get_xyz
-        if (delta_xyz := getattr(self, "delta_xyz", None)) is not None:
-            return xyz + delta_xyz
-        if (noise_scale := getattr(self, "noise_scale", None)) is not None:
-            return xyz + torch.randn_like(xyz.detach()) * noise_scale
-        return xyz
+        override = getattr(self, 'rigid_xyz', None)
+        return super().get_xyz if override is None else override
 
     @property
-    def get_rotation(self) -> Float[Tensor, "n 3"]:
-        if (override := getattr(self, "rigid_rotation", None)) is not None:
+    def get_rotation(self) -> Float[Tensor, "n 4"]:
+        override = getattr(self, 'rigid_rotation', None)
+        if override is not None:
             return self._render_cached('rotation_override', (override,),
                                        lambda: self.rotation_activation(override))
-        if (delta_rot := getattr(self, "delta_rot", None)) is not None:
-            return quaternion_multiply(super().get_rotation, delta_rot)
         return self._render_cached('rotation', (self._rotation,),
                                    lambda: self.rotation_activation(self._rotation))
-
-    @property
-    def get_xyz_ori(self) -> Float[Tensor, "n 3"]:
-        return super().get_xyz
-
-    @property
-    def get_rotation_ori(self) -> Float[Tensor, "n 3"]:
-        return self._render_cached('rotation', (self._rotation,),
-                                   lambda: self.rotation_activation(self._rotation))
-
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size,
-                          *, max_points=None):
-        if max_points is None:
-            return super().densify_and_prune(max_grad, min_opacity, extent,
-                                             max_screen_size)
-        before = len(self._xyz)
-        if isinstance(max_points, bool) or not isinstance(max_points, int) or max_points < before:
-            raise ValueError('The strict GS budget must cover the current Gaussian rows')
-        if max_grad <= 0:
-            raise ValueError('Budgeted densification needs a positive gradient threshold')
-        grads = torch.nan_to_num(self.xyz_gradient_accum / self.denom, nan=0.)
-        scores = grads.norm(dim=-1)
-        eligible = scores >= max_grad
-        selected = select_budget_mask(eligible, scores, max_points - before)
-        budget_grads = grads * selected[:, None]
-        # Preserve the initial-frame clone/split distributions. Both ordinary
-        # cloning and the standard two-child split have a net growth of one row.
-        self.densify_and_clone(budget_grads, max_grad, extent)
-        self.densify_and_split(budget_grads, max_grad, extent)
-        prune_mask = (self.get_opacity < min_opacity).reshape(-1)
-        if max_screen_size:
-            prune_mask |= ((self.max_radii2D > max_screen_size) |
-                           (self.get_scaling.max(dim=1).values > .1 * extent))
-        self.prune_points(prune_mask)
-        torch.cuda.empty_cache()
-        if len(self._xyz) > max_points:
-            raise AssertionError('Initial-frame densification exceeded its strict GS budget')
-        return dict(before=before, after=len(self._xyz), eligible=int(eligible.sum()),
-                    selected=int(selected.sum()), max_points=max_points)
 
     def get_covariance(self, scaling_modifier=1):
         if getattr(self, 'rigid_rotation', None) is not None:
@@ -302,21 +253,6 @@ class GaussianModel(BaseGaussianModel):
                     blocked=eligible - selected)
 
     @torch.no_grad()
-    def apply_deformation(
-        self,
-        delta_xyz: Float[Tensor, "n 3"],
-        delta_rotation: Float[Tensor, "n 4"],
-    ):
-        xyz = self.get_xyz + delta_xyz
-        rotation = quaternion_multiply(self.get_rotation, delta_rotation)
-        try:
-            self._xyz = self.replace_tensor_to_optimizer(xyz, "xyz")["xyz"]
-            tensors = self.replace_tensor_to_optimizer(rotation, "rotation")
-            self._rotation = tensors["rotation"]
-        except TypeError:  # state stored in optimizer is None
-            self._xyz, self._rotation = xyz, rotation
-
-    @torch.no_grad()
     def apply_selected_motion(self, xyz: Tensor, raw_rotation: Tensor):
         """Copy accepted values exactly; the base optimizer is never stepped."""
         self._xyz.copy_(xyz)
@@ -324,18 +260,6 @@ class GaussianModel(BaseGaussianModel):
         self.optimizer.zero_grad(set_to_none=True)
         for parameter in (self._xyz, self._rotation):
             self.optimizer.state.pop(parameter, None)
-
-    @torch.no_grad()
-    def extend(self, gaussians: BaseGaussianModel) -> "GaussianModel":
-        self.densification_postfix(
-            gaussians._xyz.clone(),
-            gaussians._features_dc.clone(),
-            gaussians._features_rest.clone(),
-            gaussians._opacity.clone(),
-            gaussians._scaling.clone(),
-            gaussians._rotation.clone(),
-        )
-        return self
 
     def prune_points(self, mask_or_indices: Tensor):
         if mask_or_indices.dtype is torch.bool:
@@ -345,51 +269,45 @@ class GaussianModel(BaseGaussianModel):
         return super().prune_points(mask)
 
 
+class BirthGaussianModel(GaussianModel):
+    """Track the exact source row through newborn splits and pruning."""
 
-def change_optimizer(
-    optimizers: Union[torch.optim.Optimizer, Sequence[torch.optim.Optimizer]],
-    tensor: Union[Tensor, Dict[str, Tensor]],
-    name: Union[None, str, Sequence[str]] = None, op='replace'
-) -> Dict[str, Tensor]:
-    """replace, prune, concat a tensor or tensor list in optimizer"""
-    assert op in ['replace', 'prune', 'concat']
-    optimizable_tensors = {}
-    mask = None
-    if name is not None:
-        op_names = [name] if isinstance(name, str) else list(name)
-    else:
-        assert isinstance(tensor, dict)
-        op_names = list(tensor.keys())
-    if isinstance(optimizers, torch.optim.Optimizer):
-        optimizers = [optimizers]
-    for optimizer in optimizers:
-        for group in optimizer.param_groups:
-            if ('name' not in group) or group['name'] not in op_names:
-                continue
-            old_tensor = group['params'][0]
-            new_tensor = tensor if isinstance(tensor, Tensor) else tensor[group['name']]
-            if op == 'concat':
-                group["params"][0] = nn.Parameter(torch.cat([old_tensor, new_tensor]).requires_grad_(True))
-            elif op == 'prune':
-                mask = new_tensor
-                group["params"][0] = nn.Parameter(old_tensor[mask].requires_grad_(True))
-            else:
-                group["params"][0] = nn.Parameter(new_tensor.requires_grad_(True))
-            optimizable_tensors[group["name"]] = group["params"][0]
+    source_rows: Optional[Tensor] = None
 
-            stored_state = optimizer.state.get(old_tensor, None)
-            if stored_state is None:
-                continue
-            del optimizer.state[old_tensor]
-            if op == 'concat':
-                stored_state["exp_avg"] = torch.cat([stored_state["exp_avg"], torch.zeros_like(new_tensor)], dim=0)
-                stored_state["exp_avg_sq"] = torch.cat(
-                    [stored_state["exp_avg_sq"], torch.zeros_like(new_tensor)], dim=0)
-            elif op == 'prune':
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
-            else:  # replace
-                stored_state["exp_avg"] = torch.zeros_like(new_tensor)
-                stored_state["exp_avg_sq"] = torch.zeros_like(new_tensor)
-            optimizer.state[group['params'][0]] = stored_state
-    return optimizable_tensors
+    def prune_points(self, mask_or_indices: Tensor):
+        if mask_or_indices.dtype is torch.bool:
+            mask = mask_or_indices
+        else:
+            mask = torch.zeros(len(self._xyz), dtype=torch.bool,
+                               device=self._xyz.device)
+            mask[mask_or_indices] = True
+        if self.source_rows is not None:
+            if len(self.source_rows) != len(mask):
+                raise ValueError('Birth source rows disagree with candidate count')
+            self.source_rows = self.source_rows[~mask]
+        return super().prune_points(mask)
+
+    def adaptive_densify_and_split(self, grads, grad_threshold, scene_extent,
+                                   N=2, *, max_points=None):
+        if self.source_rows is None:
+            raise ValueError('Birth lineage must be set before candidate splitting')
+        count = len(self._xyz)
+        padded_grad = torch.zeros(count, device=self._xyz.device,
+                                  dtype=grads.dtype)
+        padded_grad[:len(grads)] = grads.reshape(-1)
+        selected = ((padded_grad >= grad_threshold) &
+                    (self.get_scaling.max(dim=1).values >
+                     self.percent_dense * scene_extent))
+        if max_points is not None:
+            available = max(0, (max_points - count) // (N - 1))
+            selected = select_budget_mask(selected, padded_grad, available)
+        # GaussianModel appends N children, then removes each selected parent.
+        self.source_rows = torch.cat((self.source_rows,
+                                      self.source_rows[selected].repeat(N)))
+        try:
+            return super().adaptive_densify_and_split(
+                grads, grad_threshold, scene_extent, N, max_points=max_points)
+        except Exception:
+            # The caller must abandon this candidate model on a failed split.
+            self.source_rows = None
+            raise

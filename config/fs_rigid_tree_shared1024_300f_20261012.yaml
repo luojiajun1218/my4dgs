@@ -1,0 +1,99 @@
+# 1024 个运动区域；先共享拟合，再稀疏局部残差；首帧低透明度精简。
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+data:
+  canonical_training_view_order: true
+  eval_test: true
+  eval_train: false
+  expected_image_size:
+  - 1600
+  - 1199
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+  extra_dataset_kwargs:
+    num_frames: 300
+  first_frame_eval_train: false
+  resolution: -1
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak
+  shuffle: true
+  split_train_test: true
+  training_view_seed: 0
+  white_background: false
+detect_anomaly: false
+experiment_name: fs_rigid_tree_shared1024_300f_20261012
+gui_enabled: false
+mode: train
+module:
+  birth:
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    densify_grad_threshold: 0.00015
+    densify_interval: 40
+    max_new_gaussians: null
+    new_logscale_step: 0.001
+    new_max_screen_size: 20.0
+    new_opacity_step: 0.01
+    new_rotation_step: 0.001
+    new_sh_step: 0.001
+    new_xyz_step_extent: 1.0e-05
+    opacity_threshold: 0.01
+  gaussian_stage2:
+    feature_lr: 0.075
+    opacity_lr: 0.75
+    percent_dense: 0.01
+    position_lr_delay_mult: 0.01
+    position_lr_final: 2.4e-05
+    position_lr_init: 0.0024
+    position_lr_max_steps: 15000
+    rotation_lr: 0.015
+    scaling_lr: 0.075
+  initial_opacity_threshold: 0.0075
+  lambda_dssim: 0.2
+  lpips_required: true
+  num_saving_images: 2
+  rigid_tree:
+    adam_betas:
+    - 0.9
+    - 0.999
+    adam_eps: 1.0e-08
+    birth_steps: 200
+    gs_rotation_lr: 0.0001
+    gs_rotation_step_rad: 0.001
+    gs_translation_lr: 0.0001
+    gs_xyz_step_extent: 0.0001
+    motion_rotation_step_rad: 5.0e-05
+    motion_steps: 600
+    motion_xyz_step_extent: 5.0e-06
+    parent_max_depth: 8
+    rate_loss_weight: 0.015
+    rate_ramp_steps: 20
+    rate_support_temperature: 1.0
+    rate_warmup_steps: 20
+    region_count: 1025
+    region_rotation_lr: 0.00015
+    region_translation_lr: 0.0005
+    relative_motion_loss_weight: 0.2
+    shared_steps: 200
+    tree_edit_interval: 10
+    tree_edit_neighbors: 8
+    tree_edit_region_trials: 4
+    tree_edit_step: 360
+  sh_degree: 1
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+quiet: false
+random_seed: 0
+trainer:
+  cache_data_on_device: true
+  num_init_steps: 15000
+  saving_ckpt_frames:
+  - 1
+  - 29
+  - 49
+  - 99
+  - 149
+  - 199
+  - 249
+  - 299
+  saving_ckpt_steps:
+  - 600
+  - 800

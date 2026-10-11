@@ -30,34 +30,42 @@ recon_package.__path__ = [str(project_root / 'pipeline' / 'ReCon-GS')]
 pipeline_package.__dict__['ReCon-GS'] = recon_package
 sys.modules['pipeline'] = pipeline_package
 sys.modules['pipeline.ReCon-GS'] = recon_package
-D = importlib.import_module('pipeline.ReCon-GS.model.deformation')
-N = importlib.import_module('pipeline.ReCon-GS.model.nested')
-G = importlib.import_module('pipeline.ReCon-GS.model.gated_four')
-R = importlib.import_module('pipeline.ReCon-GS.model.region_rigid')
-S = importlib.import_module('pipeline.ReCon-GS.model.selective_motion')
+D = importlib.import_module('pipeline.ReCon-GS.archive.model.deformation')
+N = importlib.import_module('pipeline.ReCon-GS.archive.model.nested')
+G = importlib.import_module('pipeline.ReCon-GS.archive.model.gated_four')
+R = importlib.import_module('pipeline.ReCon-GS.archive.model.region_rigid')
+S = importlib.import_module('pipeline.ReCon-GS.archive.model.selective_motion')
 DATA = importlib.import_module('pipeline.ReCon-GS.data')
-Q = importlib.import_module('pipeline.ReCon-GS.model.residual_motion')
-GR = importlib.import_module('pipeline.ReCon-GS.model.gated_residual')
-SH = importlib.import_module('pipeline.ReCon-GS.model.sparse_hierarchical')
-FC = importlib.import_module('pipeline.ReCon-GS.model.flat_cluster')
-BR = importlib.import_module('pipeline.ReCon-GS.model.binary_refinement')
-SAB = importlib.import_module('pipeline.ReCon-GS.model.storage_aware_binary')
-CC = importlib.import_module('pipeline.ReCon-GS.model.common_contrast')
-SHADOW = importlib.import_module('pipeline.ReCon-GS.model.shadow_exploration')
-GD = importlib.import_module('pipeline.ReCon-GS.model.gate_diagnostics')
-GPS = importlib.import_module('pipeline.ReCon-GS.model.gate_probe_snapshot')
-NM = importlib.import_module('pipeline.ReCon-GS.model.node_motion')
-PPC = importlib.import_module('pipeline.ReCon-GS.model.parent_precision_compensation')
-MC = importlib.import_module('pipeline.ReCon-GS.model.motion_clustering')
-SL_CODEC = importlib.import_module('pipeline.ReCon-GS.model.sparse_layout_codec')
-GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.model.gs_activity_cost')
-GAUSS = importlib.import_module('pipeline.ReCon-GS.model.gaussian')
-SPLIT_SCORES = importlib.import_module('pipeline.ReCon-GS.model.split_region_scores')
-DIRECT_TREE = importlib.import_module('pipeline.ReCon-GS.model.direct_tree')
-DIRECT_TRANSACTION = importlib.import_module('pipeline.ReCon-GS.direct_transaction')
-NODE_EDITS = importlib.import_module('pipeline.ReCon-GS.model.tree_edit_codec')
-BIRTH = importlib.import_module('pipeline.ReCon-GS.model.birth_candidates')
-COLOR = importlib.import_module('pipeline.ReCon-GS.model.sparse_color')
+Q = importlib.import_module('pipeline.ReCon-GS.archive.model.residual_motion')
+GR = importlib.import_module('pipeline.ReCon-GS.archive.model.gated_residual')
+SH = importlib.import_module('pipeline.ReCon-GS.archive.model.sparse_hierarchical')
+FC = importlib.import_module('pipeline.ReCon-GS.archive.model.flat_cluster')
+BR = importlib.import_module('pipeline.ReCon-GS.archive.model.binary_refinement')
+SAB = importlib.import_module('pipeline.ReCon-GS.archive.model.storage_aware_binary')
+CC = importlib.import_module('pipeline.ReCon-GS.archive.model.common_contrast')
+SHADOW = importlib.import_module('pipeline.ReCon-GS.archive.model.shadow_exploration')
+GD = importlib.import_module('pipeline.ReCon-GS.archive.model.gate_diagnostics')
+GPS = importlib.import_module('pipeline.ReCon-GS.archive.model.gate_probe_snapshot')
+NM = importlib.import_module('pipeline.ReCon-GS.archive.model.node_motion')
+PPC = importlib.import_module('pipeline.ReCon-GS.archive.model.parent_precision_compensation')
+MC = importlib.import_module('pipeline.ReCon-GS.archive.model.motion_clustering')
+SL_CODEC = importlib.import_module('pipeline.ReCon-GS.archive.model.sparse_layout_codec')
+GS_ACTIVITY = importlib.import_module('pipeline.ReCon-GS.archive.model.gs_activity_cost')
+GAUSS = importlib.import_module('pipeline.ReCon-GS.archive.model.gaussian')
+ACTIVE_GAUSS = importlib.import_module('pipeline.ReCon-GS.model.gaussian')
+SPLIT_SCORES = importlib.import_module('pipeline.ReCon-GS.archive.model.split_region_scores')
+DIRECT_TREE = importlib.import_module('pipeline.ReCon-GS.archive.model.direct_tree')
+DIRECT_TRANSACTION = importlib.import_module('pipeline.ReCon-GS.archive.direct_transaction')
+NODE_EDITS = importlib.import_module('pipeline.ReCon-GS.archive.model.tree_edit_codec')
+BIRTH = importlib.import_module('pipeline.ReCon-GS.archive.model.birth_candidates')
+COLOR = importlib.import_module('pipeline.ReCon-GS.archive.model.sparse_color')
+RIGID = importlib.import_module('pipeline.ReCon-GS.model.rigid_residual_tree')
+RIGID_CODEC = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
+RIGID_MODULE = importlib.import_module('pipeline.ReCon-GS.module')
+RIGID_TRAINER = importlib.import_module('pipeline.ReCon-GS.trainer')
+RIGID_BIRTH_CODEC = importlib.import_module(
+    'pipeline.ReCon-GS.model.rigid_tree_birth_codec')
+RIGID_REPLAY = importlib.import_module('scripts.replay_rigid_tree')
 
 
 class WorkerOnlyPairView(SimpleNamespace):
@@ -675,7 +683,7 @@ def test_sparse_decoder_masks_nonfinite_sentinel_placeholder():
 
 
 def test_sparse_motion_export_is_connected_to_renderer():
-    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_module.py'
     tree = ast.parse(source_path.read_text())
     module_class = next(node for node in tree.body
                         if isinstance(node, ast.ClassDef) and node.name == 'Module')
@@ -1725,7 +1733,7 @@ def test_gated_all_keep_deletes_only_newborns_and_zero_budget_is_empty():
 
 def test_frame_preparation_uses_keep_protection_and_reports_history():
     """Run production frame preparation without importing a CUDA renderer."""
-    module_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    module_path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_module.py'
     module_tree = ast.parse(module_path.read_text())
     method = next(node for node in ast.walk(module_tree)
                   if isinstance(node, ast.FunctionDef) and node.name == 'prepare_quantized_frame')
@@ -1919,7 +1927,7 @@ def test_finalization_budget_updates_storage_tree_and_next_frame_count():
         candidates._opacity[:, 0] = torch.tensor([-10., 2., 2., 1., 0.])
     candidates.get_xyz = candidates._xyz
     view = Q.QuantizedNewGaussianView(candidates, cfg, 1., raw)
-    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_module.py'
     tree = ast.parse(source_path.read_text())
     methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                and node.name in {'finalize_quantized_frame', 'quantized_storage', 'new_quant_birth_control'}]
@@ -2286,7 +2294,7 @@ def test_soft_motion_ancestor_product_vs_hard_path_gradient():
 
 
 def test_quality_snapshot_restores_rng_renderer_and_rigid_overrides():
-    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_module.py'
     method = next(node for node in ast.walk(ast.parse(source_path.read_text()))
                   if isinstance(node, ast.FunctionDef) and node.name == 'quantized_quality_snapshot')
     scope = dict(torch=torch, np=np, l1_loss=torch.nn.functional.l1_loss,
@@ -2437,7 +2445,7 @@ def test_inherited_keep_zero_candidates_have_no_image_learning_signal():
 
 
 def test_trainer_restore_maps_cpu_checkpoint_to_training_device():
-    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'trainer.py'
+    source_path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_trainer.py'
     trainer = next(node for node in ast.parse(source_path.read_text(encoding='utf-8')).body
                    if isinstance(node, ast.ClassDef) and node.name == 'Trainer')
     method = next(node for node in trainer.body
@@ -2534,7 +2542,7 @@ def test_gated_gs_activity_fraction_preserves_motion_and_counts_cancellation():
 
 def test_gs_activity_training_cost_skips_zero_and_caches_post_commit_value():
     import textwrap
-    source = (project_root / 'pipeline/ReCon-GS/module.py').read_text(encoding='utf8')
+    source = (project_root / 'pipeline/ReCon-GS/archive/legacy_module.py').read_text(encoding='utf8')
     start = source.index('            loss_activity = loss_storage.new_zeros(())')
     end = source.index("            metrics.update({'storage/'", start)
     block = textwrap.dedent(source[start:end])
@@ -2790,7 +2798,7 @@ def test_keep_candidate_loss_schedule_validation_and_checkpoint():
 
 
 def test_candidate_render_audit_samples_before_image_outcomes():
-    path = project_root / 'scripts' / 'audit_closed_candidate_render.py'
+    path = project_root / 'scripts' / 'archive' / 'audit_closed_candidate_render.py'
     parsed = ast.parse(path.read_text())
     function = next(node for node in parsed.body
                     if isinstance(node, ast.FunctionDef) and node.name == 'sample_keep_nodes')
@@ -3302,7 +3310,7 @@ def test_sparse_hierarchical_float32_storage_underflow_has_finite_correct_gradie
 
 
 def test_sparse_hierarchical_disabled_storage_has_no_backward_graph():
-    source_path = project_root / 'pipeline/ReCon-GS/module.py'
+    source_path = project_root / 'pipeline/ReCon-GS/archive/legacy_module.py'
     module_tree = ast.parse(source_path.read_text())
     block = next(node for node in ast.walk(module_tree)
                  if isinstance(node, ast.If) and any(
@@ -3391,7 +3399,7 @@ def test_sparse_hierarchical_activity_uses_soft_training_and_fixed_render_masks(
 
 def test_sparse_hierarchical_regularizers_reach_gates_and_newborns_in_correct_phases():
     import textwrap
-    source = (project_root / 'pipeline/ReCon-GS/module.py').read_text()
+    source = (project_root / 'pipeline/ReCon-GS/archive/legacy_module.py').read_text()
     start = source.index('            cfg = self.config.quantized_residual\n            stage =')
     end = source.index('            loss_candidate =', start)
     code = textwrap.dedent(source[start:end])
@@ -4239,7 +4247,7 @@ def test_flat_candidate_budget_and_actual_image_size_guard():
 
 def test_module_setup_selects_flat_model_and_shared_birth_config():
     _, fixture = flat_cluster_fixture()
-    path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_module.py'
     module_class = next(node for node in ast.parse(path.read_text()).body
                         if isinstance(node, ast.ClassDef) and node.name == 'Module')
     method = next(node for node in module_class.body
@@ -5090,7 +5098,7 @@ def test_storage_aware_newborn_quantization_can_change_nearest_source_without_br
         assert Q.reference_digest(decoded) == Q.reference_digest(materialized)
         torch.testing.assert_close(decoder.materialized_layout['index'],
                                    motion.materialized_layout['index'], rtol=0, atol=0)
-        recovery = importlib.import_module('scripts.recover_storage_aware_checkpoint')
+        recovery = importlib.import_module('scripts.archive.recover_storage_aware_checkpoint')
         recovered = recovery.motion_from_decoded(motion.config, decoder.last_frame_state, decoder.materialized_layout)
         decoded_motion = recovered(recovered.config.motion_steps)
         torch.testing.assert_close(decoded_motion[0], raw['xyz'], rtol=0, atol=0)
@@ -5115,7 +5123,7 @@ def test_storage_aware_newborn_quantization_can_change_nearest_source_without_br
 
 
 def test_storage_aware_recovered_motion_matches_nonzero_mixed_precision_bitstream():
-    recovery = importlib.import_module('scripts.recover_storage_aware_checkpoint')
+    recovery = importlib.import_module('scripts.archive.recover_storage_aware_checkpoint')
     raw, motion = storage_aware_binary_fixture()
     torch.manual_seed(59)
     motion.prepare_step(5)
@@ -5705,7 +5713,7 @@ def test_gate_probe_report_is_node_addressable_and_refuses_overwrite():
         assert plan['precision_policies'] == ['fixed']
         assert plan['camera_names'] == [view.path.name for view in views]
         assert json.loads(json.dumps(asdict(config)))['precision_policies'] == ['fixed']
-        summary_module = importlib.import_module('scripts.summarize_gate_diagnostics')
+        summary_module = importlib.import_module('scripts.archive.summarize_gate_diagnostics')
         summary = summary_module.summarize(Path(directory))
         assert len(summary['rows']) == len(rows)
         assert {row['context'] for row in summary['rows']} == {'online_pre_update'}
@@ -5724,7 +5732,7 @@ def test_gate_diagnostic_entry_loads_native_resolved_yaml_lists():
     import yaml
     from omegaconf import OmegaConf
     from libgs.utils.config import to_structured
-    entry = importlib.import_module('scripts.diagnose_binary_gates')
+    entry = importlib.import_module('scripts.archive.diagnose_binary_gates')
     path = legacy_config_root / 'fs_gate_mechanism_diagnostics_100f.yaml'
     values = OmegaConf.load(path).module.gate_diagnostics
     direct, unused = to_structured(values, GD.GateDiagnosticsConfig)
@@ -5764,7 +5772,7 @@ def test_gate_candidate_initial_pose_matches_source_at_all_phases_and_backends()
 
 def test_gate_frozen_render_objective_keeps_source_attributes_and_pose_separate():
     from libgs.metric import psnr, ssim
-    path = project_root / 'pipeline' / 'ReCon-GS' / 'gate_diagnostic_render.py'
+    path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'gate_diagnostic_render.py'
     tree = ast.parse(path.read_text())
     definition = next(node for node in tree.body if isinstance(node, ast.ClassDef))
 
@@ -5801,21 +5809,21 @@ def test_gate_frozen_render_objective_keeps_source_attributes_and_pose_separate(
 
 
 def test_online_gate_hook_is_read_only_and_keeps_tracing_nodes_after_gate_changes():
-    path = project_root / 'pipeline' / 'ReCon-GS' / 'module.py'
+    path = project_root / 'pipeline' / 'ReCon-GS' / 'archive' / 'legacy_module.py'
     tree = ast.parse(path.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Module')
     definition = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
                       and node.name == 'record_gate_diagnostics')
-    scope = dict(__name__='pipeline.ReCon-GS.module', __package__='pipeline.ReCon-GS',
+    scope = dict(__name__='pipeline.ReCon-GS.archive.legacy_module', __package__='pipeline.ReCon-GS.archive',
         torch=torch, time=time, isolated_rng=GD.isolated_rng,
         sample_nodes=GD.sample_nodes, node_trace=GD.node_trace, write_trace=GD.write_trace,
         run_probes=GD.run_probes, private_view_plan=GD.private_view_plan)
     exec(compile(ast.Module(body=[definition], type_ignores=[]), str(path), 'exec'), scope)
     motion, config, views, objective = gate_diagnostic_fixture(fit_steps=1, trace_steps=[5, 6])
-    fake_renderer_module = ModuleType('pipeline.ReCon-GS.gate_diagnostic_render')
+    fake_renderer_module = ModuleType('pipeline.ReCon-GS.archive.gate_diagnostic_render')
     fake_renderer_module.FrozenImageObjective = lambda *args: objective
     with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {
-            'pipeline.ReCon-GS.gate_diagnostic_render': fake_renderer_module}):
+            'pipeline.ReCon-GS.archive.gate_diagnostic_render': fake_renderer_module}):
         owner = SimpleNamespace(current_frame=1, global_step=5, device='cpu', residual_motion=motion,
             quant_first_frame_gs_count=48, gaussians=object(), background=torch.zeros(3),
             config=SimpleNamespace(motion_mode='storage_aware_binary', gate_diagnostics=config,
@@ -5916,7 +5924,7 @@ def test_joint_candidate_fits_share_private_views_and_check_views_do_not_fit():
 
 
 def test_crossfold_feedback_protocol_and_summary_keep_check_views_held_out():
-    module = importlib.import_module('scripts.replay_joint_feedback_crossfold')
+    module = importlib.import_module('scripts.archive.replay_joint_feedback_crossfold')
     protocol = module.load_protocol(
         legacy_config_root / 'fs_joint_feedback_crossfold_3nodes.yaml')
     assert len(protocol['nodes']) == 3 and protocol['expected_candidate_count'] == 32
@@ -5956,7 +5964,7 @@ def test_crossfold_feedback_protocol_and_summary_keep_check_views_held_out():
 
 
 def test_crossfold_balanced_plans_use_each_fit_view_twice_and_swap_roles():
-    module = importlib.import_module('scripts.replay_joint_feedback_crossfold')
+    module = importlib.import_module('scripts.archive.replay_joint_feedback_crossfold')
     protocol = module.load_protocol(
         legacy_config_root / 'fs_joint_feedback_crossfold_3nodes.yaml')
     base = asdict(joint_diagnostic_fixture()[1])
@@ -5976,7 +5984,7 @@ def test_crossfold_balanced_plans_use_each_fit_view_twice_and_swap_roles():
 
 
 def test_joint_feedback_selects_same_candidate_across_folds_with_source_fallback():
-    module = importlib.import_module('scripts.prototype_joint_feedback_transaction')
+    module = importlib.import_module('scripts.archive.prototype_joint_feedback_transaction')
 
     def fold(values):
         return dict(candidates=[dict(spec=dict(name=name), evaluation_gain=gain)
@@ -5993,7 +6001,7 @@ def test_joint_feedback_selects_same_candidate_across_folds_with_source_fallback
 
 
 def test_joint_feedback_transaction_learns_hard_choices_and_rolls_back_exact_state():
-    module = importlib.import_module('scripts.prototype_joint_feedback_transaction')
+    module = importlib.import_module('scripts.archive.prototype_joint_feedback_transaction')
     motion, config, _, _, _ = joint_diagnostic_fixture()
     config.stop_parent_precision_bits = [8, 32]
     config.refine_parent_precision_bits = [8, 32]
@@ -6039,7 +6047,7 @@ def test_joint_feedback_transaction_learns_hard_choices_and_rolls_back_exact_sta
 
 
 def test_joint_feedback_continuation_protocol_balances_future_views():
-    module = importlib.import_module('scripts.continue_joint_feedback_pair')
+    module = importlib.import_module('scripts.archive.continue_joint_feedback_pair')
     protocol = module.load_protocol(
         legacy_config_root / 'fs_joint_feedback_continuation_pair.yaml')
     assert [(row['frame'], row['step']) for row in protocol['nodes']] == [(5, 120), (99, 180)]
@@ -6058,7 +6066,7 @@ def test_joint_feedback_continuation_protocol_balances_future_views():
 
 
 def test_joint_feedback_continuation_recomputes_and_hardens_with_native_stage():
-    module = importlib.import_module('scripts.continue_joint_feedback_pair')
+    module = importlib.import_module('scripts.archive.continue_joint_feedback_pair')
     raw, motion = storage_aware_binary_fixture()
     # Simulate a saved post-backward/pre-update step-8 gate-compress snapshot.
     xyz, rotation = motion(8, training=True)
@@ -6089,13 +6097,13 @@ def test_joint_feedback_continuation_recomputes_and_hardens_with_native_stage():
 
 
 def test_joint_feedback_continuation_source_fallback_is_complete_noop_pair():
-    module = importlib.import_module('scripts.continue_joint_feedback_pair')
+    module = importlib.import_module('scripts.archive.continue_joint_feedback_pair')
     class Objective:
         def __call__(self, view, xyz, rotation):
             return (xyz - raw['xyz']).square().mean() + (rotation - raw['rotation']).square().mean()
 
     view = SimpleNamespace(path=Path('cam01.png'))
-    analyzer = importlib.import_module('scripts.analyze_joint_feedback_continuation')
+    analyzer = importlib.import_module('scripts.archive.analyze_joint_feedback_continuation')
     for status, with_feedback in (('source_retained', False), ('rolled_back', True)):
         raw, source = storage_aware_binary_fixture()
         # Populate optimizer state before cloning so equality covers Adam moments and steps.
@@ -6134,7 +6142,7 @@ def test_joint_feedback_continuation_source_fallback_is_complete_noop_pair():
 
 
 def test_joint_feedback_continuation_analyzes_source_and_rollback_noops():
-    analyzer = importlib.import_module('scripts.analyze_joint_feedback_continuation')
+    analyzer = importlib.import_module('scripts.archive.analyze_joint_feedback_continuation')
     with tempfile.TemporaryDirectory() as directory:
         run = Path(directory)
         snapshots = run / 'source_snapshot'
@@ -6347,12 +6355,12 @@ def test_known_static_rigid_and_local_motion_are_representable_with_assigned_gat
 def test_full_online_joint_hook_saves_snapshot_components_and_joint_summary():
     from dataclasses import dataclass, field
     from typing import Optional
-    path = project_root / 'pipeline/ReCon-GS/module.py'
+    path = project_root / 'pipeline/ReCon-GS/archive/legacy_module.py'
     tree = ast.parse(path.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Module')
     definition = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
                       and node.name == 'record_gate_diagnostics')
-    scope = dict(__name__='pipeline.ReCon-GS.module', __package__='pipeline.ReCon-GS',
+    scope = dict(__name__='pipeline.ReCon-GS.archive.legacy_module', __package__='pipeline.ReCon-GS.archive',
         torch=torch, time=time, isolated_rng=GD.isolated_rng, capture_rng=GPS.capture_rng,
         sample_nodes=GD.sample_nodes, node_trace=GD.node_trace, write_trace=GD.write_trace,
         run_probes=GD.run_probes, private_view_plan=GD.private_view_plan,
@@ -6385,11 +6393,11 @@ def test_full_online_joint_hook_saves_snapshot_components_and_joint_summary():
         def snapshot_state(self):
             return dict(old_count=len(motion.base_xyz), attributes=residual_raw_fixture(48))
 
-    fake = ModuleType('pipeline.ReCon-GS.gate_diagnostic_render')
+    fake = ModuleType('pipeline.ReCon-GS.archive.gate_diagnostic_render')
     fake.FrozenImageObjective = lambda *args: Objective()
     all_views = {view.path.name: view for view in views + checks}
     with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {
-            'pipeline.ReCon-GS.gate_diagnostic_render': fake}):
+            'pipeline.ReCon-GS.archive.gate_diagnostic_render': fake}):
         directory = Path(directory)
         owner = SimpleNamespace(current_frame=1, global_step=5, device='cpu', residual_motion=motion,
             quant_first_frame_gs_count=48, gaussians=object(), background=torch.zeros(3), config=ModelConfig(),
@@ -6412,7 +6420,7 @@ def test_full_online_joint_hook_saves_snapshot_components_and_joint_summary():
         packet = torch.load(snapshot, map_location='cpu', weights_only=False)
         assert packet['gradient_components']['context']['camera'] == views[0].path.name
         assert len(packet['views']) == 3 and packet['purpose'] == 'training_probe'
-        summary = importlib.import_module('scripts.summarize_gate_diagnostics').summarize(directory)
+        summary = importlib.import_module('scripts.archive.summarize_gate_diagnostics').summarize(directory)
         assert len(summary['joint_nodes']) == len(packet['samples'])
         assert len(summary['joint_candidates']) == 8 * len(packet['samples'])
         assert not summary['rows']
@@ -7506,7 +7514,7 @@ def test_periodic_birth_retention_matches_stream_bytes_and_sequential_decoding()
     final, _ = Q.materialize_quantized_gaussians(moved, view)
     assert len(final['xyz']) == len(raw['xyz']) + 1
     assert float(torch.sigmoid(final['opacity'][-1])) < motion.config.opacity_keep_threshold
-    module_ast = ast.parse((project_root / 'pipeline/ReCon-GS/module.py').read_text())
+    module_ast = ast.parse((project_root / 'pipeline/ReCon-GS/archive/legacy_module.py').read_text())
     module_class = next(node for node in module_ast.body if isinstance(node, ast.ClassDef) and node.name == 'Module')
     storage_function = next(node for node in module_class.body if isinstance(node, ast.FunctionDef)
                             and node.name == 'quantized_storage')
@@ -7864,7 +7872,7 @@ def test_batched_effective_splits_match_scalar_weights_with_empty_children():
 
 
 def test_lossless_birth_packet_replays_attributes_and_tree_attachment():
-    birth_codec = importlib.import_module('pipeline.ReCon-GS.model.birth_codec')
+    birth_codec = importlib.import_module('pipeline.ReCon-GS.archive.model.birth_codec')
     raw, motion = common_contrast_fixture(birth_export_format='raw_zlib')
     xyz, rotation = motion(motion.config.motion_steps)
     base = dict(raw, xyz=xyz, rotation=rotation)
@@ -7986,7 +7994,7 @@ def test_simple_birth_training_rejects_old_extensions_without_breaking_decoder_c
 
 
 def test_residual_birth_pixel_centers_roundtrip_row_camera_matrices():
-    residual_birth = importlib.import_module('pipeline.ReCon-GS.model.residual_birth')
+    residual_birth = importlib.import_module('pipeline.ReCon-GS.archive.model.residual_birth')
     projection = torch.zeros(4, 4, dtype=torch.float64)
     projection[0, 0] = projection[1, 1] = projection[2, 2] = projection[2, 3] = 1.
     world = torch.eye(4, dtype=torch.float64)
@@ -8004,7 +8012,7 @@ def test_residual_birth_pixel_centers_roundtrip_row_camera_matrices():
 
 
 def test_residual_birth_multiview_support_rejects_occlusion_and_duplicate_peaks():
-    residual_birth = importlib.import_module('pipeline.ReCon-GS.model.residual_birth')
+    residual_birth = importlib.import_module('pipeline.ReCon-GS.archive.model.residual_birth')
     projection = torch.zeros(4, 4)
     projection[0, 0] = projection[1, 1] = projection[2, 2] = projection[2, 3] = 1.
     rgb = torch.tensor([.4, .5, .6])[:, None, None].expand(3, 8, 8).clone()
@@ -8021,7 +8029,7 @@ def test_residual_birth_multiview_support_rejects_occlusion_and_duplicate_peaks(
 
 
 def test_birth_opacity_stream_updates_only_selected_rows_and_resumes_adam():
-    lifetime = importlib.import_module('pipeline.ReCon-GS.model.birth_lifetime')
+    lifetime = importlib.import_module('pipeline.ReCon-GS.archive.model.birth_lifetime')
     raw = residual_raw_fixture(7)
     update = lifetime.BirthOpacityUpdate(raw['opacity'], torch.tensor([2, 5]), .01, .1, .1)
     with torch.no_grad():
@@ -8043,7 +8051,7 @@ def test_birth_opacity_stream_updates_only_selected_rows_and_resumes_adam():
 
 
 def test_birth_expiration_prioritizes_dead_births_and_preserves_visible_keep():
-    lifetime = importlib.import_module('pipeline.ReCon-GS.model.birth_lifetime')
+    lifetime = importlib.import_module('pipeline.ReCon-GS.archive.model.birth_lifetime')
     opacity = torch.tensor([[-20.], [-20.], [1.], [-20.], [-20.], [-20.]])
     origins = torch.tensor([0, 0, 0, 1, 1, 2])
     changed = torch.zeros(5, dtype=torch.bool)
@@ -8057,8 +8065,8 @@ def test_birth_expiration_prioritizes_dead_births_and_preserves_visible_keep():
 
 
 def test_v6_opacity_packet_and_expiration_replay_preserve_state_and_layout():
-    lifetime = importlib.import_module('pipeline.ReCon-GS.model.birth_lifetime')
-    birth_codec = importlib.import_module('pipeline.ReCon-GS.model.birth_codec')
+    lifetime = importlib.import_module('pipeline.ReCon-GS.archive.model.birth_lifetime')
+    birth_codec = importlib.import_module('pipeline.ReCon-GS.archive.model.birth_codec')
     raw, motion = common_contrast_fixture(component_modes=True, birth_lifetime_enabled=True,
                                           birth_export_format='raw_zlib')
     raw['opacity'][:4] = -20.
@@ -8213,6 +8221,778 @@ def test_canonical_training_order_rejects_missing_sampling_seed():
         assert 'training_view_seed' in str(error)
     else:
         raise AssertionError('Canonical sampling must have an explicit seed')
+
+
+def test_rigid_birth_source_rows_follow_split_and_prune():
+    if not torch.cuda.is_available():
+        return  # libgs' split operation allocates directly on CUDA.
+    torch.manual_seed(17)
+    device = 'cuda'
+    model = ACTIVE_GAUSS.BirthGaussianModel(0)
+    values = dict(
+        _xyz=torch.tensor([[0., 0., 0.], [5., 0., 0.]], device=device),
+        _features_dc=torch.zeros(2, 1, 3, device=device),
+        _features_rest=torch.zeros(2, 0, 3, device=device),
+        _opacity=torch.zeros(2, 1, device=device),
+        _scaling=torch.log(torch.tensor([[.2, .2, .2], [.01, .01, .01]], device=device)),
+        _rotation=torch.tensor([[1., 0., 0., 0.], [1., 0., 0., 0.]], device=device),
+    )
+    for name, value in values.items():
+        setattr(model, name, torch.nn.Parameter(value))
+    model.source_rows = torch.tensor([4, 8], device=device)
+    model.training_setup(SimpleNamespace(
+        percent_dense=.1, position_lr_init=.01, position_lr_final=.001,
+        position_lr_delay_mult=1., position_lr_max_steps=100,
+        feature_lr=.01, opacity_lr=.01, scaling_lr=.01, rotation_lr=.01))
+    model.max_radii2D = torch.zeros(2, device=device)
+    stats = model.adaptive_densify_and_split(
+        torch.tensor([2., 0.], device=device), 1., 1., N=2)
+    assert stats['added'] == 1
+    torch.testing.assert_close(model.source_rows.cpu(), torch.tensor([8, 4, 4]),
+                               rtol=0, atol=0)
+    model.prune_points(torch.tensor([1], device=device))
+    torch.testing.assert_close(model.source_rows.cpu(), torch.tensor([8, 4]),
+                               rtol=0, atol=0)
+    model.prune_points(torch.tensor([0], device=device))
+    torch.testing.assert_close(model.source_rows.cpu(), torch.tensor([4]),
+                               rtol=0, atol=0)
+
+
+def rigid_tree_fixture(**overrides):
+    options = dict(region_count=3, motion_steps=100, birth_steps=100,
+                   tree_edit_interval=10, tree_edit_step=60,
+                   tree_edit_neighbors=2, motion_xyz_step_extent=.01,
+                   motion_rotation_step_rad=.01)
+    options.update(overrides)
+    model = RIGID.RigidResidualTree(RIGID.RigidTreeConfig(**options))
+    xyz = torch.tensor([[-2., 0., 0.], [-1., 0., 0.],
+                        [1., 0., 0.], [2., 0., 0.]])
+    raw_q = torch.tensor([[1., 0., 0., 0.]] * len(xyz))
+    model.setup(xyz, raw_q, 1., frame_index=1)
+    return model
+
+
+def test_rigid_tree_parent_child_pose_is_ordered_about_distinct_pivots():
+    dtype = torch.float64
+    xyz = torch.tensor([[2., 0., 0.]], dtype=dtype)
+    base_q = RIGID.rotation_vector_quaternion(
+        torch.tensor([[0., torch.pi / 2, 0.]], dtype=dtype))
+    owner = torch.tensor([2])
+    parents = torch.tensor([-1, 0, 1])
+    pivots = torch.tensor([[0., 0., 0.], [0., 0., 0.], [1., 0., 0.]], dtype=dtype)
+    translation = torch.tensor([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], dtype=dtype)
+    rotation = torch.tensor([[0., 0., 0.], [0., 0., torch.pi / 2],
+                             [torch.pi / 2, 0., 0.]], dtype=dtype)
+    zeros = torch.zeros(1, 3, dtype=dtype)
+    moved, q = RIGID.compose_pose(xyz, base_q, owner, parents, pivots,
+                                  translation, rotation, zeros, zeros)
+    torch.testing.assert_close(moved, torch.tensor([[1., 2., 1.]], dtype=dtype),
+                               rtol=0, atol=1e-12)
+    rotated_x = RIGID.quaternion_rotate(q, torch.tensor([[1., 0., 0.]], dtype=dtype))
+    torch.testing.assert_close(rotated_x, torch.tensor([[0., 1., 0.]], dtype=dtype),
+                               rtol=0, atol=1e-12)
+
+
+def test_rigid_tree_zero_pose_is_exact_identity_with_nonzero_gradients():
+    model = rigid_tree_fixture()
+    xyz, q = model.forward(1, training=True)
+    assert torch.equal(xyz, model.base_xyz)
+    assert torch.equal(q, model.base_rotation)
+    (xyz[:, 1].sum() + q[:, 2].sum()).backward()
+    assert model.region_rotation.grad is not None
+    assert model.region_rotation.grad[1:].abs().sum() > 0
+    assert model.gs_translation.grad.abs().sum() > 0
+    assert model.gs_rotation.grad.abs().sum() > 0
+
+
+def test_rigid_tree_zero_local_residual_follows_shared_and_root_stays_static():
+    model = rigid_tree_fixture()
+    with torch.no_grad():
+        model.region_translation[1, 0] = .25
+        model.region_translation[2, 1] = -.15
+        model.owner[0] = 0
+    moved, q = model.forward(1)
+    torch.testing.assert_close(moved[0], model.base_xyz[0], rtol=0, atol=0)
+    torch.testing.assert_close(q[0], model.base_rotation[0], rtol=0, atol=0)
+    owner_one = (model.owner == 1).nonzero(as_tuple=True)[0]
+    assert len(owner_one)
+    torch.testing.assert_close(moved[owner_one] - model.base_xyz[owner_one],
+                               torch.tensor([[.25, 0., 0.]]).expand(len(owner_one), -1),
+                               rtol=0, atol=1e-6)
+
+
+def test_rigid_tree_stage_and_first_layout_are_deterministic():
+    model = rigid_tree_fixture(region_count=6)
+    assert model.stage(60) == 'motion_fit'  # Frame 1 cannot edit the tree.
+    model.frame_index = 10
+    assert [model.stage(step) for step in (59, 60, 61, 70, 100)] == [
+        'motion_fit', 'tree_edit', 'motion_fit', 'motion_fit', 'motion_fit']
+    owner, parents = RIGID.initial_layout(model.base_xyz, 6)
+    torch.testing.assert_close(owner, model.owner, rtol=0, atol=0)
+    torch.testing.assert_close(parents, model.parents, rtol=0, atol=0)
+    assert owner.tolist() == [1, 3, 2, 4]
+    assert parents.tolist() == [-1, 0, 0, 0, 0, 0]
+    assert model.update_topology(59) == []
+
+
+def test_rigid_tree_translation_rotation_symbols_and_rate_gradients_are_independent():
+    model = rigid_tree_fixture()
+    with torch.no_grad():
+        model.region_translation[1, 0] = .02
+        model.region_rotation[2, 2] = .03
+        model.gs_translation[0, 1] = .04
+        model.gs_rotation[3, 0] = .05
+    rt, rr, gt, gr = model._values(hard=True)
+    assert rt[1].tolist() == [2, 0, 0] and not bool(rr[1].any())
+    assert rr[2].tolist() == [0, 0, 3] and not bool(rt[2].any())
+    assert gt[0].tolist() == [0, 4, 0] and not bool(gr[0].any())
+    assert gr[3].tolist() == [5, 0, 0] and not bool(gt[3].any())
+    rate = model.loss_terms(60)['rate_loss']
+    rate.backward()
+    for name in ('region_translation', 'region_rotation'):
+        grad = getattr(model, name).grad
+        assert grad is not None and torch.isfinite(grad).all()
+        assert grad.abs().sum() > 0
+    assert model.gs_translation.grad is None
+    assert model.gs_rotation.grad is None
+    diagnostics = model.loss_terms(60)
+    assert diagnostics['gs_translation_active_blocks'] == 1
+    assert diagnostics['gs_rotation_active_blocks'] == 1
+
+
+def test_rigid_tree_proximal_rate_prunes_weak_gs_blocks():
+    model = rigid_tree_fixture(rate_loss_weight=1.)
+    with torch.no_grad():
+        model.gs_translation[0, 1] = .01
+        model.gs_rotation[1, 0] = .01
+    for parameter in (model.gs_translation, model.gs_rotation):
+        state = model.optimizer.state[parameter]
+        state['step'] = torch.tensor(1.)
+        state['exp_avg'] = torch.zeros_like(parameter)
+        state['exp_avg_sq'] = torch.full_like(parameter, 1e-12)
+    model.last_step = 60
+    model._proximal_gs_blocks()
+    assert not bool(model.gs_translation.any())
+    assert not bool(model.gs_rotation.any())
+    assert model.last_metrics['motion/prox_zero_translation_blocks'] >= 1
+    assert model.last_metrics['motion/prox_zero_rotation_blocks'] >= 1
+
+
+def test_rigid_tree_quantized_pose_has_ste_gradient():
+    model = rigid_tree_fixture()
+    with torch.no_grad():
+        model.region_translation[1, 0] = .013
+        model.region_rotation[1, 2] = .013
+    rt, rr, _, _ = model._values()
+    torch.testing.assert_close(rt[1, 0], torch.tensor(.01), rtol=0, atol=1e-8)
+    torch.testing.assert_close(rr[1, 2], torch.tensor(.01), rtol=0, atol=1e-8)
+    xyz, q = model.forward(1, training=True)
+    (xyz[:, 0].sum() + xyz[:, 1].sum() + q[:, 3].sum()).backward()
+    assert model.region_translation.grad[1, 0].abs() > 0
+    assert model.region_rotation.grad[1, 2].abs() > 0
+
+
+def test_rigid_tree_cuda_pose_and_packet_match_cpu_when_available():
+    if not torch.cuda.is_available():
+        return
+    model = rigid_tree_fixture()
+    with torch.no_grad():
+        model.region_translation[1, 0] = .02
+        model.region_rotation[2, 2] = .03
+        model.gs_translation[0, 1] = -.04
+        model.gs_rotation[3, 0] = .05
+    cpu_xyz, cpu_q = model.forward(60)
+    gpu = RIGID.RigidResidualTree(model.config)
+    gpu.setup(model.base_xyz.cuda(), model.base_rotation.cuda(), 1., frame_index=1)
+    with torch.no_grad():
+        for name in ('region_translation', 'region_rotation',
+                     'gs_translation', 'gs_rotation'):
+            getattr(gpu, name).copy_(getattr(model, name).cuda())
+    gpu_xyz, gpu_q = gpu.forward(60)
+    torch.testing.assert_close(gpu_xyz.cpu(), cpu_xyz, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(gpu_q.cpu(), cpu_q, rtol=1e-6, atol=1e-6)
+    values = model._values(hard=True)
+    prior = model.codec_previous_state
+    args = (prior, 1, 1., torch.arange(4), model.owner, model.parents,
+            *values, torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+            torch.empty(0, 4), .01, .01)
+    cpu_packet = RIGID_CODEC.encode_motion(*args)
+    gpu_args = [value.cuda() if isinstance(value, torch.Tensor) else value
+                for value in args]
+    assert RIGID_CODEC.encode_motion(*gpu_args) == cpu_packet
+
+
+def test_rigid_tree_owner_reassignment_preserves_decoded_target():
+    model = rigid_tree_fixture()
+    model.frame_index = 10
+    original_owner = model.owner.clone()
+    row = int((model.owner == 1).nonzero(as_tuple=True)[0][0])
+    with torch.no_grad():
+        model.region_translation[2, 0] = .2
+        model.gs_translation[row, 0] = .2
+    before_xyz, before_q = (value.detach().clone() for value in model.forward(60))
+    edits = model.update_topology(60)
+    assert any(edit['kind'] == 'owner' and edit['row'] == row
+               for edit in edits)
+    assert int(model.owner[row]) != int(original_owner[row])
+    after_xyz, after_q = model.forward(60)
+    torch.testing.assert_close(after_xyz, before_xyz, rtol=0, atol=.0051)
+    torch.testing.assert_close(after_q, before_q, rtol=0, atol=.0051)
+
+
+def test_rigid_tree_reparent_deduplicates_shared_rigid_motion_without_pose_drift():
+    model = rigid_tree_fixture()
+    model.frame_index = 10
+    with torch.no_grad():
+        model.region_translation[1, 0] = .2
+        model.region_translation[2, 0] = .2
+    before_xyz, before_q = (value.detach().clone() for value in model.forward(60))
+    edits = model.update_topology(60)
+    parents = [edit for edit in edits if edit['kind'] == 'parent']
+    assert len(parents) == 1
+    node, parent = parents[0]['node'], parents[0]['parent']
+    assert int(model.parents[node]) == parent
+    assert len(RIGID._topological_order(model.parents)) == len(model.parents) - 1
+    # The new child transform is exactly zero and inherits its parent's +0.2.
+    torch.testing.assert_close(model.region_translation[node], torch.zeros(3),
+                               rtol=0, atol=1e-6)
+    torch.testing.assert_close(model.region_translation[parent, 0], torch.tensor(.2),
+                               rtol=0, atol=1e-6)
+    after_xyz, after_q = model.forward(60)
+    torch.testing.assert_close(after_xyz, before_xyz, rtol=0, atol=.0051)
+    torch.testing.assert_close(after_q, before_q, rtol=0, atol=.0051)
+
+
+def test_rigid_tree_checkpoint_restores_pose_and_adam_next_step():
+    model = rigid_tree_fixture()
+    (model.forward(1, training=True)[0] - model.base_xyz - .03).square().sum().backward()
+    model.optimizer_step()
+    saved = copy.deepcopy(model.capture())
+    recovered = RIGID.RigidResidualTree(model.config)
+    recovered.restore(saved)
+    for name in ('region_translation', 'region_rotation',
+                 'gs_translation', 'gs_rotation'):
+        torch.testing.assert_close(getattr(recovered, name), getattr(model, name),
+                                   rtol=0, atol=0)
+    for original, clone in zip(model.optimizer.state.values(),
+                               recovered.optimizer.state.values()):
+        for key in ('step', 'exp_avg', 'exp_avg_sq'):
+            torch.testing.assert_close(original[key], clone[key], rtol=0, atol=0)
+    for subject in (model, recovered):
+        (subject.forward(2, training=True)[0] - subject.base_xyz - .07).square().sum().backward()
+        subject.optimizer_step()
+    for name in ('region_translation', 'region_rotation',
+                 'gs_translation', 'gs_rotation'):
+        torch.testing.assert_close(getattr(recovered, name), getattr(model, name),
+                                   rtol=0, atol=0)
+
+
+def test_rigid_tree_codec_sparse_fields_birth_and_two_frame_replay():
+    prior_model = rigid_tree_fixture()
+    prior = prior_model.codec_previous_state
+    zero_r = torch.zeros(3, 3, dtype=torch.int16)
+    zero_g = torch.zeros(4, 3, dtype=torch.int16)
+    region_t = zero_r.clone(); region_t[1, 0] = 20
+    region_r = zero_r.clone(); region_r[2, 2] = 10
+    gs_t = torch.zeros(3, 3, dtype=torch.int16); gs_t[0, 1] = 5
+    gs_r = torch.zeros(3, 3, dtype=torch.int16); gs_r[2, 0] = 4
+    rows = torch.tensor([0, 2, 3])
+    owners = prior.owner[rows].clone()
+    birth_xyz = torch.tensor([[8., 1., 0.]])
+    birth_q = torch.tensor([[1., 0., 0., 0.]])
+    args = (prior, 1, 1., rows, owners, prior.parents,
+            region_t, region_r, gs_t, gs_r, torch.tensor([1]),
+            birth_xyz, birth_q, .01, .01)
+    packet = RIGID_CODEC.encode_motion(*args)
+    state = RIGID_CODEC.decode_motion(packet, prior)
+    assert state.frame_index == 1 and len(state.xyz) == 4
+    torch.testing.assert_close(state.xyz[-1], birth_xyz[0], rtol=0, atol=0)
+    assert int(state.owner[-1]) == int(owners[1])
+    expected_xyz, expected_q = RIGID.compose_pose(
+        prior.xyz[rows], prior.rotation[rows], owners, prior.parents,
+        RIGID.region_pivots(prior.xyz[rows], owners, prior.parents),
+        region_t.float() * .01, region_r.float() * .01,
+        gs_t.float() * .01, gs_r.float() * .01)
+    torch.testing.assert_close(state.xyz[:3], expected_xyz, rtol=0, atol=1e-6)
+    torch.testing.assert_close(state.rotation[:3], expected_q, rtol=0, atol=1e-6)
+    zero_packet = RIGID_CODEC.encode_motion(
+        prior, 1, 1., torch.arange(4), prior.owner, prior.parents,
+        zero_r, zero_r, zero_g, zero_g, torch.empty(0, dtype=torch.long),
+        torch.empty(0, 3), torch.empty(0, 4), .01, .01)
+    assert len(zero_packet) < len(packet)
+    second_rows = torch.tensor([0, 2, 3])
+    packet2 = RIGID_CODEC.encode_motion(
+        state, 2, 1., second_rows, state.owner[second_rows], state.parents,
+        zero_r, zero_r, torch.zeros(3, 3, dtype=torch.int16),
+        torch.zeros(3, 3, dtype=torch.int16), torch.tensor([2]),
+        torch.tensor([[9., 0., 0.]]), birth_q, .01, .01)
+    next_state = RIGID_CODEC.decode_motion(packet2, state)
+    torch.testing.assert_close(next_state.xyz[:3], state.xyz[second_rows],
+                               rtol=0, atol=0)
+    assert next_state.frame_index == 2
+    assert int(next_state.owner[-1]) == int(state.owner[2])
+
+
+def test_rigid_tree_codec_rejects_cycles_wrong_state_and_corruption():
+    model = rigid_tree_fixture()
+    state = model.codec_previous_state
+    zero_r = torch.zeros(3, 3, dtype=torch.int16)
+    zero_g = torch.zeros(4, 3, dtype=torch.int16)
+    args = (state, 1, 1., torch.arange(4), state.owner, state.parents,
+            zero_r, zero_r, zero_g, zero_g, torch.empty(0, dtype=torch.long),
+            torch.empty(0, 3), torch.empty(0, 4), .01, .01)
+    packet = RIGID_CODEC.encode_motion(*args)
+    for damaged in (packet[:-1], packet + b'X', b'BAD!' + packet[4:]):
+        try:
+            RIGID_CODEC.decode_motion(damaged, state)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Corrupted rigid stream was accepted')
+    wrong = copy.deepcopy(state)
+    wrong.xyz[0, 0] += 1
+    try:
+        RIGID_CODEC.decode_motion(packet, wrong)
+    except ValueError as error:
+        assert 'digest' in str(error)
+    else:
+        raise AssertionError('Wrong prior state was accepted')
+    cycle = torch.tensor([-1, 2, 1])
+    bad = list(args); bad[5] = cycle
+    try:
+        RIGID_CODEC.encode_motion(*bad)
+    except ValueError as error:
+        assert 'cycle' in str(error).lower()
+    else:
+        raise AssertionError('Parent cycle was accepted')
+
+
+def test_rigid_tree_all_zero_identity_stream_does_not_grow_with_gs_count():
+    sizes = []
+    for count in (256, 1024):
+        xyz = torch.zeros(count, 3)
+        rotation = torch.zeros(count, 4); rotation[:, 0] = 1
+        owner = torch.ones(count, dtype=torch.long)
+        parents = torch.tensor([-1, 0])
+        state = RIGID_CODEC.DecodedState(xyz, rotation, owner, parents, 0)
+        payload = RIGID_CODEC.encode_motion(
+            state, 1, 1., torch.arange(count), owner, parents,
+            torch.zeros(2, 3, dtype=torch.int16),
+            torch.zeros(2, 3, dtype=torch.int16),
+            torch.zeros(count, 3, dtype=torch.int16),
+            torch.zeros(count, 3, dtype=torch.int16),
+            torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+            torch.empty(0, 4), .01, .01)
+        decoded = RIGID_CODEC.decode_motion(payload, state)
+        torch.testing.assert_close(decoded.xyz, xyz, rtol=0, atol=0)
+        sizes.append(len(payload))
+    assert sizes[0] == sizes[1]
+
+
+def test_rigid_tree_hard_rate_matches_actual_packet_and_large_symbol_has_gradient():
+    model = rigid_tree_fixture()
+    with torch.no_grad():
+        model.region_translation[1, 0] = .02
+        model.gs_translation[0, 1] = .99  # 99 signed grid units.
+    hard = int(model.loss_terms(60)['rate_bytes_hard'])
+    surrogate = model.loss_terms(60)['rate_loss']
+    surrogate.backward()
+    assert model.region_translation.grad[1, 0].abs() > 0
+    assert model.gs_translation.grad is None
+    xyz, q = model.materialized_pose()
+    model.register_materialized_layout(xyz, q)
+    with tempfile.TemporaryDirectory() as directory:
+        info = model.export_motion(Path(directory) / 'motion.bin')
+    assert hard == info['raw_stream_bytes']
+    assert info['bytes'] <= hard
+
+
+def test_rigid_tree_birth_inherits_owner_across_survivor_deletions():
+    model = rigid_tree_fixture()
+    pose_xyz, pose_q = model.materialized_pose()
+    birth_xyz = torch.tensor([[7., 0., 0.]])
+    birth_q = torch.tensor([[1., 0., 0., 0.]])
+    source = torch.tensor([1])
+    owner = int(model.owner[1])
+    model.register_materialized_layout(torch.cat((pose_xyz, birth_xyz)),
+                                       torch.cat((pose_q, birth_q)), source)
+    assert int(model.materialized_owner[-1]) == owner
+    with tempfile.TemporaryDirectory() as directory:
+        model.export_motion(Path(directory) / 'motion.bin')
+    state = model.codec_previous_state
+    surviving = torch.tensor([0, 2, 4])
+    model.setup(state.xyz[surviving], state.rotation[surviving], 1.,
+                frame_index=2, previous_rows=surviving)
+    torch.testing.assert_close(model.owner, state.owner[surviving], rtol=0, atol=0)
+    assert int(model.owner[-1]) == owner
+    assert torch.isfinite(model.pivots).all()
+
+
+def test_rigid_birth_appearance_stream_roundtrips_and_rejects_bad_counts():
+    old = dict(xyz=torch.zeros(4, 3), rotation=torch.tensor([[1., 0., 0., 0.]] * 4),
+               logscale=torch.zeros(4, 3), opacity=torch.zeros(4, 1),
+               sh_dc=torch.zeros(4, 1, 3), sh_rest=torch.zeros(4, 2, 3))
+    new = dict(logscale=torch.tensor([[.1, .2, .3], [.4, .5, .6]]),
+               opacity=torch.tensor([[.7], [.8]]),
+               sh_dc=torch.arange(6, dtype=torch.float32).reshape(2, 1, 3),
+               sh_rest=torch.arange(12, dtype=torch.float32).reshape(2, 2, 3))
+    xyz = torch.tensor([[1., 2., 3.], [4., 5., 6.]])
+    rotation = torch.tensor([[1., 0., 0., 0.]] * 2)
+    packet = RIGID_BIRTH_CODEC.encode_birth_attributes(new, 4)
+    decoded = RIGID_BIRTH_CODEC.decode_birth_attributes(packet, old, xyz, rotation)
+    for key, expected in {**new, 'xyz': xyz, 'rotation': rotation}.items():
+        torch.testing.assert_close(decoded[key], expected, rtol=0, atol=0)
+    for bad_packet, bad_xyz in ((packet, xyz[:1]), (packet[:-1], xyz),
+                                (packet + b'X', xyz)):
+        try:
+            RIGID_BIRTH_CODEC.decode_birth_attributes(
+                bad_packet, old, bad_xyz, rotation)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Corrupt birth appearance packet was accepted')
+
+
+def test_rigid_birth_quantization_uses_lineage_and_keeps_periodic_survivors():
+    birth_quantization = importlib.import_module(
+        'pipeline.ReCon-GS.model.birth_quantization')
+    reference = dict(xyz=torch.tensor([[0., 0., 0.], [10., 0., 0.]]),
+                     rotation=torch.tensor([[1., 0., 0., 0.]] * 2),
+                     logscale=torch.zeros(2, 3), opacity=torch.zeros(2, 1),
+                     sh_dc=torch.zeros(2, 1, 3), sh_rest=torch.zeros(2, 0, 3))
+    candidate = SimpleNamespace(
+        _xyz=torch.nn.Parameter(torch.tensor([[.01, 0., 0.], [9.99, 0., 0.]])),
+        _rotation=torch.nn.Parameter(reference['rotation'].clone()),
+        _scaling=torch.nn.Parameter(reference['logscale'].clone()),
+        _opacity=torch.nn.Parameter(torch.full((2, 1), -10.)),
+        _features_dc=torch.nn.Parameter(reference['sh_dc'].clone()),
+        _features_rest=torch.nn.Parameter(reference['sh_rest'].clone()))
+    source = torch.tensor([1, 0])  # Deliberately disagrees with nearest position.
+    view = birth_quantization.QuantizedNewGaussianView(
+        candidate, RIGID_MODULE.BirthConfig(), 1., reference, source)
+    raw, decoded_source = birth_quantization.materialize_quantized_gaussians(
+        reference, view)
+    torch.testing.assert_close(decoded_source, source, rtol=0, atol=0)
+    assert len(raw['xyz']) == 4
+    assert bool((torch.sigmoid(raw['opacity'][-2:]) < .01).all())
+    view.get_opacity.sum().backward()
+    assert candidate._opacity.grad is not None
+    assert bool((candidate._opacity.grad.abs() > 0).all())
+    try:
+        birth_quantization.QuantizedNewGaussianView(
+            candidate, RIGID_MODULE.BirthConfig(), 1., reference,
+            torch.tensor([2, 0]))
+    except ValueError as error:
+        assert 'lineage' in str(error)
+    else:
+        raise AssertionError('Birth source outside reference was accepted')
+
+
+def test_rigid_full_raw_stream_replays_motion_birth_and_manifest_two_frames():
+    import hashlib
+    model = rigid_tree_fixture()
+    state0 = model.codec_previous_state
+    n = len(state0.xyz)
+    raw0 = dict(xyz=state0.xyz, rotation=state0.rotation,
+                logscale=torch.arange(3 * n, dtype=torch.float32).reshape(n, 3) / 10,
+                opacity=torch.arange(n, dtype=torch.float32).reshape(n, 1) / 10,
+                sh_dc=torch.arange(3 * n, dtype=torch.float32).reshape(n, 1, 3) / 10,
+                sh_rest=torch.arange(6 * n, dtype=torch.float32).reshape(n, 2, 3) / 10)
+    newborn_xyz = torch.tensor([[7., 1., 0.]])
+    newborn_q = torch.tensor([[1., 0., 0., 0.]])
+    newborn_attrs = dict(logscale=torch.tensor([[.3, .4, .5]]),
+                         opacity=torch.tensor([[.7]]),
+                         sh_dc=torch.tensor([[[.11, .12, .13]]]),
+                         sh_rest=torch.tensor([[[.1, .2, .3], [.4, .5, .6]]]))
+    region_t = torch.zeros(3, 3, dtype=torch.int16)
+    region_t[1, 0] = 2
+    zero_r = torch.zeros(3, 3, dtype=torch.int16)
+    zero_g = torch.zeros(n, 3, dtype=torch.int16)
+    edited_owner = state0.owner.clone()
+    edited_owner[2] = 1
+    packet1 = RIGID_CODEC.encode_motion(
+        state0, 1, 1., torch.arange(n), edited_owner, state0.parents,
+        region_t, zero_r, zero_g, zero_g, torch.tensor([2]),
+        newborn_xyz, newborn_q, .01, .01)
+    state1 = RIGID_CODEC.decode_motion(packet1, state0)
+    torch.testing.assert_close(state1.birth_sources, torch.tensor([2]),
+                               rtol=0, atol=0)
+    assert int(state1.owner[-1]) == int(edited_owner[2]) != int(state0.owner[2])
+    raw1 = {name: torch.cat((raw0[name], newborn_attrs[name]))
+            for name in ('logscale', 'opacity', 'sh_dc', 'sh_rest')}
+    raw1.update(xyz=state1.xyz, rotation=state1.rotation)
+    zero_g_next = torch.zeros(n + 1, 3, dtype=torch.int16)
+    packet2 = RIGID_CODEC.encode_motion(
+        state1, 2, 1., torch.arange(n + 1), state1.owner, state1.parents,
+        zero_r, zero_r, zero_g_next, zero_g_next,
+        torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+        torch.empty(0, 4), .01, .01)
+    state2 = RIGID_CODEC.decode_motion(packet2, state1)
+
+    def raw_digest(raw):
+        digest = hashlib.sha256()
+        for name in Q.RAW_FIELDS:
+            value = raw[name].detach().cpu().contiguous()
+            digest.update(name.encode())
+            digest.update(str(tuple(value.shape)).encode())
+            digest.update(value.numpy().tobytes())
+        return digest.hexdigest()
+
+    with tempfile.TemporaryDirectory() as directory:
+        stream = Path(directory)
+        reference = stream / 'reference_frame0.npz'
+        np.savez_compressed(reference, **{name: value.numpy()
+                       for name, value in raw0.items()},
+                       owner=state0.owner.numpy(), parents=state0.parents.numpy(),
+                       frame_index=np.array(0, dtype=np.int32))
+        (stream / 'motion_001.bin').write_bytes(packet1)
+        (stream / 'motion_002.bin').write_bytes(packet2)
+        (stream / 'birth_001.bin').write_bytes(
+            RIGID_BIRTH_CODEC.encode_birth_attributes(newborn_attrs, n))
+        manifest1 = dict(frame=1, decoded_state_sha256=state1.digest().hex(),
+                         raw_state_sha256=raw_digest(raw1))
+        manifest2 = dict(frame=2, decoded_state_sha256=state2.digest().hex(),
+                         raw_state_sha256=raw_digest(raw1))
+        (stream / 'frame_001.json').write_text(json.dumps(manifest1))
+        (stream / 'frame_002.json').write_text(json.dumps(manifest2))
+        actual_state, actual_raw = RIGID_REPLAY.replay(stream, reference, through=2)
+        assert actual_state.digest() == state2.digest()
+        for name in Q.RAW_FIELDS:
+            torch.testing.assert_close(actual_raw[name], raw1[name], rtol=0, atol=0)
+        manifest2['raw_state_sha256'] = '0' * 64
+        (stream / 'frame_002.json').write_text(json.dumps(manifest2))
+        try:
+            RIGID_REPLAY.replay(stream, reference, through=2)
+        except ValueError as error:
+            assert 'digest' in str(error)
+        else:
+            raise AssertionError('Wrong replay manifest digest was accepted')
+
+
+def test_rigid_pipeline_motion_freezes_all_old_attributes_and_birth_updates_only_new():
+    class FakeGaussians:
+        def __init__(self, xyz):
+            self._xyz = torch.nn.Parameter(xyz.clone())
+            self._rotation = torch.nn.Parameter(torch.tensor([[1., 0., 0., 0.]] * len(xyz)))
+            self._scaling = torch.nn.Parameter(torch.zeros(len(xyz), 3))
+            self._opacity = torch.nn.Parameter(torch.zeros(len(xyz), 1))
+            self._features_dc = torch.nn.Parameter(torch.zeros(len(xyz), 1, 3))
+            self._features_rest = torch.nn.Parameter(torch.zeros(len(xyz), 0, 3))
+            self.rigid_xyz = None
+            self.rigid_rotation = None
+
+        @property
+        def get_xyz(self):
+            return self._xyz if self.rigid_xyz is None else self.rigid_xyz
+
+    class FakeRenderer:
+        def __init__(self, gaussians):
+            self.gaussians = gaussians
+
+        def __call__(self, viewpoint, background):
+            return dict(render=self.gaussians.get_xyz.mean().expand(3, 2, 2))
+
+    motion = rigid_tree_fixture()
+    old = FakeGaussians(motion.base_xyz)
+    fake = SimpleNamespace(gaussians=old, motion=motion, renderer=FakeRenderer(old),
+        frame_prepared=True, motion_committed=False, frame_finalized=False,
+        trainer=SimpleNamespace(global_step=1), background=torch.zeros(3))
+    RIGID_MODULE.Module._freeze_base(fake)
+    before = {name: getattr(old, name).detach().clone() for name in Q.RAW_ATTRIBUTES}
+    for step in (1, 100):
+        fake.trainer.global_step = step
+        RIGID_MODULE.Module.forward(fake, None, training=True)['render'].sum().backward()
+        motion.optimizer_step()
+        assert fake.renderer.gaussians is old
+        assert old.rigid_xyz is None and old.rigid_rotation is None
+    for name, value in before.items():
+        parameter = getattr(old, name)
+        assert not parameter.requires_grad and parameter.grad is None
+        torch.testing.assert_close(parameter, value, rtol=0, atol=0)
+    assert model_parameter_changed(motion.region_translation)
+
+    newborn = torch.nn.Parameter(torch.tensor([[2., 0., 0.]]))
+    newborn.sum().backward()
+    births = SimpleNamespace(_xyz=newborn, max_radii2D=torch.zeros(1),
+        add_densification_stats=lambda *args, **kwargs: None,
+        optimizer=torch.optim.SGD([newborn], lr=.1))
+    fake.births = births
+    fake.motion_committed = True
+    fake.trainer.global_step = 101
+    fake.motion_steps = 100
+    fake.total_steps = 200
+    fake.config = SimpleNamespace(birth=SimpleNamespace(densify_interval=40))
+    fake.birth_control = dict(split_added=0, pruned=0)
+    package = dict(visibility_filter=torch.ones(len(old._xyz) + 1, dtype=torch.bool),
+                   radii=torch.ones(len(old._xyz) + 1),
+                   viewspace_points=torch.zeros(len(old._xyz) + 1, 3))
+    RIGID_MODULE.Module.post_training_step(fake, package)
+    torch.testing.assert_close(newborn.detach(), torch.tensor([[1.9, -.1, -.1]]),
+                               rtol=0, atol=1e-6)
+    for name, value in before.items():
+        torch.testing.assert_close(getattr(old, name), value, rtol=0, atol=0)
+
+
+def model_parameter_changed(parameter):
+    return bool(parameter.detach().abs().sum() > 0)
+
+
+def test_rigid_pipeline_only_one_method_and_native_first_checkpoint_contract():
+    import yaml
+    from dataclasses import fields
+    config = yaml.safe_load((project_root / 'config' /
+        'fs_rigid_residual_tree_300f_20261011.yaml').read_text())
+    module = config['module']
+    assert module['rigid_tree']['motion_steps'] == 100
+    assert module['rigid_tree']['birth_steps'] == 100
+    assert config['trainer']['num_init_steps'] == 15000
+    assert config['data']['resolution'] == -1
+    assert config['data']['extra_dataset_kwargs']['num_frames'] == 300
+    assert 'rigid_tree' in {field.name for field in fields(RIGID_MODULE.ModuleConfig)}
+    assert not ({'motion_mode', 'quantized_residual', 'flat_cluster',
+                 'sparse_hierarchical'} & module.keys())
+    assert not hasattr(RIGID_MODULE.ModuleConfig(), 'motion_mode')
+    legacy = importlib.import_module('pipeline.ReCon-GS.archive')
+    assert hasattr(legacy.ModuleConfig(), 'motion_mode')
+    for path in (project_root / 'pipeline' / 'ReCon-GS' / name
+                 for name in ('module.py', 'trainer.py', 'data.py')):
+        imports = [node.module or '' for node in ast.walk(ast.parse(path.read_text()))
+                   if isinstance(node, ast.ImportFrom)]
+        assert not any('archive' in name or 'legacy' in name for name in imports)
+    assert RIGID_TRAINER.Trainer.num_steps.fget(SimpleNamespace(
+        is_first_frame=False, module=SimpleNamespace(total_steps=200))) == 200
+
+    events = []
+    gaussians = SimpleNamespace(_xyz=torch.zeros(3, 3),
+                                restore=lambda packet, cfg: events.append('gaussians'))
+    fake = SimpleNamespace(gaussians=gaussians,
+        renderer=SimpleNamespace(gaussians=None),
+        config=SimpleNamespace(gaussian=object(), gaussian_stage2=object(),
+                               rigid_tree=RIGID.RigidTreeConfig(),
+                               initial_opacity_threshold=0.0),
+        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=15000)),
+        current_frame=0, _freeze_base=lambda: events.append('frozen'),
+        reference_count=None)
+    RIGID_MODULE.Module.on_load_checkpoint(fake,
+        dict(global_step=15000, gaussians='shared-first-frame'))
+    assert events == ['gaussians', 'frozen'] and fake.reference_count == 3
+    assert fake.initial_reference['removed_count'] == 0
+    fake.current_frame = 1
+    try:
+        RIGID_MODULE.Module.on_load_checkpoint(fake,
+            dict(global_step=15000, gaussians='shared-first-frame'))
+    except ValueError as error:
+        assert 'first-frame' in str(error)
+    else:
+        raise AssertionError('Native frame-zero checkpoint accepted on later frame')
+
+
+def test_rigid_pipeline_mid_birth_checkpoint_restores_lineage_and_adam():
+    if not torch.cuda.is_available():
+        return  # The libgs Gaussian training setup allocates CUDA statistics.
+    device = 'cuda'
+    gaussian_cfg = RIGID_MODULE.GaussianConfig()
+    birth = ACTIVE_GAUSS.BirthGaussianModel(0)
+    fields = dict(_xyz=torch.tensor([[2., 0., 0.]], device=device),
+                  _rotation=torch.tensor([[1., 0., 0., 0.]], device=device),
+                  _scaling=torch.zeros(1, 3, device=device),
+                  _opacity=torch.zeros(1, 1, device=device),
+                  _features_dc=torch.zeros(1, 1, 3, device=device),
+                  _features_rest=torch.zeros(1, 0, 3, device=device))
+    for name, value in fields.items():
+        setattr(birth, name, torch.nn.Parameter(value))
+    birth.spatial_lr_scale = 1.
+    birth.training_setup(gaussian_cfg)
+    birth.max_radii2D = torch.zeros(1, device=device)
+    birth.source_rows = torch.tensor([2], device=device)
+    birth._xyz.sum().backward()
+    birth.optimizer.step()
+    birth.optimizer.zero_grad(set_to_none=True)
+
+    motion = rigid_tree_fixture()
+    config = RIGID_MODULE.ModuleConfig()
+    config.rigid_tree = motion.config
+    config.gaussian = gaussian_cfg
+    config.gaussian_stage2 = gaussian_cfg
+    base = SimpleNamespace(_xyz=torch.zeros(4, 3, device=device),
+                           capture=lambda: 'gaussians',
+                           restore=lambda packet, cfg: None)
+    source = SimpleNamespace(config=config, gaussians=base, births=birth,
+        motion=motion, frame_prepared=True, frame_finalized=False,
+        motion_committed=True, reference_count=4, frame_report=None,
+        initial_reference=dict(source='native_frame0_checkpoint', threshold=0.0,
+                               original_count=4, retained_count=4, removed_count=0),
+        birth_control=dict(clone_added=1))
+    packet = {}
+    RIGID_MODULE.Module.on_save_checkpoint(source, packet)
+    packet = copy.deepcopy(packet)
+    restored_birth = ACTIVE_GAUSS.BirthGaussianModel(0)
+    events = []
+    resumed = SimpleNamespace(config=config, gaussians=base,
+        renderer=SimpleNamespace(gaussians=None), births=restored_birth,
+        motion=RIGID.RigidResidualTree(motion.config), device=torch.device(device),
+        _freeze_base=lambda: events.append('base_frozen'), current_frame=1,
+        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=15000)))
+    RIGID_MODULE.Module.on_load_checkpoint(resumed, packet)
+    assert resumed.motion_committed and not resumed.frame_finalized
+    assert resumed.initial_reference == source.initial_reference
+    assert not resumed.motion.committed
+    assert all(not parameter.requires_grad for parameter in resumed.motion.parameters())
+    assert events == ['base_frozen']
+    torch.testing.assert_close(restored_birth.source_rows.cpu(), torch.tensor([2]),
+                               rtol=0, atol=0)
+    torch.testing.assert_close(restored_birth._xyz, birth._xyz, rtol=0, atol=0)
+    original_moments = birth.optimizer.state[birth._xyz]
+    restored_moments = restored_birth.optimizer.state[restored_birth._xyz]
+    for key in ('step', 'exp_avg', 'exp_avg_sq'):
+        torch.testing.assert_close(restored_moments[key], original_moments[key],
+                                   rtol=0, atol=0)
+    for candidate in (birth, restored_birth):
+        candidate._xyz.square().sum().backward()
+        candidate.optimizer.step()
+    torch.testing.assert_close(restored_birth._xyz, birth._xyz, rtol=0, atol=0)
+
+
+def test_rigid_pipeline_mid_birth_restore_freezes_motion_on_cpu():
+    motion = rigid_tree_fixture()
+    assert not motion.committed
+    for parameter in motion.parameters():
+        parameter.sum().backward(retain_graph=True)
+    packet = motion.capture()
+    config = RIGID_MODULE.ModuleConfig()
+    config.rigid_tree = motion.config
+    base = SimpleNamespace(_xyz=torch.zeros(4, 3),
+                           restore=lambda saved, cfg: None)
+    resumed = SimpleNamespace(config=config, gaussians=base,
+        renderer=SimpleNamespace(gaussians=None),
+        motion=RIGID.RigidResidualTree(motion.config),
+        _freeze_base=lambda: None, current_frame=1,
+        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=15000)))
+    checkpoint = dict(gaussians='base', rigid_tree_version=1,
+        rigid_tree_config=asdict(config.rigid_tree),
+        rigid_tree_module_config=asdict(config),
+        rigid_tree_frame=dict(prepared=True, finalized=False,
+            motion_committed=True, reference_count=4, report=None,
+            birth_control=dict(clone_added=0)),
+        rigid_tree_motion=packet, births=None)
+    RIGID_MODULE.Module.on_load_checkpoint(resumed, checkpoint)
+    assert resumed.motion_committed and not resumed.motion.committed
+    assert all(not parameter.requires_grad for parameter in resumed.motion.parameters())
+    assert all(parameter.grad is None for parameter in resumed.motion.parameters())
+
+
+def test_rigid_pipeline_single_validation_loader_averages_its_views():
+    logged = []
+    fake = SimpleNamespace(datamodule=SimpleNamespace(eval_names=['test']),
+                           log_dict=lambda record: logged.append(record))
+    rows = [dict(psnr=20., l1=.2), dict(psnr=30., l1=.1)]
+    result = RIGID_MODULE.Module.validation_end(fake, rows, num_loaders=1)
+    torch.testing.assert_close(torch.tensor([result['test']['psnr'], result['test']['l1']]),
+                               torch.tensor([25., .15]), rtol=0, atol=1e-7)
+    assert len(logged) == 1
+    torch.testing.assert_close(torch.tensor([logged[0]['eval-test/psnr'],
+                                            logged[0]['eval-test/l1']]),
+                               torch.tensor([25., .15]), rtol=0, atol=1e-7)
 
 
 if __name__ == '__main__':

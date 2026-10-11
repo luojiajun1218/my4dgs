@@ -59,9 +59,8 @@ def main(argv):
             "ignore", category=FutureWarning, module=r"libgs\.pipeline",
             message=r"You are using `torch\.load` with `weights_only=False`.*",
         )
-        results = pipeline.run()
+        pipeline.run()
     logging.info(f"Finished pipeline {flags.FLAGS.pipeline}.")
-    return results
 
 
 if __name__ == "__main__":

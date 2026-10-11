@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run_recongs_native_stream.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/archive/run_recongs_native_stream.py"
 SPEC = importlib.util.spec_from_file_location("recongs_native_stream", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

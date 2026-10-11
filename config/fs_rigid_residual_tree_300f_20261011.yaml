@@ -1,0 +1,84 @@
+# Fixed spatial regions; every old GS has one region owner and a local rigid residual.
+# Region 0 is an identity reference. No learned gate or attribute update is used.
+# The prior frame's decoded GS state supplies the next frame's motion reference.
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+experiment_name: fs_rigid_residual_tree_300f_20261011
+mode: train
+random_seed: 0
+quiet: false
+gui_enabled: false
+detect_anomaly: false
+data:
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak
+  resolution: -1
+  expected_image_size: [1600, 1199]
+  white_background: false
+  split_train_test: true
+  shuffle: true
+  canonical_training_view_order: true
+  training_view_seed: 0
+  eval_train: false
+  first_frame_eval_train: false
+  eval_test: true
+  extra_dataset_kwargs:
+    num_frames: 300
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+module:
+  sh_degree: 1
+  initial_opacity_threshold: 0.0  # 0 preserves the loaded native frame0; >0 prunes once before the shared decoder reference.
+  lambda_dssim: 0.2
+  num_saving_images: 2
+  lpips_required: true
+  rigid_tree:
+    region_count: 513  # 512 moving regions and one identity region; about 420 GS per moving region initially.
+    parent_max_depth: 8
+    tree_edit_step: 60
+    tree_edit_interval: 10  # Try owner reassignments at step 60 on every tenth frame.
+    tree_edit_neighbors: 8
+    tree_edit_region_trials: 4
+    motion_steps: 100
+    birth_steps: 100
+    motion_xyz_step_extent: 5.0e-6
+    motion_rotation_step_rad: 5.0e-5
+    region_translation_lr: 5.0e-4
+    region_rotation_lr: 1.5e-4
+    gs_translation_lr: 1.0e-4
+    gs_rotation_lr: 1.0e-4
+    adam_betas: [0.9, 0.999]
+    adam_eps: 1.0e-8
+    rate_loss_weight: 0.002
+    relative_motion_loss_weight: 0.001
+    rate_support_temperature: 1.0
+    rate_warmup_steps: 20
+    rate_ramp_steps: 20
+  birth:
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    densify_interval: 40
+    densify_grad_threshold: 1.5e-4
+    opacity_threshold: 0.01
+    new_max_screen_size: 20.0
+    max_new_gaussians: null  # No cap; periodic opacity/screen-size pruning sets the retained count.
+    new_xyz_step_extent: 1.0e-5
+    new_rotation_step: 0.001
+    new_logscale_step: 0.001
+    new_opacity_step: 0.01
+    new_sh_step: 0.001
+  gaussian_stage2:
+    position_lr_init: 0.0024
+    position_lr_final: 2.4e-5
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.075
+    opacity_lr: 0.75
+    scaling_lr: 0.075
+    rotation_lr: 0.015
+    percent_dense: 0.01
+trainer:
+  cache_data_on_device: true
+  num_init_steps: 15000
+  saving_ckpt_steps: [100, 200]
+  saving_ckpt_frames: [1, 29, 49, 63, 99, 149, 199, 249, 299]

@@ -158,7 +158,7 @@ class ExperimentInventoryTests(unittest.TestCase):
 
     def test_storage_console_uses_final_birth_count_and_explicit_denominators(self):
         info = Mock()
-        finish_summary = load_production_method('trainer.py', 'Trainer',
+        finish_summary = load_production_method('archive/legacy_trainer.py', 'Trainer',
             'finish_quantized_frame_summary',
             dict(json=json, time=time, logging=SimpleNamespace(info=info)))
         stream = self.storage_fixture()
@@ -209,7 +209,7 @@ class ExperimentInventoryTests(unittest.TestCase):
 
     def test_validation_fps_uses_total_synchronized_forward_time(self):
         import torch
-        validation_end = load_production_method('module.py', 'Module', 'validation_end',
+        validation_end = load_production_method('archive/legacy_module.py', 'Module', 'validation_end',
                                                 dict(List=List, Union=Union))
         fake = SimpleNamespace(
             datamodule=SimpleNamespace(eval_names=['test']), global_step=2,
@@ -227,7 +227,7 @@ class ExperimentInventoryTests(unittest.TestCase):
 
     def test_step_console_reads_retained_births_after_incremental_buffer_reset(self):
         import torch
-        post_step = load_production_method('module.py', 'Module', 'post_training_step',
+        post_step = load_production_method('archive/legacy_module.py', 'Module', 'post_training_step',
             dict(torch=torch, time=time, Optional=Optional, Callable=Callable,
                  QUANTIZED_MOTION_MODES={'quantized_residual', 'sparse_hierarchical'}))
         info = Mock()

@@ -1,0 +1,107 @@
+"""Replay the necessary rigid-tree frame stream from a shared GS reference."""
+
+import argparse
+import importlib
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
+birth_codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_birth_codec')
+fields = ('xyz', 'rotation', 'logscale', 'opacity', 'sh_dc', 'sh_rest')
+
+
+def replay(directory: Path, reference: Path, through: int):
+    with np.load(reference, allow_pickle=False) as packet:
+        raw = {key: torch.from_numpy(packet[key].copy()) for key in fields}
+        state = codec.DecodedState(
+            raw['xyz'], raw['rotation'],
+            torch.from_numpy(packet['owner'].copy()).long(),
+            torch.from_numpy(packet['parents'].copy()).long(),
+            int(packet['frame_index']))
+    if through < state.frame_index:
+        raise ValueError('Requested frame precedes the decoder reference')
+    for frame in range(state.frame_index + 1, through + 1):
+        motion_file = directory / f'motion_{frame:03d}.bin'
+        decoded = codec.decode_motion(motion_file.read_bytes(), state)
+        old_count = len(state.xyz)
+        if len(decoded.xyz) < old_count:
+            raise ValueError('This active stream does not delete old GS')
+        birth_count = len(decoded.xyz) - old_count
+        current = {name: value.clone() for name, value in raw.items()}
+        current['xyz'] = decoded.xyz[:old_count]
+        current['rotation'] = decoded.rotation[:old_count]
+        birth_file = directory / f'birth_{frame:03d}.bin'
+        if birth_count:
+            newborn = birth_codec.decode_birth_attributes(
+                birth_file.read_bytes(), current, decoded.xyz[old_count:],
+                decoded.rotation[old_count:])
+            sources = decoded.birth_sources
+            if sources is None or len(sources) != birth_count:
+                raise ValueError('Motion stream lost birth attachment rows')
+            if not torch.equal(decoded.owner[old_count:],
+                               decoded.owner[:old_count][sources]):
+                raise ValueError('Birth owner differs from encoded source owner')
+            for name in fields:
+                current[name] = torch.cat((current[name], newborn[name]))
+            if (not torch.allclose(current['xyz'], decoded.xyz, rtol=1e-5,
+                                   atol=1e-6) or
+                    not torch.allclose(current['rotation'], decoded.rotation,
+                                       rtol=1e-5, atol=1e-6)):
+                raise ValueError('Birth attributes disagree with decoded motion')
+        elif birth_file.exists():
+            raise ValueError('Unexpected birth stream for empty birth frame')
+        manifest_path = directory / f'frame_{frame:03d}.json'
+        if manifest_path.exists():
+            import json
+            import hashlib
+            manifest = json.loads(manifest_path.read_text())
+            digest = hashlib.sha256()
+            for name in fields:
+                value = current[name].detach().cpu().contiguous()
+                digest.update(name.encode())
+                digest.update(str(tuple(value.shape)).encode())
+                digest.update(value.numpy().tobytes())
+            if (manifest['frame'] != frame or
+                    manifest['decoded_state_sha256'] != decoded.digest().hex() or
+                    manifest['raw_state_sha256'] != digest.hexdigest()):
+                raise ValueError('Frame manifest state digest mismatch')
+        state, raw = decoded, current
+    return state, raw
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('stream_dir', type=Path)
+    parser.add_argument('--reference', type=Path,
+                        help='Reference NPZ; defaults to the first reference in stream_dir')
+    parser.add_argument('--through', type=int,
+                        help='Last frame to decode; defaults to the last motion file')
+    parser.add_argument('--save-npz', type=Path,
+                        help='Optionally write decoded raw GS attributes')
+    args = parser.parse_args()
+    directory = args.stream_dir
+    references = sorted(directory.glob('reference_frame*.npz'))
+    reference = args.reference or (references[0] if references else None)
+    if reference is None:
+        parser.error('No decoder reference found')
+    motions = sorted(directory.glob('motion_*.bin'))
+    if args.through is None and not motions:
+        parser.error('No motion frames found; pass --through for reference only')
+    through = args.through if args.through is not None else int(motions[-1].stem[-3:])
+    state, raw = replay(directory, reference, through)
+    if args.save_npz:
+        args.save_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(args.save_npz,
+            **{name: value.cpu().numpy() for name, value in raw.items()})
+    print(f'frame={state.frame_index} gs={len(state.xyz)} '
+          f'decoder_sha256={state.digest().hex()}')
+
+
+if __name__ == '__main__':
+    main()
