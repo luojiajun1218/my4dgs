@@ -41,7 +41,13 @@ class DecodedState:
 
     @classmethod
     def restore(cls, packet):
-        return cls(**packet)
+        # torch.load(map_location='cuda') moves checkpoint tensors, but decoded
+        # states are CPU codec data. Preserve every tensor's saved dtype.
+        fields = ('xyz', 'rotation', 'owner', 'parents', 'birth_sources')
+        restored = {name: (None if packet.get(name) is None else
+                           torch.as_tensor(packet[name]).detach().cpu().contiguous())
+                    for name in fields}
+        return cls(**restored, frame_index=int(packet['frame_index']))
 
     def digest(self):
         digest = hashlib.sha256()
