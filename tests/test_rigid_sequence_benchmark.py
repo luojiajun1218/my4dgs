@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -12,10 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import benchmark_rigid_residual_tree as benchmark
 
 
-def frame_row(frame, seconds, psnr, decode_seconds=0.):
+def frame_row(frame, seconds, psnr, decode_seconds=0., motion_bytes=0,
+              birth_bytes=0):
     return dict(frame=frame, timed_renders=50, render_seconds=seconds,
                 file_decode_verify_seconds=decode_seconds,
                 upload_seconds=decode_seconds,
+                motion_bytes=motion_bytes, birth_bytes=birth_bytes,
+                encoded_bytes=motion_bytes + birth_bytes,
                 quality=dict(psnr=psnr))
 
 
@@ -45,7 +49,8 @@ class SequenceAggregationTests(unittest.TestCase):
 
     def test_all_300_and_dynamic_299_ranges_and_segment_weights(self):
         rows = [frame_row(frame, 1. if frame < 150 else 2.,
-                          30. + frame / 1000., decode_seconds=999.)
+                          30. + frame / 1000., decode_seconds=999.,
+                          motion_bytes=frame, birth_bytes=2 * frame)
                 for frame in range(300)]
         result = benchmark._sequence_groups(rows, segment_size=50)
         self.assertEqual(result['all_frames']['frame_count'], 300)
@@ -61,6 +66,47 @@ class SequenceAggregationTests(unittest.TestCase):
                           for x in result['dynamic_segments']],
                          [(1, 50), (51, 100), (101, 150),
                           (151, 200), (201, 250), (251, 299)])
+        storage = result['dynamic_frames']['storage']
+        self.assertEqual(storage['dynamic_frame_count'], 299)
+        self.assertEqual(storage['motion_bytes_total'], sum(range(1, 300)))
+        self.assertEqual(storage['birth_bytes_total'], 2 * sum(range(1, 300)))
+        self.assertEqual(storage['encoded_bytes_total'], 3 * sum(range(1, 300)))
+        self.assertEqual(storage['encoded_bytes_mean'], 450.)
+        self.assertAlmostEqual(storage['encoded_bytes_p95'], 3 * 284.1)
+        self.assertEqual(storage['encoded_bytes_max'], 897)
+        self.assertEqual(result['all_segments'][0]['storage']['encoded_bytes_total'],
+                         3 * sum(range(1, 50)))
+        self.assertEqual(result['bootstrap_frame0']['storage']['dynamic_frame_count'], 0)
+
+    def test_cache_selection_honors_explicit_flags(self):
+        module = SimpleNamespace(gaussians=SimpleNamespace(render_attribute_cache=True))
+        for requested, expected in ((None, True), (True, True), (False, False)):
+            with self.subTest(requested=requested):
+                args = SimpleNamespace(render_attribute_cache=requested)
+                self.assertIs(benchmark._selected_render_cache(module, args), expected)
+
+    def test_actual_packet_sizes_must_match_saved_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stream = Path(directory)
+            (stream / 'motion_001.bin').write_bytes(b'12345')
+            (stream / 'birth_001.bin').write_bytes(b'ab')
+            manifest = dict(motion='motion_001.bin', birth='birth_001.bin')
+            summary = dict(motion=dict(bytes=5), birth=dict(archive_bytes=2),
+                           encoded_bytes=7, shared_reference_bytes=11,
+                           decoder_reference='reference_frame0.npz')
+            measured = benchmark._actual_frame_storage(
+                stream, 1, manifest, summary, 11, 'reference_frame0.npz')
+            self.assertEqual(measured, dict(motion_bytes=5, birth_bytes=2,
+                                            encoded_bytes=7))
+            summary['encoded_bytes'] = 8
+            with self.assertRaisesRegex(ValueError, 'storage summary'):
+                benchmark._actual_frame_storage(
+                    stream, 1, manifest, summary, 11, 'reference_frame0.npz')
+            summary['encoded_bytes'] = 7
+            (stream / 'birth_001.bin').write_bytes(b'abcd')
+            with self.assertRaisesRegex(ValueError, 'storage summary'):
+                benchmark._actual_frame_storage(
+                    stream, 1, manifest, summary, 11, 'reference_frame0.npz')
 
     def test_missing_duplicate_and_nonpositive_samples_fail(self):
         for rows in ([frame_row(0, 1., 30.), frame_row(2, 1., 30.)],

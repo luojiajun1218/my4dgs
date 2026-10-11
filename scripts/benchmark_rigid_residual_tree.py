@@ -355,7 +355,7 @@ def summarize_render_frames(rows):
     low, high = int(rank), min(len(fps_values) - 1, int(rank) + 1)
     p05 = fps_values[low] + (fps_values[high] - fps_values[low]) * (rank - low)
     psnrs = [float(row['quality']['psnr']) for row in rows]
-    return dict(first_frame=min(frame_ids), last_frame=max(frame_ids),
+    result = dict(first_frame=min(frame_ids), last_frame=max(frame_ids),
         frame_count=len(rows), total_timed_renders=renders,
         total_render_seconds=seconds, aggregate_fps=renders / seconds,
         frame_fps_min=fps_values[0], frame_fps_p05=p05,
@@ -363,6 +363,33 @@ def summarize_render_frames(rows):
         frame_fps_max=fps_values[-1],
         psnr_mean=sum(psnrs) / len(psnrs), psnr_min=min(psnrs),
         psnr_max=max(psnrs))
+    for metric in ('ssim', 'l1'):
+        if all(metric in row['quality'] for row in rows):
+            values = [float(row['quality'][metric]) for row in rows]
+            result[f'{metric}_mean'] = sum(values) / len(values)
+            result[f'{metric}_min'] = min(values)
+            result[f'{metric}_max'] = max(values)
+    return result
+
+
+def _summarize_storage(rows):
+    """Actual dynamic packet bytes; the one-time bootstrap is reported apart."""
+    dynamic = [row for row in rows if int(row['frame']) > 0]
+    sizes = sorted(int(row['encoded_bytes']) for row in dynamic)
+    motion = sum(int(row['motion_bytes']) for row in dynamic)
+    birth = sum(int(row['birth_bytes']) for row in dynamic)
+    if not sizes:
+        return dict(dynamic_frame_count=0, motion_bytes_total=0,
+                    birth_bytes_total=0, encoded_bytes_total=0,
+                    encoded_bytes_mean=None, encoded_bytes_p95=None,
+                    encoded_bytes_max=None)
+    rank = .95 * (len(sizes) - 1)
+    low, high = int(rank), min(len(sizes) - 1, int(rank) + 1)
+    return dict(dynamic_frame_count=len(sizes), motion_bytes_total=motion,
+                birth_bytes_total=birth, encoded_bytes_total=motion + birth,
+                encoded_bytes_mean=(motion + birth) / len(sizes),
+                encoded_bytes_p95=sizes[low] + (sizes[high] - sizes[low]) * (rank - low),
+                encoded_bytes_max=sizes[-1])
 
 
 def _sequence_groups(rows, segment_size):
@@ -372,14 +399,19 @@ def _sequence_groups(rows, segment_size):
     if frames != list(range(len(rows))):
         raise ValueError('Complete sequence must contain ordered frames 0..N-1')
     dynamic = rows[1:]
-    all_segments = [summarize_render_frames(rows[start:start + segment_size])
+    def group(part):
+        summary = summarize_render_frames(part)
+        summary['storage'] = _summarize_storage(part)
+        return summary
+
+    all_segments = [group(rows[start:start + segment_size])
                     for start in range(0, len(rows), segment_size)]
-    dynamic_segments = [summarize_render_frames(
+    dynamic_segments = [group(
         dynamic[start:start + segment_size])
         for start in range(0, len(dynamic), segment_size)]
-    return dict(bootstrap_frame0=summarize_render_frames(rows[:1]),
-                all_frames=summarize_render_frames(rows),
-                dynamic_frames=summarize_render_frames(dynamic),
+    return dict(bootstrap_frame0=group(rows[:1]),
+                all_frames=group(rows),
+                dynamic_frames=group(dynamic),
                 all_segments=all_segments,
                 dynamic_segments=dynamic_segments)
 
@@ -396,6 +428,27 @@ def _validate_stream_manifest(stream, frame, decoded, raw, reference):
             manifest.get('reference') != str(reference)):
         raise ValueError(f'Frame {frame} decoded state differs from manifest')
     return manifest
+
+
+def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
+                          relative_reference):
+    """Stat packet files and reject stale or misleading saved size metadata."""
+    motion_name = f'motion_{frame:03d}.bin'
+    birth_name = f'birth_{frame:03d}.bin'
+    if manifest.get('motion') != motion_name or manifest.get('birth') not in (None, birth_name):
+        raise ValueError(f'Frame {frame} manifest packet names differ from expected files')
+    motion_bytes = (stream / motion_name).stat().st_size
+    birth_bytes = (stream / birth_name).stat().st_size if manifest['birth'] else 0
+    saved_motion = summary['motion']['bytes']
+    saved_birth = summary['birth']['archive_bytes'] if summary.get('birth') else 0
+    if (saved_motion != motion_bytes or saved_birth != birth_bytes or
+            summary['encoded_bytes'] != motion_bytes + birth_bytes or
+            summary['shared_reference_bytes'] != reference_bytes or
+            summary['decoder_reference'] != relative_reference or
+            (summary.get('birth') is None) != (manifest['birth'] is None)):
+        raise ValueError(f'Frame {frame} saved storage summary differs from actual files')
+    return dict(motion_bytes=motion_bytes, birth_bytes=birth_bytes,
+                encoded_bytes=motion_bytes + birth_bytes)
 
 
 def _time_sequence_render(module, view, warmups, timed):
@@ -428,6 +481,12 @@ def _sequence_quality(module, view, expected, tolerance, cache_enabled):
     return quality, delta, difference
 
 
+def _selected_render_cache(module, args):
+    return (module.gaussians.render_attribute_cache
+            if args.render_attribute_cache is None else
+            args.render_attribute_cache)
+
+
 def _run_sequence(args, config, run, device, first_gpu_check):
     import torch
 
@@ -453,7 +512,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
     state, raw = _load_reference(reference, config.module.rigid_tree.region_count)
     if state.frame_index != 0:
         raise ValueError('Complete sequence must start from reference frame0')
-    cache_enabled = module.gaussians.render_attribute_cache
+    cache_enabled = _selected_render_cache(module, args)
+    reference_bytes = reference.stat().st_size
     checks = [dict(after_frame=None, status=first_gpu_check)]
     rows = []
     tolerance = dict(psnr=args.psnr_tolerance,
@@ -464,8 +524,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         if frame:
             read_started = time.perf_counter()
             state, raw = _decode_frame(stream, frame, state, raw)
-            _validate_stream_manifest(stream, frame, state, raw,
-                                      relative_reference)
+            manifest = _validate_stream_manifest(stream, frame, state, raw,
+                                                 relative_reference)
             decode_verify_seconds = time.perf_counter() - read_started
         else:
             decode_verify_seconds = 0.0
@@ -477,10 +537,14 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         if test_views != 1:
             raise ValueError('Complete-sequence cam00 PSNR needs one test view per frame')
         expected = None
+        storage = dict(motion_bytes=0, birth_bytes=0, encoded_bytes=0)
         if frame:
             summary = json.loads((run / 'frame_summary' /
                 f'frame_{frame:03d}.json').read_text())
             expected = summary['evaluation']['test']
+            storage = _actual_frame_storage(
+                stream, frame, manifest, summary, reference_bytes,
+                relative_reference)
         quality, difference, cache_difference = _sequence_quality(
             module, view, expected, tolerance, cache_enabled)
         seconds = _time_sequence_render(
@@ -493,7 +557,14 @@ def _run_sequence(args, config, run, device, first_gpu_check):
             timed_renders=args.sequence_renders,
             render_seconds=seconds, render_fps=args.sequence_renders / seconds,
             file_decode_verify_seconds=decode_verify_seconds,
-            upload_seconds=upload_seconds))
+            upload_seconds=upload_seconds, **storage))
+        if (frame + 1) % 50 == 0 or frame == num_frames - 1:
+            completed = summarize_render_frames(rows)
+            total_bytes = sum(row['encoded_bytes'] for row in rows)
+            print(f"Sequence {frame + 1}/{num_frames}: "
+                  f"render {completed['aggregate_fps']:.2f} FPS, "
+                  f"mean PSNR {completed['psnr_mean']:.3f} dB, "
+                  f"dynamic packets {total_bytes} bytes", flush=True)
         if ((frame + 1) % args.gpu_check_interval == 0 or
                 frame == num_frames - 1):
             checks.append(dict(after_frame=frame,
@@ -504,6 +575,11 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         run=str(run), stream_dir=str(stream.resolve()), reference=str(reference),
         expected_frames=num_frames, measured_frames=len(rows),
         image_shape=[3, 1199, 1600], cache_enabled=cache_enabled,
+        gpu_name=torch.cuda.get_device_name(device),
+        storage=dict(bootstrap_reference_bytes=reference_bytes,
+                     dynamic_packets=_summarize_storage(rows),
+                     total_reference_and_dynamic_bytes=(
+                         reference_bytes + sum(row['encoded_bytes'] for row in rows))),
         timing_protocol=dict(warmups_per_frame=args.sequence_warmups,
             timed_full_renders_per_frame=args.sequence_renders,
             cuda_synchronize_before_and_after=True,
@@ -652,9 +728,7 @@ def main():
             raise ValueError(f'Checkpoint and decoded stream differ: {exact_checkpoint_stream}')
     selected_raw = checkpoint_raw if checkpoint_raw is not None else stream_raw
     _install_raw(module, selected_raw, device)
-    cache_enabled = (module.gaussians.render_attribute_cache
-                     if args.render_attribute_cache is None else
-                     args.render_attribute_cache)
+    cache_enabled = _selected_render_cache(module, args)
     module.gaussians.render_attribute_cache = False
     with torch.no_grad():
         uncached_image = _render_checked(module, view)
