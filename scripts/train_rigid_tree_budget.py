@@ -802,10 +802,12 @@ def run_single_trial(config_path: Path, snapshot: Path, frame: int):
     invokes its unchanged frame_training_loop. Keeping all 300 scene frames
     preserves the exact camera extent used by the full-sequence baseline.
     """
+    from absl import logging
     from omegaconf import OmegaConf
     from libgs.pipeline.loader import load_pipeline
     from libgs.utils.config import to_structured
 
+    logging.set_verbosity(logging.INFO)
     snapshot = snapshot.resolve(strict=True)
     if str(snapshot) not in sys.path:
         sys.path.insert(0, str(snapshot))
