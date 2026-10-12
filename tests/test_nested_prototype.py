@@ -9432,6 +9432,280 @@ def test_rigid_pipeline_single_validation_loader_averages_its_views():
                                torch.tensor([25., .15]), rtol=0, atol=1e-7)
 
 
+def test_rigid_actual_budget_uses_strict_complete_bytes_and_train_only():
+    budget = importlib.import_module('scripts.train_rigid_tree_budget')
+
+    class PoisonTest:
+        def __getitem__(self, key):
+            raise AssertionError(f'Test metric leaked into selection: {key}')
+
+    summary = dict(evaluation=dict(train=dict(l1=.04, ssim=.9, psnr=28.),
+                                   test=PoisonTest()))
+    loss, metrics = budget.train_image_loss(summary, .2)
+    torch.testing.assert_close(torch.tensor(loss), torch.tensor(.052),
+                               rtol=0, atol=1e-8)
+    assert metrics == dict(l1=.04, ssim=.9, psnr=28.)
+    candidates = [dict(train_image_loss=.04, encoded_bytes=49_999),
+                  dict(train_image_loss=.01, encoded_bytes=50_000),
+                  dict(train_image_loss=.039, encoded_bytes=49_998)]
+    assert budget.select_candidate(candidates, 50_000, 1e-9) is candidates[2]
+    assert budget.select_candidate(candidates[1:], 49_998, 1e-9) is None
+    tied = [dict(train_image_loss=.039, encoded_bytes=45_000),
+            dict(train_image_loss=.039 + 1e-10, encoded_bytes=44_999)]
+    assert budget.select_candidate(tied, 50_000, 1e-9) is tied[1]
+
+
+def test_rigid_actual_budget_checkpoint_adapter_only_changes_whitelist():
+    budget = importlib.import_module('scripts.train_rigid_tree_budget')
+    state = torch.arange(6.)
+    rng = dict(torch=torch.tensor([2, 3], dtype=torch.uint8))
+    packet = dict(rigid_tree_version=1, current_frame=9, global_step=1400,
+        rigid_tree_frame=dict(finalized=True), gaussians=state, rng_state=rng,
+        rigid_tree_data_config=dict(extra_dataset_kwargs=dict(num_frames=300),
+                                    eval_train=False, eval_test=True, sentinel=3),
+        rigid_tree_trainer_config=dict(saving_ckpt_frames=[1, 299],
+                                       saving_ckpt_steps=[1200, 1400], sentinel=5),
+        rigid_tree_module_config=dict(rigid_tree=dict(rate_loss_weight=.03), sentinel=7),
+        rigid_tree_config=dict(rate_loss_weight=.03, sentinel=11),
+        rigid_tree_motion=dict(config=dict(rate_loss_weight=.03),
+                               tensors=state, optimizer=object()))
+    original = copy.deepcopy(packet)
+    trial = dict(data=dict(extra_dataset_kwargs=dict(num_frames=300)),
+                 module=dict(rigid_tree=dict(rate_loss_weight=.02,
+                                             motion_steps=1200, birth_steps=200)))
+    adapted = budget.adapt_rigid_checkpoint(packet, trial, 10)
+    assert adapted['gaussians'] is state and adapted['rng_state'] is rng
+    assert adapted['rigid_tree_motion']['tensors'] is state
+    assert adapted['rigid_tree_motion']['optimizer'] is packet['rigid_tree_motion']['optimizer']
+    assert adapted['rigid_tree_config']['rate_loss_weight'] == .02
+    assert adapted['rigid_tree_module_config']['rigid_tree']['rate_loss_weight'] == .02
+    assert adapted['rigid_tree_motion']['config']['rate_loss_weight'] == .02
+    assert adapted['rigid_tree_data_config']['extra_dataset_kwargs']['num_frames'] == 300
+    assert adapted['rigid_tree_trainer_config']['saving_ckpt_frames'] == [10]
+    assert adapted['rigid_tree_trainer_config']['saving_ckpt_steps'] == [1400]
+    assert packet['rigid_tree_config'] == original['rigid_tree_config']
+    assert packet['rigid_tree_data_config'] == original['rigid_tree_data_config']
+    torch.testing.assert_close(packet['gaussians'], original['gaussians'],
+                               rtol=0, atol=0)
+
+
+def test_rigid_actual_budget_rng_digest_is_value_based_and_native_is_missing():
+    import random
+    budget = importlib.import_module('scripts.train_rigid_tree_budget')
+    rng = dict(torch=torch.tensor([1, 2, 3], dtype=torch.uint8),
+               cuda=[torch.tensor([4, 5], dtype=torch.uint8)],
+               python=random.Random(17).getstate(),
+               numpy=np.random.RandomState(23).get_state())
+    packet = dict(rng_state=rng)
+    digest = budget._rng_sha256(packet)
+    assert isinstance(digest, str) and len(digest) == 64
+    assert budget._rng_sha256({}) is None
+    assert budget._rng_sha256(dict(rng_state=None)) is None
+    assert budget._rng_sha256(copy.deepcopy(packet)) == digest
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'rng.pth'
+        torch.save(packet, path)
+        restored = torch.load(path, map_location='cpu', weights_only=False)
+    assert budget._rng_sha256(restored) == digest
+    restored['rng_state']['torch'][0] ^= 1
+    assert budget._rng_sha256(restored) != digest
+
+
+def test_rigid_actual_budget_single_frame_worker_matches_resume_transitions():
+    budget = importlib.import_module('scripts.train_rigid_tree_budget')
+    with tempfile.TemporaryDirectory() as directory:
+        config_path = Path(directory) / 'trial.yaml'
+        config_path.write_text('{}')
+        for frame, source_frame, source_step, expected in (
+                (1, 0, 15000, ['setup', 'train:1:0']),
+                (10, 9, 1400, ['setup', 'restore_rng', 'begin_next', 'train:10:0'])):
+            events = []
+            data = SimpleNamespace(current_frame=source_frame)
+            module = SimpleNamespace(frame_finalized=True,
+                begin_next_frame=lambda: events.append('begin_next'))
+
+            class FakeTrainer:
+                config = SimpleNamespace(num_init_steps=15000)
+                datamodule = data
+                global_step = source_step
+                _resume_rng = 'saved_rng'
+                num_steps = 1400
+
+                @property
+                def current_frame(self):
+                    return self.datamodule.current_frame
+
+                def setup(self, loaded_module, ckpt_path):
+                    assert loaded_module is module and ckpt_path == 'source.pth'
+                    events.append('setup')
+
+                def _restore_rng(self, state):
+                    assert state == 'saved_rng'
+                    events.append('restore_rng')
+
+                def frame_training_loop(self):
+                    events.append(f'train:{self.current_frame}:{self.global_step}')
+
+            trainer = FakeTrainer()
+            config = SimpleNamespace(mode='train', gui_enabled=False,
+                ckpt_path='source.pth', data=SimpleNamespace(
+                    extra_dataset_kwargs={'num_frames': 300}))
+
+            class FakePipeline:
+                def __init__(self, loaded_config):
+                    assert loaded_config is config
+                    self.module = module
+                    self.trainer = trainer
+
+            with patch('libgs.pipeline.loader.load_pipeline',
+                       return_value=(object, FakePipeline)), \
+                    patch('libgs.utils.config.to_structured',
+                          return_value=(config, {})):
+                budget.run_single_trial(config_path, project_root, frame)
+            assert events == expected
+            assert trainer._resume_rng == ('saved_rng' if frame == 1 else None)
+
+
+def test_rigid_actual_budget_append_replays_complete_selected_frame():
+    budget = importlib.import_module('scripts.train_rigid_tree_budget')
+    quant = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
+    state0 = rigid_tree_fixture().codec_previous_state
+    count = len(state0.xyz)
+    raw0 = dict(xyz=state0.xyz, rotation=state0.rotation,
+                logscale=torch.zeros(count, 3), opacity=torch.zeros(count, 1),
+                sh_dc=torch.zeros(count, 1, 3), sh_rest=torch.zeros(count, 2, 3))
+    newborn_xyz = torch.tensor([[7., 1., 0.]])
+    newborn_q = torch.tensor([[1., 0., 0., 0.]])
+    newborn_attrs = dict(logscale=torch.tensor([[.3, .4, .5]]),
+                         opacity=torch.tensor([[.7]]),
+                         sh_dc=torch.tensor([[[.11, .12, .13]]]),
+                         sh_rest=torch.tensor([[[.1, .2, .3], [.4, .5, .6]]]))
+    zero_region = torch.zeros(len(state0.parents), 3, dtype=torch.int16)
+    zero_gs = torch.zeros(count, 3, dtype=torch.int16)
+    packet = RIGID_CODEC.encode_motion(
+        state0, 1, 1., torch.arange(count), state0.owner, state0.parents,
+        zero_region, zero_region, zero_gs, zero_gs, torch.tensor([1]),
+        newborn_xyz, newborn_q, .01, .01)
+    decoded = RIGID_CODEC.decode_motion(packet, state0)
+    birth = RIGID_BIRTH_CODEC.encode_birth_attributes(newborn_attrs, count)
+    raw1 = {name: torch.cat((raw0[name], newborn_attrs[name]))
+            for name in ('logscale', 'opacity', 'sh_dc', 'sh_rest')}
+    raw1.update(xyz=decoded.xyz, rotation=decoded.rotation)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        trial = root / 'trial'
+        stream = trial / 'frame_storage' / 'rigid_tree'
+        stream.mkdir(parents=True)
+        (trial / 'frame_summary').mkdir()
+        reference = stream / 'reference_frame0.npz'
+        np.savez_compressed(reference, **{name: value.numpy()
+                            for name, value in raw0.items()},
+                            owner=state0.owner.numpy(), parents=state0.parents.numpy(),
+                            frame_index=np.array(0, dtype=np.int32),
+                            extent=np.array(1., dtype=np.float64),
+                            region_count=np.array(len(state0.parents), dtype=np.int32))
+        (stream / 'motion_001.bin').write_bytes(packet)
+        (stream / 'birth_001.bin').write_bytes(birth)
+        manifest = dict(frame=1, reference='frame_storage/rigid_tree/reference_frame0.npz',
+                        motion='motion_001.bin', birth='birth_001.bin',
+                        old_count=count, birth_count=1, total_count=count + 1,
+                        decoded_state_sha256=decoded.digest().hex(),
+                        raw_state_sha256=quant.reference_digest(raw1))
+        (stream / 'frame_001.json').write_text(json.dumps(manifest))
+        summary = dict(frame=1, motion=dict(path=str(stream / 'motion_001.bin'),
+                                            bytes=len(packet)),
+                       birth=dict(path=str(stream / 'birth_001.bin'),
+                                  archive_bytes=len(birth)),
+                       encoded_bytes=len(packet) + len(birth),
+                       materialized_sha256=quant.reference_digest(raw1),
+                       evaluation=dict(train=dict(l1=.03, ssim=.9, psnr=30.),
+                                       test=dict(psnr=29.)))
+        (trial / 'frame_summary' / 'frame_001.json').write_text(json.dumps(summary))
+        aggregate = root / 'aggregate'
+        result, actual_raw, extent, costs = budget.append_selected_frame(
+            aggregate, trial, 1, state0, raw0, project_root, None,
+            len(state0.parents), .02)
+        assert result.digest() == decoded.digest() and extent == 1.
+        assert costs['encoded_bytes'] == len(packet) + len(birth)
+        assert costs['raw_state_sha256'] == quant.reference_digest(raw1)
+        official, official_raw = RIGID_REPLAY.replay(
+            aggregate / 'frame_storage' / 'rigid_tree',
+            aggregate / budget.REFERENCE, through=1)
+        assert official.digest() == decoded.digest()
+        for name in quant.RAW_FIELDS:
+            torch.testing.assert_close(official_raw[name], actual_raw[name],
+                                       rtol=0, atol=0)
+        saved_summary = json.loads((aggregate / 'frame_summary' /
+                                    'frame_001.json').read_text())
+        assert saved_summary['decoder_reference'] == budget.REFERENCE
+        assert saved_summary['shared_reference_bytes'] == (
+            aggregate / budget.REFERENCE).stat().st_size
+
+        next_trial = root / 'next_trial'
+        next_stream = next_trial / 'frame_storage' / 'rigid_tree'
+        next_stream.mkdir(parents=True)
+        (next_trial / 'frame_summary').mkdir()
+        np.savez_compressed(next_stream / 'reference_frame1.npz',
+                            **{name: value.numpy() for name, value in raw1.items()},
+                            owner=decoded.owner.numpy(), parents=decoded.parents.numpy(),
+                            frame_index=np.array(1, dtype=np.int32),
+                            extent=np.array(1., dtype=np.float64),
+                            region_count=np.array(len(decoded.parents), dtype=np.int32))
+        altered_raw = {name: value.clone() for name, value in raw1.items()}
+        altered_raw['opacity'][0, 0] += .1
+        wrong_reference = next_stream / 'wrong_reference.npz'
+        np.savez_compressed(wrong_reference,
+                            **{name: value.numpy() for name, value in altered_raw.items()},
+                            owner=decoded.owner.numpy(), parents=decoded.parents.numpy(),
+                            frame_index=np.array(1, dtype=np.int32),
+                            extent=np.array(1., dtype=np.float64),
+                            region_count=np.array(len(decoded.parents), dtype=np.int32))
+        try:
+            budget._same_reference(wrong_reference, decoded, raw1,
+                                   project_root, 1., len(decoded.parents))
+        except ValueError as error:
+            assert 'reference differs' in str(error)
+        else:
+            raise AssertionError('Changed candidate input raw state was accepted')
+        packet2 = RIGID_CODEC.encode_motion(
+            decoded, 2, 1., torch.arange(count + 1), decoded.owner,
+            decoded.parents, zero_region, zero_region,
+            torch.zeros(count + 1, 3, dtype=torch.int16),
+            torch.zeros(count + 1, 3, dtype=torch.int16),
+            torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+            torch.empty(0, 4), .01, .01)
+        decoded2 = RIGID_CODEC.decode_motion(packet2, decoded)
+        raw2 = dict(raw1, xyz=decoded2.xyz, rotation=decoded2.rotation)
+        (next_stream / 'motion_002.bin').write_bytes(packet2)
+        next_manifest = dict(frame=2,
+            reference='frame_storage/rigid_tree/reference_frame1.npz',
+            motion='motion_002.bin', birth=None,
+            old_count=count + 1, birth_count=0, total_count=count + 1,
+            decoded_state_sha256=decoded2.digest().hex(),
+            raw_state_sha256=quant.reference_digest(raw2))
+        (next_stream / 'frame_002.json').write_text(json.dumps(next_manifest))
+        next_summary = dict(frame=2, motion=dict(path=str(next_stream / 'motion_002.bin'),
+                                                 bytes=len(packet2)),
+                            birth=None, encoded_bytes=len(packet2),
+                            materialized_sha256=quant.reference_digest(raw2))
+        (next_trial / 'frame_summary' / 'frame_002.json').write_text(
+            json.dumps(next_summary))
+        _, _, _, next_costs = budget.append_selected_frame(
+            aggregate, next_trial, 2, decoded, raw1, project_root,
+            1., len(decoded.parents), .03)
+        assert next_costs['encoded_bytes'] == len(packet2)
+        replayed2, replayed_raw2 = RIGID_REPLAY.replay(
+            aggregate / 'frame_storage' / 'rigid_tree',
+            aggregate / budget.REFERENCE, through=2)
+        assert replayed2.digest() == decoded2.digest()
+        for name in quant.RAW_FIELDS:
+            torch.testing.assert_close(replayed_raw2[name], raw2[name],
+                                       rtol=0, atol=0)
+        aggregate_manifest2 = json.loads((aggregate / 'frame_storage' /
+            'rigid_tree' / 'frame_002.json').read_text())
+        assert aggregate_manifest2['reference'] == budget.REFERENCE
+
+
 if __name__ == '__main__':
     checks = [value for name, value in list(globals().items())
               if name.startswith('test_') and callable(value)]

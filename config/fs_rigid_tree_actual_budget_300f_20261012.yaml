@@ -1,0 +1,12 @@
+# Fixed-candidate rate search around the unchanged rigid-tree motion method.
+# Run scripts/train_rigid_tree_budget.py with this file after review.
+base_config: /home/gamer-02/Documents/DeepLearning/my4dgs/config/fs_rigid_tree_region8192_long_300f_20261012.yaml
+source_snapshot: /home/gamer-02/Documents/DeepLearning/my4dgs/output/experiment_sources/rigid_tree_sparse_delta_codec_a4fc751_20261012
+experiment_name: fs_rigid_tree_actual_budget_300f_20261012
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+total_frames: 300
+budget_bytes_exclusive: 50000  # Actual motion.bin + birth.bin; equality fails.
+rate_candidates: [0.03, 0.02, 0.015]
+fallback_rate_candidates: [0.04, 0.06, 0.1]
+train_loss_tie_tolerance: 1.0e-9
+retain_unselected_checkpoints: false
