@@ -1,8 +1,0 @@
-# 从独立首帧开始，逐帧解码后各渲染一次；不读取动态训练状态来重建。
-frames: 299
-rounds: 3
-warmup_renders: 10
-image_size: [1600, 1199]
-quality_frames: [1, 49, 149, 299]
-metric_absolute_tolerance: 0.0001
-render_attribute_cache: true
