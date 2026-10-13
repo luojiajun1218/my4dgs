@@ -1,4 +1,4 @@
-"""Fixed-size rigid residual forest for motion-only dynamic Gaussians.
+"""Shared-motion region tree for motion-only dynamic Gaussians.
 
 Quaternions are scalar-first. Region zero is the identity reference; a point
 has one hard owner. Every region transform acts on the *previous decoded*
@@ -6,13 +6,19 @@ world-space pose, after its parent's transform. The GS residual acts last.
 """
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import math
 from pathlib import Path
 
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from .shared_motion_clustering import MotionClusteringConfig
+from .residual_region_clustering import ResidualGmmConfig, ResidualHdbscanConfig
+from .heir_motion_hierarchy import HeirHierarchyConfig, HeirMotionHierarchy
+from .motion_history import MotionHistory
+from .online_motion_clustering import OnlineMotionClusteringConfig, OnlineMotionHistory
 
 
 @dataclass
@@ -38,12 +44,88 @@ class RigidTreeConfig:
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
+    rate_normalization: str = 'frame'  # Legacy checkpoints priced bytes per current GS count.
     relative_motion_loss_weight: float = 0.001
     rate_support_temperature: float = 1.0
     rate_warmup_steps: int = 0
     rate_ramp_steps: int = 1
+    adaptive_clustering: bool = False  # False reads/tests the existing fixed-layout method.
+    bootstrap_tree_step: int = 20
+    motion_warm_start: bool = False
+    clustering: MotionClusteringConfig = field(default_factory=MotionClusteringConfig)
+    residual_hierarchy: bool = False  # True: HDBSCAN regions + HEIR learned parents.
+    tree_refine_steps: int = 0
+    hdbscan: ResidualHdbscanConfig = field(default_factory=ResidualHdbscanConfig)
+    residual_clustering_method: str = 'hdbscan'
+    gmm: ResidualGmmConfig = field(default_factory=ResidualGmmConfig)
+    shared_fit_min_reduction: float = 0.05
+    heir: HeirHierarchyConfig = field(default_factory=HeirHierarchyConfig)
+    online_flat_clustering: bool = False
+    online_partition_policy: str = 'accept_valid'
+    post_partition_steps: int = 0
+    online_clustering: OnlineMotionClusteringConfig = field(default_factory=OnlineMotionClusteringConfig)
+
+    def tree_frame(self, frame):
+        return frame >= 1 and (frame == 1 or frame % self.tree_edit_interval == 0)
+
+    def motion_steps_for_frame(self, frame):
+        if self.online_flat_clustering:
+            return self.motion_steps + self.post_partition_steps
+        return self.motion_steps + (self.tree_refine_steps
+            if self.residual_hierarchy and self.tree_frame(frame) else 0)
+
+    def total_steps_for_frame(self, frame):
+        return self.motion_steps_for_frame(frame) + self.birth_steps
 
     def validate(self):
+        if self.rate_normalization not in ('frame', 'reference'):
+            raise ValueError('rate_normalization must be frame or reference')
+        self.clustering.validate()
+        self.hdbscan.validate()
+        self.gmm.validate()
+        if self.residual_clustering_method not in ('hdbscan', 'gmm'):
+            raise ValueError('residual_clustering_method must be hdbscan or gmm')
+        if (isinstance(self.shared_fit_min_reduction, bool) or
+                not math.isfinite(self.shared_fit_min_reduction) or
+                not 0 <= self.shared_fit_min_reduction < 1):
+            raise ValueError('shared_fit_min_reduction must be in [0, 1)')
+        self.heir.validate()
+        self.online_clustering.validate()
+        if self.online_partition_policy not in ('accept_valid', 'require_smaller'):
+            raise ValueError('online_partition_policy must be accept_valid or require_smaller')
+        if (isinstance(self.post_partition_steps, bool) or
+                not isinstance(self.post_partition_steps, int) or self.post_partition_steps < 0):
+            raise ValueError('post_partition_steps must be a nonnegative integer')
+        if self.post_partition_steps and not self.online_flat_clustering:
+            raise ValueError('Post-partition refinement requires online flat clustering')
+        if self.online_flat_clustering and (not self.adaptive_clustering or
+                self.residual_hierarchy or self.region_count != 1 or self.shared_steps != 0):
+            raise ValueError('Online flat clustering requires an independent identity root, '
+                             'adaptive storage, and no hierarchy/shared-only phase')
+        if not isinstance(self.residual_hierarchy, bool):
+            raise ValueError('residual_hierarchy must be boolean')
+        if isinstance(self.tree_refine_steps, bool) or not isinstance(self.tree_refine_steps, int):
+            raise ValueError('tree_refine_steps must be an integer')
+        if self.residual_hierarchy:
+            if (not self.adaptive_clustering or self.region_count != 1 or
+                    self.tree_refine_steps != 100 or
+                    self.bootstrap_tree_step != 100 or self.tree_edit_step != 100):
+                raise ValueError('Residual hierarchy needs an identity-only root, '
+                                 '100 residual steps, then 100 HEIR steps')
+        elif self.tree_refine_steps != 0:
+            raise ValueError('Extra tree steps require the residual HDBSCAN/HEIR method')
+        if not isinstance(self.adaptive_clustering, bool) or not isinstance(self.motion_warm_start, bool):
+            raise ValueError('Adaptive clustering and motion warm start must be boolean')
+        if (isinstance(self.bootstrap_tree_step, bool) or
+                not isinstance(self.bootstrap_tree_step, int) or self.bootstrap_tree_step < 1):
+            raise ValueError('bootstrap_tree_step must be a positive integer')
+        if self.adaptive_clustering and not self.online_flat_clustering:
+            if (self.motion_steps, self.birth_steps, self.tree_edit_interval, self.shared_steps) != (100, 100, 10, 0):
+                raise ValueError('Motion-cluster training requires 100+100 steps, '
+                                 'ten-frame edits, and no separate shared/probe phase')
+            if ((not self.residual_hierarchy and self.bootstrap_tree_step >= self.motion_steps) or
+                    self.gs_xyz_step_extent is None or self.gs_rotation_step_rad is None):
+                raise ValueError('Adaptive clustering needs an in-motion bootstrap step and explicit GS quantization')
         for name in ('region_count', 'motion_steps', 'birth_steps',
                      'tree_edit_interval', 'tree_edit_step',
                      'tree_edit_neighbors', 'tree_edit_region_trials',
@@ -51,8 +133,8 @@ class RigidTreeConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f'{name} must be a positive integer')
-        if self.region_count < 2 or self.tree_edit_step > self.motion_steps:
-            raise ValueError('Need at least two regions and an edit step within motion fitting')
+        if self.region_count < (1 if self.residual_hierarchy or self.online_flat_clustering else 2) or self.tree_edit_step > self.motion_steps:
+            raise ValueError('Invalid initial region count or tree edit step')
         if (isinstance(self.shared_steps, bool) or not isinstance(self.shared_steps, int) or
                 self.shared_steps < 0 or self.shared_steps >= self.motion_steps or
                 self.tree_edit_step <= self.shared_steps):
@@ -90,8 +172,27 @@ class RigidTreeConfig:
 
 def saved_config_with_default_motion_lr(saved_config):
     """Compare pre-schedule checkpoints without changing their saved payload."""
-    if isinstance(saved_config, dict) and 'motion_lr_final_ratio' not in saved_config:
-        return {**saved_config, 'motion_lr_final_ratio': 1.0}
+    if isinstance(saved_config, dict):
+        defaults = dict(motion_lr_final_ratio=1.0, adaptive_clustering=False,
+                        motion_warm_start=False, bootstrap_tree_step=20,
+                        clustering=asdict(MotionClusteringConfig()),
+                        residual_hierarchy=False, tree_refine_steps=0,
+                        hdbscan=asdict(ResidualHdbscanConfig()), heir=asdict(HeirHierarchyConfig()),
+                        residual_clustering_method='hdbscan', gmm=asdict(ResidualGmmConfig()),
+                        shared_fit_min_reduction=0.05, rate_normalization='frame')
+        defaults.update(online_flat_clustering=False,
+                        post_partition_steps=0,
+                        online_partition_policy=('require_smaller' if
+                            saved_config.get('online_flat_clustering', False) else 'accept_valid'),
+                        online_clustering=asdict(OnlineMotionClusteringConfig()))
+        normalized = {**defaults, **saved_config}
+        normalized['hdbscan'] = {**asdict(ResidualHdbscanConfig()),
+                                 **saved_config.get('hdbscan', {})}
+        normalized['gmm'] = {**asdict(ResidualGmmConfig()), **saved_config.get('gmm', {})}
+        normalized['heir'] = {**asdict(HeirHierarchyConfig()), **saved_config.get('heir', {})}
+        normalized['online_clustering'] = {**asdict(OnlineMotionClusteringConfig()),
+                                         **saved_config.get('online_clustering', {})}
+        return normalized
     return saved_config
 
 
@@ -314,7 +415,11 @@ def region_transforms(base_xyz, parents, pivots, translation, rotvec):
     return q_global, b_global
 
 
-class RigidResidualTree(nn.Module):
+from .adaptive_motion_tree import AdaptiveMotionTreeMixin
+from .online_flat_motion import OnlineFlatMotionMixin
+
+
+class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Module):
     def __init__(self, config):
         super().__init__()
         config.validate()
@@ -325,6 +430,7 @@ class RigidResidualTree(nn.Module):
         self.pivots = None
         self.codec_previous_state = None
         self.frame_reference_state = None
+        self.rate_reference_count = None
         self.materialized_owner = None
         self.pending_birth_sources = None
         self.topology_edits = []
@@ -334,6 +440,24 @@ class RigidResidualTree(nn.Module):
         self.last_step = 0
         self._topology_updated = False
         self._metadata_cache = None
+        self.bootstrap_finalized = False
+        self.bootstrap_seconds = 0.
+        self.heir_hierarchy = None
+        self.heir_optimizer = None
+        self.heir_features = None
+        self.heir_past = None
+        self.previous_partition = None
+        self.motion_history = MotionHistory(config.heir.history_frames)
+        self.heir_finalized = False
+        self.cluster_labels = None
+        self.observations = None
+        self.region_map = None
+        self._protected_regions = set()
+        self.online_history = OnlineMotionHistory(config.online_clustering.history_frames)
+        self.online_ids = None
+        self.materialized_online_ids = None
+        self.online_next_id = 0
+        self.flat_region_diagnostics = {}
 
     @property
     def steps(self):
@@ -353,18 +477,47 @@ class RigidResidualTree(nn.Module):
         return self.base_xyz.new_tensor([xyz_step * self.extent] * 3 +
                                         [rotation_step] * 3)
 
+    @property
+    def motion_steps(self):
+        return self.config.motion_steps_for_frame(self.frame_index)
+
+    @property
+    def rate_normalization_count(self):
+        """Keep a byte's price fixed when newborn GS enlarge the scene."""
+        if self.config.rate_normalization == 'reference':
+            if self.rate_reference_count is None:
+                raise ValueError('Set up the shared reference before pricing motion')
+            return self.rate_reference_count
+        return len(self.base_xyz)
+
+    @property
+    def rate_normalization_bytes(self):
+        return max(1, self.rate_normalization_count * 24)
+
     def setup(self, xyz, rotation, extent, frame_index=0, previous_rows=None):
         if xyz.ndim != 2 or xyz.shape[1] != 3 or rotation.shape != (len(xyz), 4):
             raise ValueError('Expected [N,3] centers and [N,4] raw rotations')
         if not len(xyz) or not math.isfinite(float(extent)) or extent <= 0:
             raise ValueError('Motion reference must be nonempty with positive extent')
+        if self.rate_reference_count is None:
+            self.rate_reference_count = len(xyz)
         has_previous = self.materialized_owner is not None
+        warm = (self._warm_motion() if has_previous and self.config.motion_warm_start
+                else None)
         if not has_previous:
-            owner, parents = initial_layout(xyz, self.config.region_count)
+            if self.config.residual_hierarchy or self.config.online_flat_clustering:
+                owner = torch.zeros(len(xyz), dtype=torch.long, device=xyz.device)
+                parents = torch.tensor([-1], dtype=torch.long, device=xyz.device)
+            else:
+                owner, parents = initial_layout(
+                    xyz, 2 if self.config.adaptive_clustering else self.config.region_count)
         else:
             if previous_rows is None:
                 previous_rows = torch.arange(len(xyz), device=xyz.device)
             rows = torch.as_tensor(previous_rows, device=xyz.device, dtype=torch.long)
+            if (not self.config.online_flat_clustering and self.config.heir.geometry == 'se3' and
+                    not torch.equal(rows, torch.arange(len(self.materialized_owner), device=xyz.device))):
+                raise ValueError('Temporal SE(3) regions require persistent GS rows without deletion')
             if (rows.shape != (len(xyz),) or
                     bool(((rows < 0) | (rows >= len(self.materialized_owner))).any()) or
                     rows.unique().numel() != len(rows)):
@@ -388,6 +541,12 @@ class RigidResidualTree(nn.Module):
         self.previous_rows = (torch.arange(len(xyz), device=xyz.device)
                               if previous_rows is None else
                               torch.as_tensor(previous_rows, device=xyz.device, dtype=torch.long).clone())
+        if self.config.online_flat_clustering:
+            if has_previous:
+                self.online_ids = self.materialized_online_ids[self.previous_rows.cpu()].clone()
+            else:
+                self.online_ids = torch.arange(len(xyz), dtype=torch.long)
+                self.online_next_id = len(xyz)
         if self.codec_previous_state is not None and has_previous:
             # The stream, rather than a slightly different CUDA computation,
             # defines the reference used by every subsequent frame.
@@ -400,7 +559,7 @@ class RigidResidualTree(nn.Module):
                 self.base_xyz.detach().cpu(), self.base_rotation.detach().cpu(),
                 owner.detach().cpu(), parents.detach().cpu(), self.frame_index - 1)
         self.frame_reference_state = self.codec_previous_state
-        count = self.config.region_count
+        count = len(parents)
         self.region_translation = nn.Parameter(xyz.new_zeros(count, 3))
         self.region_rotation = nn.Parameter(xyz.new_zeros(count, 3))
         self.gs_translation = nn.Parameter(torch.zeros_like(xyz))
@@ -421,6 +580,23 @@ class RigidResidualTree(nn.Module):
         self._metadata_cache = None
         self._region_id_lengths = _id_lengths(count - 1, xyz)
         self._gs_id_lengths = _id_lengths(len(xyz), xyz)
+        self.observations = torch.zeros(len(xyz), dtype=torch.long, device=xyz.device)
+        self.region_map = torch.arange(count, dtype=torch.long, device=xyz.device)
+        self._protected_regions = set()
+        if self.config.heir.geometry == 'linear':
+            self.heir_hierarchy = None
+            self.heir_optimizer = None
+        self.heir_features = None
+        self.heir_past = None
+        self.previous_partition = None
+        self.heir_finalized = False
+        self.cluster_labels = None
+        if self.config.online_flat_clustering:
+            self.flat_region_diagnostics = {'frame': self.frame_index,
+                'proposal_skipped': not (self.frame_index == 1 or
+                    self.frame_index % self.config.online_clustering.update_interval == 0)}
+        if warm is not None:
+            self._initialize_warm_motion(warm)
 
     def _values(self, hard=False, step=None):
         region_step, gs_step = self.steps, self.gs_steps
@@ -449,10 +625,16 @@ class RigidResidualTree(nn.Module):
                             self.parents, self.pivots, rt, rr, gt, gr)
 
     def materialized_pose(self, step=None):
-        return self.forward(self.config.motion_steps if step is None else step)
+        return self.forward(self.motion_steps if step is None else step)
 
     @torch.no_grad()
     def optimizer_step(self):
+        if (self.config.online_flat_clustering and self.config.post_partition_steps > 0 and
+                self.last_step <= self.config.motion_steps):
+            # Each frame starts with zero shared transforms. Fit independent GS
+            # first; the accepted partition enables joint shared/residual fitting.
+            self.region_translation.grad = None
+            self.region_rotation.grad = None
         if self.last_step <= self.config.shared_steps:
             self.gs_translation.grad = None
             self.gs_rotation.grad = None
@@ -464,6 +646,11 @@ class RigidResidualTree(nn.Module):
         for group, base_lr in zip(self.optimizer.param_groups, base_lrs):
             group['lr'] = base_lr * factor
         self.optimizer.step()
+        if (self.heir_optimizer is not None and not self.heir_finalized and
+                self.config.motion_steps < self.last_step <= self.motion_steps):
+            self.heir_optimizer.step()
+            self.heir_optimizer.zero_grad(set_to_none=True)
+        self._protected_regions = set()
         projected = 0
         for parameter, scale in ((self.region_translation, self.steps[:3]),
                                  (self.region_rotation, self.steps[3:]),
@@ -472,17 +659,29 @@ class RigidResidualTree(nn.Module):
             limit = 32767 * scale
             projected += int((parameter.abs() > limit).any(-1).sum())
             parameter.clamp_(min=-limit, max=limit)
-        self._proximal_region_blocks()
-        if self.last_step > self.config.shared_steps:
+        residual_edit = (self.config.residual_hierarchy and
+                         self.stage(self.last_step) in ('tree_edit', 'tree_finalize', 'tree_validate'))
+        residual_edit |= self.config.online_flat_clustering and self.stage(self.last_step) == 'flat_partition'
+        if residual_edit:
+            # First regularize the fitted pose; then preserve it while changing
+            # its representation. Never erase newly needed cancellation terms
+            # in the same step as a pose-preserving tree edit.
+            self._proximal_region_blocks()
             self._proximal_gs_blocks()
+        edits = self.update_topology(self.last_step) if self.config.adaptive_clustering else []
+        if not residual_edit:
+            self._proximal_region_blocks()
+            if self.last_step > self.config.shared_steps:
+                self._proximal_gs_blocks()
         self.last_metrics['motion/int16_projected_blocks'] = projected
         self.optimizer.zero_grad(set_to_none=True)
+        return edits
 
     def _motion_lr_factor(self, step):
         """One cosine decay over the second half of motion fitting."""
-        start = self.config.motion_steps // 2
+        start = self.motion_steps // 2
         progress = min(max((step - start) /
-                           max(1, self.config.motion_steps - start), 0.), 1.)
+                           max(1, self.motion_steps - start), 0.), 1.)
         cosine = (1 + math.cos(math.pi * progress)) / 2
         return (self.config.motion_lr_final_ratio +
                 (1 - self.config.motion_lr_final_ratio) * cosine)
@@ -521,7 +720,7 @@ class RigidResidualTree(nn.Module):
         active_t = _integer(values_t, step_t).ne(0).any(-1)
         active_r = _integer(values_r, step_r).ne(0).any(-1)
         index_cost = id_lengths + 1
-        price = self.config.rate_loss_weight * ramp / max(1, len(self.base_xyz) * 24)
+        price = self.config.rate_loss_weight * ramp / self.rate_normalization_bytes
         cost_both = price * ((active_t | active_r).to(index_cost) * index_cost +
                              6 * (active_t.to(index_cost) + active_r.to(index_cost)))
         cost_t = gain_r + price * active_t.to(index_cost) * (index_cost + 6)
@@ -530,6 +729,10 @@ class RigidResidualTree(nn.Module):
         choice = torch.stack((cost_both, cost_t, cost_r, cost_none)).argmin(0)
         prune_t = (choice == 2) | (choice == 3)
         prune_r = (choice == 1) | (choice == 3)
+        if translation is self.region_translation and self._protected_regions:
+            protected = torch.tensor(sorted(self._protected_regions), device=values_t.device) - first_row
+            prune_t[protected] = False
+            prune_r[protected] = False
         values_t[prune_t] = 0
         values_r[prune_r] = 0
         return int(prune_t.sum()), int(prune_r.sum())
@@ -555,6 +758,30 @@ class RigidResidualTree(nn.Module):
         self.last_metrics['motion/prox_zero_rotation_blocks'] = pruned_r
 
     def stage(self, step):
+        if self.config.online_flat_clustering:
+            due = self.frame_index == 1 or self.frame_index % self.config.online_clustering.update_interval == 0
+            if step > self.motion_steps:
+                return 'birth_fit'
+            if due and step == self.config.motion_steps and not self._topology_updated:
+                return 'flat_partition'
+            if self.config.motion_steps < step <= self.motion_steps:
+                return 'flat_refine'
+            return 'free_motion' if self.config.post_partition_steps else 'motion_fit'
+        if self.config.residual_hierarchy:
+            if self.config.tree_frame(self.frame_index):
+                if step == self.config.motion_steps and not self._topology_updated:
+                    return 'tree_edit'
+                if step == self.motion_steps and not self.heir_finalized:
+                    return 'tree_finalize'
+                if self.config.motion_steps < step <= self.motion_steps:
+                    return 'tree_refine'
+            elif (self.config.heir.geometry == 'se3' and step == self.motion_steps and
+                  not self.heir_finalized):
+                return 'tree_validate'
+            return 'motion_fit'
+        if (self.config.adaptive_clustering and self.frame_index == 1 and
+                not self.bootstrap_finalized and step == self.config.bootstrap_tree_step):
+            return 'tree_edit'
         return ('tree_edit' if (self.frame_index % self.config.tree_edit_interval == 0 and
                                 step == self.config.tree_edit_step and
                                 not self._topology_updated) else 'motion_fit')
@@ -598,11 +825,19 @@ class RigidResidualTree(nn.Module):
             for row in deleted:
                 size += _varint_length(row - last - 1)
                 last = row
-        parent_edits = torch.where(self.parents.detach().cpu() != prior.parents)[0].tolist()
-        owner_edits = torch.where(self.owner.detach().cpu() != prior.owner[rows])[0].tolist()
-        size += _varint_length(len(parent_edits)) + _varint_length(len(owner_edits))
-        for node in parent_edits:
-            size += _varint_length(node) + _varint_length(int(self.parents[node]))
+        if self.config.adaptive_clustering:
+            from .rigid_tree_codec import dynamic_layout_bytes
+            layout, mapped_owner = dynamic_layout_bytes(
+                prior, self.previous_rows, self.parents, self.pivots, self.region_map)
+            size += len(layout)
+            owner_edits = torch.where(self.owner.detach().cpu() != mapped_owner)[0].tolist()
+            size += _varint_length(len(owner_edits))
+        else:
+            parent_edits = torch.where(self.parents.detach().cpu() != prior.parents)[0].tolist()
+            owner_edits = torch.where(self.owner.detach().cpu() != prior.owner[rows])[0].tolist()
+            size += _varint_length(len(parent_edits)) + _varint_length(len(owner_edits))
+            for node in parent_edits:
+                size += _varint_length(node) + _varint_length(int(self.parents[node]))
         for row in owner_edits:
             size += _varint_length(row) + _varint_length(int(self.owner[row]))
         size += sum(_varint_length(source) + 28 for source in birth)
@@ -636,7 +871,7 @@ class RigidResidualTree(nn.Module):
         soft_bytes = (region_soft_bytes + gs_soft_bytes).detach()
         metadata = self._metadata_bytes()
         soft_bytes = soft_bytes + metadata
-        raw_bytes = max(1, len(self.base_xyz) * 6 * 4)
+        raw_bytes = self.rate_normalization_bytes
         rate = soft_bytes / raw_bytes
         ramp = min(max((step - self.config.rate_warmup_steps) /
                        self.config.rate_ramp_steps, 0.), 1.)
@@ -653,6 +888,10 @@ class RigidResidualTree(nn.Module):
             # The actual stored size is known only after export_motion.
             result['rate_bytes_hard'] = self._hard_motion_bytes() + metadata
             result['rate_bytes_hard_uncompressed'] = result['rate_bytes_hard']
+            result['rate_normalization_gs_count'] = self.base_xyz.new_tensor(
+                self.rate_normalization_count)
+            result['rate_byte_price'] = self.base_xyz.new_tensor(
+                self.config.rate_loss_weight * ramp / raw_bytes)
             result['int16_overflow_blocks'] = sum(
                 (parameter.detach() / scale).abs().gt(32767.5).any(-1).sum()
                 for parameter, scale in ((self.region_translation[1:], region_scale_t),
@@ -674,10 +913,22 @@ class RigidResidualTree(nn.Module):
 
     @torch.no_grad()
     def _global_regions(self):
-        rt, rr, _, _ = self._values()
+        rt = _quantized(self.region_translation, self.steps[:3])
+        rr = _quantized(self.region_rotation, self.steps[3:])
+        rt = torch.cat((torch.zeros_like(rt[:1]), rt[1:]))
+        rr = torch.cat((torch.zeros_like(rr[:1]), rr[1:]))
         return region_transforms(self.base_xyz, self.parents, self.pivots, rt, rr)
 
     def _relative_motion(self):
+        if self.config.online_flat_clustering and self.config.post_partition_steps > 0:
+            # Encourage the per-GS correction to shrink after sharing is fitted;
+            # do not charge the desired regional shared transform toward zero.
+            if self.last_step <= self.config.motion_steps:
+                return self.gs_translation.sum() * 0
+            return relative_motion_magnitude(self.gs_translation, self.gs_rotation,
+                                             self.extent).mean()
+        if len(self.parents) == 1:
+            return self.gs_translation.sum() * 0
         return relative_motion_magnitude(
             self.region_translation[1:], self.region_rotation[1:],
             self.extent).mean()
@@ -704,8 +955,20 @@ class RigidResidualTree(nn.Module):
         Tree reparenting is considered after owner edits. Every proposal is
         checked against the current decoded target and a cycle-free hierarchy.
         """
+        if self.config.online_flat_clustering:
+            return self._update_online_flat_partition(step) if self.stage(step) == 'flat_partition' else []
+        if self.config.residual_hierarchy:
+            if self.stage(step) == 'tree_edit':
+                return self._build_residual_regions(step)
+            if self.stage(step) == 'tree_finalize':
+                return self._finalize_heir_tree(step)
+            if self.stage(step) == 'tree_validate':
+                return self._validate_se3_parents(step)
+            return []
         if self.stage(step) != 'tree_edit':
             return []
+        if self.config.adaptive_clustering:
+            return self._update_motion_clusters(step)
         self._topology_updated = True
         before_bytes = float(self._hard_motion_bytes()) + self._metadata_bytes()
         target_xyz, target_q = (value.detach() for value in self.forward(step))
@@ -773,8 +1036,9 @@ class RigidResidualTree(nn.Module):
             self.gs_translation[start:end] = best_t.to(self.gs_translation) * self.gs_steps[:3]
             self.gs_rotation[start:end] = best_r.to(self.gs_rotation) * self.gs_steps[3:]
         # Quantization after rerouting may differ by at most half a step.
-        self.optimizer.state.pop(self.gs_translation, None)
-        self.optimizer.state.pop(self.gs_rotation, None)
+        changed_rows = [edit['row'] for edit in edits if edit['kind'] == 'owner']
+        self._reset_adam_rows(self.gs_translation, changed_rows)
+        self._reset_adam_rows(self.gs_rotation, changed_rows)
         edits.extend(self._try_reparent(target_xyz, target_q))
         self.topology_edits.extend(edits)
         self._metadata_cache = None
@@ -803,7 +1067,7 @@ class RigidResidualTree(nn.Module):
         selected = active[strength.topk(min(self.config.tree_edit_region_trials,
                                              len(active))).indices]
         edits = []
-        raw_bytes = max(1, len(self.owner) * 24)
+        raw_bytes = self.rate_normalization_bytes
         for node_tensor in selected:
             node = int(node_tensor)
             original_parent = int(self.parents[node])
@@ -876,16 +1140,21 @@ class RigidResidualTree(nn.Module):
                 self.region_rotation[node] = new_rr
                 self.gs_translation.copy_(new_gt)
                 self.gs_rotation.copy_(new_gr)
-                self.optimizer.state.pop(self.region_translation, None)
-                self.optimizer.state.pop(self.region_rotation, None)
-                self.optimizer.state.pop(self.gs_translation, None)
-                self.optimizer.state.pop(self.gs_rotation, None)
+                self._reset_adam_rows(self.region_translation, [node])
+                self._reset_adam_rows(self.region_rotation, [node])
+                changed = torch.where((new_gt != original_gt).any(-1) |
+                                      (new_gr != original_gr).any(-1))[0]
+                self._reset_adam_rows(self.gs_translation, changed)
+                self._reset_adam_rows(self.gs_rotation, changed)
                 edits.append(dict(kind='parent', node=node, parent=parent))
         return edits
 
     @torch.no_grad()
     def register_materialized_layout(self, xyz, rotation, birth_source_rows=None):
         """Carry ownership into the next frame, including each new GS source."""
+        if (self.config.online_flat_clustering and self.config.post_partition_steps and
+                not self.flat_region_diagnostics.get('refinement', {}).get('finalized', False)):
+            raise ValueError('Finalize post-partition motion refinement before committing the frame')
         if xyz.ndim != 2 or xyz.shape[1] != 3 or rotation.shape != (len(xyz), 4):
             raise ValueError('Materialized pose shape mismatch')
         old_count = len(self.owner)
@@ -906,6 +1175,10 @@ class RigidResidualTree(nn.Module):
         self.materialized_xyz = xyz.detach().clone()
         self.materialized_rotation = rotation.detach().clone()
         self.committed = True
+        if self.config.online_flat_clustering:
+            newborn_ids = torch.arange(self.online_next_id, self.online_next_id + len(sources))
+            self.materialized_online_ids = torch.cat((self.online_ids.cpu(), newborn_ids))
+            self.online_next_id += len(sources)
         for parameter in self.parameters():
             parameter.requires_grad_(False)
 
@@ -925,7 +1198,9 @@ class RigidResidualTree(nn.Module):
             self.materialized_rotation[len(self.owner):].detach().cpu(),
             self.config.motion_xyz_step_extent, self.config.motion_rotation_step_rad,
             gs_translation_step_extent=self.config.gs_xyz_step_extent,
-            gs_rotation_step_rad=self.config.gs_rotation_step_rad)
+            gs_rotation_step_rad=self.config.gs_rotation_step_rad,
+            **(dict(region_map=self.region_map, pivots=self.pivots)
+               if self.config.adaptive_clustering else {}))
         packet = compress_motion_packet(raw_packet, mode='auto')
         packet_info = motion_packet_info(packet)
         decoded = decode_motion(packet, self.frame_reference_state)
@@ -939,6 +1214,13 @@ class RigidResidualTree(nn.Module):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(packet)
         self.codec_previous_state = decoded
+        if self.config.online_flat_clustering:
+            self._record_online_decoded_motion(decoded)
+        elif self.config.heir.geometry == 'se3':
+            relative = quaternion_multiply(F.normalize(decoded.rotation[:len(self.owner)].to(self.base_rotation), dim=-1),
+                quaternion_inverse(F.normalize(self.base_rotation, dim=-1)))
+            self.motion_history.record(self.frame_index, self.base_xyz,
+                decoded.xyz[:len(self.owner)].to(self.base_xyz), relative, self.observations)
         return dict(path=str(path), bytes=path.stat().st_size,
                     payload_bytes=path.stat().st_size, **packet_info,
                     frame_index=self.frame_index, gs_count=len(decoded.xyz),
@@ -953,9 +1235,10 @@ class RigidResidualTree(nn.Module):
             return None
         names = ('owner', 'parents', 'pivots', 'base_xyz', 'base_rotation',
                  'previous_rows', 'materialized_owner', 'materialized_xyz',
-                 'materialized_rotation', 'pending_birth_sources')
+                 'materialized_rotation', 'pending_birth_sources', 'observations', 'region_map', 'cluster_labels')
         tensors = {name: getattr(self, name, None) for name in names}
         return dict(config=asdict(self.config), tensors=tensors,
+                    rate_reference_count=self.rate_reference_count,
                     frame_index=self.frame_index, extent=self.extent,
                     parameters={name: parameter.detach().clone() for name, parameter in
                                 (('region_translation', self.region_translation),
@@ -966,6 +1249,17 @@ class RigidResidualTree(nn.Module):
                     last_step=self.last_step, topology_edits=list(self.topology_edits),
                     last_metrics=deepcopy(self.last_metrics),
                     topology_updated=self._topology_updated,
+                    bootstrap_finalized=self.bootstrap_finalized,
+                    bootstrap_seconds=self.bootstrap_seconds,
+                    heir_features=self.heir_features,
+                    heir_past=self.heir_past, previous_partition=self.previous_partition,
+                    motion_history=self.motion_history.capture(),
+                    online_history=self.online_history.state_dict(),
+                    online_ids=self.online_ids, materialized_online_ids=self.materialized_online_ids,
+                    online_next_id=self.online_next_id, flat_region_diagnostics=deepcopy(self.flat_region_diagnostics),
+                    heir_finalized=self.heir_finalized,
+                    heir_state=(None if self.heir_hierarchy is None else self.heir_hierarchy.state_dict()),
+                    heir_optimizer=(None if self.heir_optimizer is None else self.heir_optimizer.state_dict()),
                     codec_previous_state=(None if self.codec_previous_state is None else
                                           self.codec_previous_state.capture()),
                     frame_reference_state=(None if self.frame_reference_state is None else
@@ -981,14 +1275,21 @@ class RigidResidualTree(nn.Module):
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
         reference = packet.get('frame_reference_state')
         tensors = packet['tensors']
-        self.materialized_owner = None
-        self.setup(tensors['base_xyz'], tensors['base_rotation'], packet['extent'],
-                   packet['frame_index'])
+        # Restore the saved variable-sized layout directly. Re-running setup
+        # would spatially repartition it and lose appended/merged node rows.
         for name, value in tensors.items():
             setattr(self, name, value)
-        with torch.no_grad():
-            for name, value in packet['parameters'].items():
-                getattr(self, name).copy_(value)
+        reference_count = packet.get('rate_reference_count')
+        if reference_count is None and self.config.rate_normalization == 'frame':
+            reference_count = len(self.base_xyz)
+        if (isinstance(reference_count, bool) or not isinstance(reference_count, int) or
+                reference_count <= 0):
+            raise ValueError('Checkpoint needs a positive shared-reference GS count')
+        self.rate_reference_count = reference_count
+        self.extent = packet['extent']
+        for name, value in packet['parameters'].items():
+            setattr(self, name, nn.Parameter(value.detach().clone()))
+        self._make_optimizer()
         self.optimizer.load_state_dict(packet['optimizer'])
         self.frame_index = packet['frame_index']
         self.committed = packet['committed']
@@ -997,6 +1298,42 @@ class RigidResidualTree(nn.Module):
         self.last_metrics = deepcopy(packet.get('last_metrics', {}))
         self._topology_updated = bool(packet.get('topology_updated', False))
         self._metadata_cache = None
+        self.bootstrap_finalized = bool(packet.get('bootstrap_finalized', not self.config.adaptive_clustering))
+        self.bootstrap_seconds = float(packet.get('bootstrap_seconds', 0.))
+        self.heir_features = packet.get('heir_features')
+        self.heir_past = packet.get('heir_past')
+        self.previous_partition = packet.get('previous_partition')
+        self.motion_history = MotionHistory(self.config.heir.history_frames)
+        self.motion_history.restore(packet.get('motion_history', []))
+        self.online_history = OnlineMotionHistory(self.config.online_clustering.history_frames)
+        self.online_history.load_state_dict(packet.get('online_history', {}))
+        self.online_ids = packet.get('online_ids')
+        self.materialized_online_ids = packet.get('materialized_online_ids')
+        if self.online_ids is not None:
+            self.online_ids = self.online_ids.detach().cpu().long()
+        if self.materialized_online_ids is not None:
+            self.materialized_online_ids = self.materialized_online_ids.detach().cpu().long()
+        self.online_next_id = int(packet.get('online_next_id', 0))
+        self.flat_region_diagnostics = deepcopy(packet.get('flat_region_diagnostics', {}))
+        self.heir_finalized = bool(packet.get('heir_finalized', False))
+        self.heir_hierarchy = None
+        self.heir_optimizer = None
+        if packet.get('heir_state') is not None:
+            input_dim = self.heir_features.shape[-1] if self.heir_features is not None else 6
+            self.heir_hierarchy = HeirMotionHierarchy(input_dim, self.config.heir).to(self.base_xyz)
+            self.heir_hierarchy.load_state_dict(packet['heir_state'])
+            self.heir_optimizer = self.heir_hierarchy.make_optimizer()
+            self.heir_optimizer.load_state_dict(packet['heir_optimizer'])
+            if self.heir_finalized:
+                for parameter in self.heir_hierarchy.parameters():
+                    parameter.requires_grad_(False)
+        if self.observations is None:
+            self.observations = torch.zeros(len(self.base_xyz), dtype=torch.long, device=self.base_xyz.device)
+        if self.region_map is None:
+            self.region_map = torch.arange(len(self.parents), device=self.base_xyz.device)
+        self._region_id_lengths = _id_lengths(len(self.parents) - 1, self.base_xyz)
+        self._gs_id_lengths = _id_lengths(len(self.base_xyz), self.base_xyz)
+        self._protected_regions = set()
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
         self.frame_reference_state = (None if reference is None else
                                       DecodedState.restore(reference))

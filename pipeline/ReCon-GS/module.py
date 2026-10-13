@@ -23,6 +23,7 @@ from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     reference_digest)
 from .model.rigid_residual_tree import (RigidResidualTree, RigidTreeConfig,
     quaternion_angle_error, saved_config_with_default_motion_lr)
+from .model.tree_statistics import write_tree_statistics
 
 
 @dataclass
@@ -164,6 +165,7 @@ class Module(BaseModule):
         self.initial_reference = None
         self.frame_report = None
         self.birth_control = {}
+        self.tree_statistics = []
         self._freeze_base()
 
     @property
@@ -172,7 +174,7 @@ class Module(BaseModule):
 
     @property
     def motion_steps(self):
-        return self.config.rigid_tree.motion_steps
+        return self.config.rigid_tree.motion_steps_for_frame(self.current_frame)
 
     @property
     def total_steps(self):
@@ -192,7 +194,7 @@ class Module(BaseModule):
         ckpt['rigid_tree_frame'] = dict(prepared=self.frame_prepared,
             finalized=self.frame_finalized, motion_committed=self.motion_committed,
             reference_count=self.reference_count, report=self.frame_report,
-            birth_control=self.birth_control)
+            birth_control=self.birth_control, tree_statistics=self.tree_statistics)
         ckpt['births'] = (self.births.capture() if self.motion_committed and
                           not self.frame_finalized and self.births.optimizer is not None else None)
         ckpt['birth_source_rows'] = (self.births.source_rows.detach().cpu()
@@ -236,6 +238,7 @@ class Module(BaseModule):
                 retained_count=self.reference_count, removed_count=0)
         self.frame_report = state['report']
         self.birth_control = state['birth_control']
+        self.tree_statistics = state.get('tree_statistics', [])
         if self.frame_prepared:
             self.motion.restore(ckpt['rigid_tree_motion'])
             if self.motion_committed:
@@ -265,6 +268,7 @@ class Module(BaseModule):
         self.frame_report = None
         self.birth_control = dict(clone_added=0, split_added=0, pruned=0,
                                   source_tracked=True)
+        self.tree_statistics = []
         self._freeze_base()
 
     def pre_training_step(self):
@@ -277,6 +281,14 @@ class Module(BaseModule):
         self.frame_finalized = False
         self.motion_committed = False
         self.frame_report = None
+
+    def _write_tree_statistics(self, step):
+        path = (self.output_dir / 'tree_stats' /
+                f'frame_{self.current_frame:03d}_step_{step:03d}.csv')
+        record = write_tree_statistics(path, self.motion, self.reference_count, step)
+        record['path'] = str(path.relative_to(self.output_dir))
+        record['source_run'] = str(self.output_dir)
+        self.tree_statistics.append(record)
 
     def make_birth_view(self):
         if not len(self.births._xyz):
@@ -318,6 +330,10 @@ class Module(BaseModule):
         if not self.motion_committed:
             terms = self.motion.loss_terms(step, diagnostics=False)
             loss = loss + terms['rate_loss'] + terms['relative_motion_loss']
+            heir_terms = ({} if self.config.rigid_tree.online_flat_clustering else
+                          self.motion.heir_loss_terms(step))
+            if heir_terms:
+                loss = loss + heir_terms['heir_loss']
         return loss, metrics, package
 
     @torch.no_grad()
@@ -377,8 +393,19 @@ class Module(BaseModule):
     def post_training_step(self, package):
         step = self.trainer.global_step
         if not self.motion_committed:
-            self.motion.optimizer_step()
-            edits = self.motion.update_topology(step)
+            self.motion.mark_observed(package['visibility_filter'])
+            tree_update_due = self.motion.stage(step) in ('tree_edit', 'tree_finalize')
+            flat_update_due = self.motion.stage(step) == 'flat_partition'
+            edits = self.motion.optimizer_step()
+            if not self.config.rigid_tree.adaptive_clustering:
+                edits = self.motion.update_topology(step)
+            if tree_update_due:
+                self._write_tree_statistics(step)
+            if flat_update_due:
+                directory = self.output_dir / 'region_statistics'
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / f'frame_{self.current_frame:03d}.json').write_text(
+                    json.dumps(self.motion.flat_region_diagnostics, indent=2))
             if edits:
                 self.birth_control['tree_edit_count'] = (
                     self.birth_control.get('tree_edit_count', 0) + len(edits))
@@ -390,6 +417,15 @@ class Module(BaseModule):
                 self.gaussians.add_densification_stats(
                     package['viewspace_points'], package['visibility_filter'])
             if step == self.motion_steps:
+                self.motion.finalize_online_refinement()
+                if getattr(self.trainer, 'bootstrap_pending', False):
+                    if not self.motion.bootstrap_finalized:
+                        raise ValueError('First motion frame has not finalized its initial region tree')
+                    # The base attributes are still frame0 here. Write the
+                    # learned layout before _begin_births installs frame1 pose.
+                    self.trainer._write_reference(
+                        frame_index=0, state=self.motion.frame_reference_state)
+                    self.trainer.bootstrap_pending = False
                 self._begin_births()
         else:
             if len(self.births._xyz):
@@ -443,6 +479,11 @@ class Module(BaseModule):
                                                  birth_source_rows=sources)
         rate_terms = self.motion.loss_terms(self.motion_steps, diagnostics=True)
         motion_info = self.motion.export_motion(motion_path)
+        if self.config.rigid_tree.online_flat_clustering:
+            directory = self.output_dir / 'region_statistics'
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / f'frame_{self.current_frame:03d}.json').write_text(
+                json.dumps(self.motion.flat_region_diagnostics, indent=2))
         decoded = self.motion.codec_previous_state
         prior = self.motion.frame_reference_state
         old_count = len(self.motion.owner)
@@ -489,6 +530,15 @@ class Module(BaseModule):
         manifest_path.write_text(json.dumps(manifest, indent=2))
         self.frame_report = dict(frame=self.current_frame,
             initial_reference=self.initial_reference,
+            region_count=len(self.motion.parents),
+            initialization=dict(two_frame=self.config.rigid_tree.adaptive_clustering and not self.config.rigid_tree.online_flat_clustering,
+                is_initialization_frame=self.config.rigid_tree.adaptive_clustering and self.current_frame == 1,
+                initial_tree_built=self.motion.bootstrap_finalized or not self.config.rigid_tree.adaptive_clustering,
+                initial_tree_seconds=self.motion.bootstrap_seconds if self.current_frame == 1 else 0.,
+                bootstrap_tree_step=self.config.rigid_tree.bootstrap_tree_step,
+                free_motion_steps=self.config.rigid_tree.motion_steps,
+                post_partition_steps=self.config.rigid_tree.post_partition_steps,
+                optimization_steps=self.total_steps),
             old_count=len(raw['xyz']) - len(sources), birth_count=len(sources),
             total_count=len(raw['xyz']), motion=motion_info, birth=birth_info,
             encoded_bytes=motion_path.stat().st_size +
@@ -503,6 +553,10 @@ class Module(BaseModule):
             motion_tree_diagnostics={name: float(value)
                                      for name, value in self.motion.last_metrics.items()
                                      if name.startswith('tree_edit/')},
+            heir_diagnostics={name: float(value) for name, value in self.motion.last_metrics.items()
+                              if name.startswith('heir/')},
+            flat_region_diagnostics=self.motion.flat_region_diagnostics,
+            tree_statistics=self.tree_statistics,
             birth_control=self.birth_control,
             semantics='Necessary motion and birth files only; shared first frame counted once. '
                       'No gate, no old-GS deletion, no appearance-only update.')
@@ -517,6 +571,9 @@ class Module(BaseModule):
             path.parent.mkdir(parents=True, exist_ok=True)
             save_image(image, path.with_name(path.stem +
                        f'_step{self.trainer.global_step}' + path.suffix))
+            gt_path = path.with_name(path.stem + '_gt' + path.suffix)
+            if not gt_path.exists() and not gt_path.is_symlink():
+                save_image(viewpoint.image, gt_path)
         metrics = dict(l1=float(l1_loss(image, viewpoint.image)),
                        psnr=float(psnr(image, viewpoint.image)),
                        ssim=float(ssim(image, viewpoint.image)))

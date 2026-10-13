@@ -2,6 +2,7 @@
 
 import json
 import random
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 from absl import logging
+from tqdm import tqdm
 
 from libgs.data.utils.fetch import Fetcher
 from libgs.pipeline import Trainer as BaseTrainer
@@ -37,6 +39,7 @@ class Trainer(BaseTrainer):
         self.datamodule.setup(self.output_dir)
         self.module.to(self.device).setup()
         self._resume_rng = None
+        self.bootstrap_pending = False
         if ckpt_path is None:
             raise ValueError('The active method requires a shared completed first-frame checkpoint')
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
@@ -48,8 +51,32 @@ class Trainer(BaseTrainer):
                 raise ValueError('Rigid checkpoint needs matching data and trainer settings')
         self.module.on_load_checkpoint(ckpt)
         self._resume_rng = ckpt.get('rng_state')
+        adaptive = self.module.config.rigid_tree.adaptive_clustering
+        online_flat = self.module.config.rigid_tree.online_flat_clustering
+        if adaptive and self.datamodule.num_frames < 2:
+            raise ValueError('Shared-motion tree initialization needs frames 0 and 1')
         if ckpt.get('rigid_tree_version') is None:
-            self._write_reference(frame_index=0)
+            if online_flat:
+                # Frame0 is static and decodable before observing frame1. All
+                # later memberships/pivots belong to their own frame packets.
+                self._write_reference(frame_index=0)
+                logging.info('Online flat motion: causal %s candidates, history=%d transitions',
+                             self.module.config.rigid_tree.online_clustering.method,
+                             self.module.config.rigid_tree.online_clustering.history_frames)
+            elif adaptive:
+                self.bootstrap_pending = True
+                if self.module.config.rigid_tree.residual_hierarchy:
+                    logging.info('Frame1 initialization: 100 residual steps, '
+                                 '100 %s/HEIR refinement steps, 100 birth steps',
+                                 self.module.config.rigid_tree.residual_clustering_method.upper())
+                else:
+                    logging.info('Initial tree will use frame1 normal motion training; no extra steps')
+            else:
+                self._write_reference(frame_index=0)
+        elif adaptive and not online_flat and self.current_frame == 1 and not self.module.motion_committed:
+            # A mid-motion resume must finish the same first frame, not train
+            # another initialization frame or serialize an unfinished tree.
+            self.bootstrap_pending = True
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():
@@ -69,8 +96,12 @@ class Trainer(BaseTrainer):
         path = directory / f'reference_frame{frame_index}.npz'
         raw = model_raw(self.module.gaussians)
         if state is None:
-            owner, parents = initial_layout(raw['xyz'],
-                self.module.config.rigid_tree.region_count)
+            if self.module.config.rigid_tree.online_flat_clustering:
+                owner = torch.zeros(len(raw['xyz']), dtype=torch.long, device=raw['xyz'].device)
+                parents = torch.tensor([-1], dtype=torch.long, device=owner.device)
+            else:
+                owner, parents = initial_layout(raw['xyz'],
+                    self.module.config.rigid_tree.region_count)
         else:
             if len(raw['xyz']) != len(state.xyz):
                 raise ValueError('Checkpoint GS count differs from decoder bootstrap')
@@ -82,7 +113,7 @@ class Trainer(BaseTrainer):
                       parents=parents.detach().cpu().numpy(),
                       frame_index=np.array(frame_index, dtype=np.int32),
                       extent=np.array(self.datamodule.cameras_extent, dtype=np.float64),
-                      region_count=np.array(self.module.config.rigid_tree.region_count,
+                      region_count=np.array(len(parents),
                                             dtype=np.int32))
         initial = self.module.initial_reference
         if initial is None:
@@ -94,10 +125,11 @@ class Trainer(BaseTrainer):
             initial_opacity_threshold=np.array(initial['threshold'], dtype=np.float64))
         np.savez_compressed(path, **fields)
         self.decoder_reference_path = path
-        logging.info('Decoder reference: %s (%d bytes); native frame0 GS %d -> %d '
-                     'at opacity threshold %.6g', path, path.stat().st_size,
-                     initial['original_count'], initial['retained_count'],
-                     initial['threshold'])
+        with tqdm.external_write_mode(file=sys.stderr):
+            logging.info('Decoder reference: %s (%d bytes); native frame0 GS %d -> %d '
+                         'at opacity threshold %.6g', path, path.stat().st_size,
+                         initial['original_count'], initial['retained_count'],
+                         initial['threshold'])
 
     @property
     def current_frame(self):
@@ -166,6 +198,13 @@ class Trainer(BaseTrainer):
             self._resume_rng = None
 
     def training_loop(self):
+        if not self.module.config.rigid_tree.adaptive_clustering:
+            raise ValueError('Fixed spatial-region training is retired; use the '
+                             'motion-cluster configuration with 100+100 steps')
+        if not (self.module.config.rigid_tree.residual_hierarchy or
+                self.module.config.rigid_tree.online_flat_clustering):
+            raise ValueError('The moving-seed bootstrap is retired; use the '
+                             'HDBSCAN/HEIR residual hierarchy configuration')
         if self.is_first_frame:
             if self.global_step != self.config.num_init_steps:
                 raise ValueError('The shared first frame must already be fully trained')
@@ -198,22 +237,29 @@ class Trainer(BaseTrainer):
         executed_steps = self.num_steps - self.global_step
         train_loss = 0.0
         last_metrics = {}
-        for step in range(self.global_step + 1, self.num_steps + 1):
-            self.global_step = step
-            self.module.pre_training_step()
-            viewpoint = fetcher.next()
-            loss, metrics, package = self.module.training_step(viewpoint, step)
-            if loss.requires_grad:
-                loss.backward()
-            self.module.post_training_step(package)
-            train_loss += float(loss.detach())
-            last_metrics = metrics
-            if step % 20 == 0 or step == self.num_steps:
-                logging.info('Frame %d step %d/%d image=%.5f PSNR=%.2f GS=%d',
-                             frame, step, self.num_steps,
-                             metrics['image_loss'], metrics['psnr'], metrics['gs'])
-            if self._checkpoint_due() and step != self.num_steps:
-                self.save_checkpoint()
+        metrics_ema = dict(image=0., psnr=0.)
+        with tqdm(total=self.num_steps, initial=self.global_step,
+                  desc=f'Training frame {frame}', dynamic_ncols=True,
+                  bar_format='{desc}: {percentage:3.0f}%|{bar}| '
+                             '{n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}') as progress_bar:
+            for step in range(self.global_step + 1, self.num_steps + 1):
+                self.global_step = step
+                self.module.pre_training_step()
+                viewpoint = fetcher.next()
+                loss, metrics, package = self.module.training_step(viewpoint, step)
+                if loss.requires_grad:
+                    loss.backward()
+                self.module.post_training_step(package)
+                train_loss += float(loss.detach())
+                last_metrics = metrics
+                for name, value in (('image', metrics['image_loss']), ('psnr', metrics['psnr'])):
+                    metrics_ema[name] = .6 * metrics_ema[name] + .4 * value
+                if step % 10 == 0 or step == self.num_steps:
+                    progress_bar.set_postfix(dict(image=f"{metrics_ema['image']:.5f}",
+                        psnr=f"{metrics_ema['psnr']:.2f}", gs=metrics['gs']), refresh=False)
+                    progress_bar.update(step - progress_bar.n)
+                if self._checkpoint_due() and step != self.num_steps:
+                    self.save_checkpoint()
         evaluation = self.validation_loop()
         report = dict(self.module.frame_report or {},
             evaluation=evaluation, final_train_metrics=last_metrics,
@@ -227,10 +273,25 @@ class Trainer(BaseTrainer):
             json.dumps(report, indent=2, default=str))
         if self._checkpoint_due():
             self.save_checkpoint()
-        logging.info('Frame %d test=%s encoded=%d bytes births=%d edits=%d',
-                     frame, evaluation.get('test'), report.get('encoded_bytes', 0),
-                     report.get('birth_count', 0),
+        quality = ' | '.join(
+            f'{name} PSNR={row.get("psnr", float("nan")):.4f} '
+            f'SSIM={row.get("ssim", float("nan")):.4f}'
+            + (f' LPIPS={row["lpips"]:.4f}' if 'lpips' in row else '')
+            for name, row in evaluation.items())
+        logging.info('Frame %d | %s | %d steps | %.2fs', frame,
+                     quality or 'no evaluation', executed_steps, report['elapsed_seconds'])
+        logging.info('  Storage=%.2f KB | GS=%d (+%d) | regions=%d | tree edits=%d',
+                     report.get('encoded_bytes', 0) / 1000,
+                     report.get('total_count', last_metrics.get('gs', 0)),
+                     report.get('birth_count', 0), report.get('region_count', 0),
                      report.get('birth_control', {}).get('tree_edit_count', 0))
+        if self.module.config.rigid_tree.online_flat_clustering:
+            flat = report.get('flat_region_diagnostics', {})
+            gate = flat.get('gate', {})
+            candidate = gate.get('candidate') or {}
+            logging.info('  Flat partition: policy=%s | accepted=%s | old=%s bytes | candidate=%s bytes | delta=%s bytes | reason=%s',
+                         gate.get('acceptance_policy'), gate.get('accepted'), gate.get('old', {}).get('bytes'),
+                         candidate.get('bytes'), gate.get('packet_bytes_delta'), gate.get('decision_reason'))
         return report
 
     @torch.no_grad()

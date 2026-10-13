@@ -199,19 +199,22 @@ def _capture_raw(checkpoint: Path, frame: int, total_steps: int):
     return raw, int(capture[0])
 
 
-def _load_reference(path: Path, region_count: int):
+def _load_reference(path: Path, region_count: int | None):
     import torch
     codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
 
     with np.load(path, allow_pickle=False) as packet:
         raw = {name: torch.from_numpy(packet[name].copy()) for name in RAW_FIELDS}
-        if int(packet['region_count']) != region_count:
+        if region_count is not None and int(packet['region_count']) != region_count:
             raise ValueError('Stream reference region count differs from run config')
+        if int(packet['region_count']) != len(packet['parents']):
+            raise ValueError('Stream reference region count differs from stored tree')
         state = codec.DecodedState(
             raw['xyz'], raw['rotation'],
             torch.from_numpy(packet['owner'].copy()).long(),
             torch.from_numpy(packet['parents'].copy()).long(),
             int(packet['frame_index']))
+    codec._validate_state(state)
     return state, raw
 
 
@@ -510,7 +513,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
                      run / 'frame_summary' / f'frame_{frame:03d}.json'):
             if not path.is_file():
                 raise FileNotFoundError(f'Incomplete sequence: {path}')
-    state, raw = _load_reference(reference, config.module.rigid_tree.region_count)
+    state, raw = _load_reference(reference, None if config.module.rigid_tree.adaptive_clustering
+                                else config.module.rigid_tree.region_count)
     if state.frame_index != 0:
         raise ValueError('Complete sequence must start from reference frame0')
     cache_enabled = _selected_render_cache(module, args)
@@ -657,8 +661,7 @@ def main():
     if args.sequence:
         _run_sequence(args, config, run, device, first_gpu_check)
         return
-    total_steps = (config.module.rigid_tree.motion_steps +
-                   config.module.rigid_tree.birth_steps)
+    total_steps = config.module.rigid_tree.total_steps_for_frame(args.frame)
     checkpoint = args.checkpoint or run / f'rigid-ckpt-{args.frame}-{total_steps}.pth'
     stream = args.stream_dir or run / 'frame_storage' / 'rigid_tree'
     manifest_path = stream / f'frame_{args.frame:03d}.json'
@@ -704,7 +707,8 @@ def main():
         manifest = json.loads(manifest_path.read_text())
         reference_path = args.reference or run / manifest['reference']
         reference_state, reference_raw = _load_reference(
-            reference_path, config.module.rigid_tree.region_count)
+            reference_path, None if config.module.rigid_tree.adaptive_clustering
+            else config.module.rigid_tree.region_count)
         if reference_state.frame_index >= args.frame:
             raise ValueError('Decoder reference must precede benchmark frame')
         # Validate hashes and all raw attributes before measuring; this also

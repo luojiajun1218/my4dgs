@@ -30,17 +30,22 @@ DELTA_COMPRESSED_MAGIC = b'RSC1'
 DUAL_STEP_DELTA_COMPRESSED_MAGIC = b'RSC2'
 DELTA_LZMA_COMPRESSED_MAGIC = b'RSL1'
 DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC = b'RSL2'
+DYNAMIC_MAGIC = b'RSD3'
+DYNAMIC_COMPRESSED_MAGIC = b'RSC3'
+DYNAMIC_LZMA_COMPRESSED_MAGIC = b'RSL3'
 CHECKSUM_BYTES = 16
 MAX_RAW_PACKET_BYTES = 512 * 1024 * 1024
 MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
 
-RAW_MAGICS = (MAGIC, DUAL_STEP_MAGIC, DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC)
+RAW_MAGICS = (MAGIC, DUAL_STEP_MAGIC, DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC,
+              DYNAMIC_MAGIC)
 WRAPPERS = {
     MAGIC: (COMPRESSED_MAGIC, LZMA_COMPRESSED_MAGIC),
     DUAL_STEP_MAGIC: (DUAL_STEP_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC),
     DELTA_MAGIC: (DELTA_COMPRESSED_MAGIC, DELTA_LZMA_COMPRESSED_MAGIC),
     DUAL_STEP_DELTA_MAGIC: (DUAL_STEP_DELTA_COMPRESSED_MAGIC,
                             DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC),
+    DYNAMIC_MAGIC: (DYNAMIC_COMPRESSED_MAGIC, DYNAMIC_LZMA_COMPRESSED_MAGIC),
 }
 INNER_MAGIC = {wrapper: raw for raw, pair in WRAPPERS.items()
                for wrapper in pair}
@@ -181,7 +186,9 @@ def motion_packet_info(packet):
                DELTA_COMPRESSED_MAGIC: 'RSC1-zlib',
                DUAL_STEP_DELTA_COMPRESSED_MAGIC: 'RSC2-zlib',
                DELTA_LZMA_COMPRESSED_MAGIC: 'RSL1-lzma',
-               DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC: 'RSL2-lzma'}
+               DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC: 'RSL2-lzma',
+               DYNAMIC_MAGIC: 'RSD3-raw', DYNAMIC_COMPRESSED_MAGIC: 'RSC3-zlib',
+               DYNAMIC_LZMA_COMPRESSED_MAGIC: 'RSL3-lzma'}
     return dict(format=formats[magic], stored_bytes=len(packet),
                 raw_stream_bytes=len(raw), compression_savings_bytes=len(raw) - len(packet))
 
@@ -337,7 +344,7 @@ def _validate_state(state):
     if (state.xyz.ndim != 2 or state.xyz.shape[1] != 3 or
             state.rotation.shape != (len(state.xyz), 4) or
             state.owner.shape != (len(state.xyz),) or
-            state.parents.ndim != 1 or len(state.parents) < 2):
+            state.parents.ndim != 1 or len(state.parents) < 1):
         raise ValueError('Malformed previous decoded state')
     if (state.xyz.dtype != torch.float32 or state.rotation.dtype != torch.float32 or
             state.owner.dtype != torch.long or state.parents.dtype != torch.long):
@@ -351,18 +358,56 @@ def _validate_state(state):
         raise ValueError('Previous decoded pose is nonfinite or has zero rotation')
 
 
+def dynamic_layout_bytes(previous_state, previous_rows, parents, pivots, region_map):
+    """Encode node replacement/growth and pivots; return remapped prior owners.
+
+    A merge redirects the removed node's members with one map entry, instead of
+    transmitting a new owner for every member. Unchanged frames carry one byte.
+    Explicit pivots prevent new nodes or changed subtrees silently changing the
+    rotation centers used by the fitted frame.
+    """
+    rows = _cpu(previous_rows, torch.long)
+    parents = _cpu(parents, torch.long)
+    regions = len(parents)
+    _topological_order(parents)
+    pivots = _cpu(pivots, torch.float32, (regions, 3))
+    mapping = _cpu(region_map, torch.long, (len(previous_state.parents),))
+    if (regions < 1 or int(mapping[0]) != 0 or
+            bool(((mapping < 0) | (mapping >= regions)).any()) or
+            not bool(torch.isfinite(pivots).all())):
+        raise ValueError('Invalid dynamic region mapping or pivots')
+    prior_owner = previous_state.owner[rows]
+    unchanged = (regions == len(previous_state.parents) and
+                 torch.equal(mapping, torch.arange(regions)) and
+                 torch.equal(parents, previous_state.parents) and
+                 torch.equal(pivots, region_pivots(
+                     previous_state.xyz[rows], prior_owner, previous_state.parents)))
+    result = bytearray([0 if unchanged else 1])
+    if not unchanged:
+        for node in mapping.tolist():
+            result.extend(_uvar(node))
+        for parent in parents[1:].tolist():
+            result.extend(_uvar(parent))
+        result.extend(pivots.numpy().astype('<f4', copy=False).tobytes())
+    return result, mapping[prior_owner]
+
+
 def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                   parents, region_t_i16, region_r_i16, gs_t_i16, gs_r_i16,
                   birth_source_rows, birth_xyz, birth_rotation,
                   translation_step_extent, rotation_step_rad, compression='none',
-                  gs_translation_step_extent=None, gs_rotation_step_rad=None):
+                  gs_translation_step_extent=None, gs_rotation_step_rad=None,
+                  region_map=None, pivots=None):
     """Encode actual sparse translation/rotation blocks and topology deltas."""
     _validate_state(previous_state)
     if frame_index != previous_state.frame_index + 1:
         raise ValueError('Frame index must follow the previous decoded frame')
     previous_rows = _cpu(previous_rows, torch.long)
     count = len(previous_rows)
-    regions = len(previous_state.parents)
+    dynamic = region_map is not None or pivots is not None
+    if dynamic and (region_map is None or pivots is None):
+        raise ValueError('Dynamic layout requires both region mapping and pivots')
+    regions = len(parents) if dynamic else len(previous_state.parents)
     owner = _cpu(owner, torch.long, (count,))
     parents = _cpu(parents, torch.long, (regions,))
     rt = _cpu(region_t_i16, torch.int16, (regions, 3))
@@ -394,7 +439,10 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                       not math.isfinite(gs_rotation_step_rad) or
                       gs_rotation_step_rad <= 0):
         raise ValueError('Dual-step stream needs positive GS translation and rotation steps')
-    result = bytearray(DUAL_STEP_DELTA_MAGIC if dual_step else DELTA_MAGIC)
+    if dynamic and not dual_step:
+        raise ValueError('Dynamic motion requires explicit region and GS steps')
+    result = bytearray(DYNAMIC_MAGIC if dynamic else
+                       DUAL_STEP_DELTA_MAGIC if dual_step else DELTA_MAGIC)
     result.extend(previous_state.digest())
     for value in (frame_index, regions, count, len(sources)):
         result.extend(_uvar(value))
@@ -417,15 +465,21 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
         for row in deleted:
             result.extend(_uvar(row - last - 1))
             last = row
-    prior_owner = previous_state.owner[previous_rows]
+    if dynamic:
+        layout, prior_owner = dynamic_layout_bytes(
+            previous_state, previous_rows, parents, pivots, region_map)
+        result.extend(layout)
+    else:
+        prior_owner = previous_state.owner[previous_rows]
     owner_edits = torch.where(owner != prior_owner)[0].tolist()
-    parent_edits = torch.where(parents != previous_state.parents)[0].tolist()
-    result.extend(_uvar(len(parent_edits)))
-    for node in parent_edits:
-        if node == 0:
-            raise ValueError('Cannot reparent identity region')
-        result.extend(_uvar(node))
-        result.extend(_uvar(int(parents[node])))
+    if not dynamic:
+        parent_edits = torch.where(parents != previous_state.parents)[0].tolist()
+        result.extend(_uvar(len(parent_edits)))
+        for node in parent_edits:
+            if node == 0:
+                raise ValueError('Cannot reparent identity region')
+            result.extend(_uvar(node))
+            result.extend(_uvar(int(parents[node])))
     result.extend(_uvar(len(owner_edits)))
     for row in owner_edits:
         result.extend(_uvar(row))
@@ -455,12 +509,13 @@ def decode_motion(payload, prior_state):
     if bytes(reader.take(32)) != prior_state.digest():
         raise ValueError('Previous decoded state digest mismatch')
     frame_index, regions, count, birth_count = [reader.integer() for _ in range(4)]
-    if (frame_index != prior_state.frame_index + 1 or
-            regions != len(prior_state.parents) or count == 0 or
+    dynamic = stream_magic == DYNAMIC_MAGIC
+    if (frame_index != prior_state.frame_index + 1 or regions < 1 or
+            (not dynamic and regions != len(prior_state.parents)) or count == 0 or
             count > len(prior_state.xyz) or birth_count > 10_000_000):
         raise ValueError('Invalid frame index, region count, or Gaussian count')
-    dual_step = stream_magic in (DUAL_STEP_MAGIC, DUAL_STEP_DELTA_MAGIC)
-    delta_rows = stream_magic in (DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC)
+    dual_step = stream_magic in (DUAL_STEP_MAGIC, DUAL_STEP_DELTA_MAGIC, DYNAMIC_MAGIC)
+    delta_rows = stream_magic in (DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC, DYNAMIC_MAGIC)
     quantization = struct.unpack('<5d' if dual_step else '<3d',
                                  reader.take(40 if dual_step else 24))
     if not all(math.isfinite(v) and v > 0 for v in quantization):
@@ -497,17 +552,39 @@ def decode_motion(payload, prior_state):
     # Pivots are based on prior topology and prior decoded points, so edits
     # never silently alter the origin about which this frame's motion rotates.
     pivots = region_pivots(base_xyz, prior_owner, parents)
-    parent_count = reader.integer()
-    if parent_count > regions - 1:
-        raise ValueError('Too many parent edits')
-    last = 0
-    for _ in range(parent_count):
-        node = reader.integer()
-        parent = reader.integer()
-        if node <= last or node >= regions or parent >= regions or parent == int(parents[node]):
-            raise ValueError('Invalid parent edit')
-        parents[node] = parent
-        last = node
+    if dynamic:
+        layout_mode = reader.take(1)[0]
+        if layout_mode == 0:
+            if regions != len(parents):
+                raise ValueError('Unchanged layout has a different node count')
+        elif layout_mode == 1:
+            if 13 * regions - 1 + len(parents) > len(reader.payload) - reader.cursor:
+                raise ValueError('Dynamic layout exceeds remaining packet bytes')
+            mapping = torch.tensor([reader.integer() for _ in range(len(parents))])
+            if int(mapping[0]) != 0 or bool(((mapping < 0) | (mapping >= regions)).any()):
+                raise ValueError('Invalid decoded region mapping')
+            prior_owner = mapping[prior_owner]
+            parents = torch.tensor([-1] + [reader.integer() for _ in range(regions - 1)])
+            if bool(((parents[1:] < 0) | (parents[1:] >= regions)).any()):
+                raise ValueError('Dynamic parent outside region range')
+            pivots = torch.frombuffer(bytearray(reader.take(regions * 12)),
+                                      dtype=torch.float32).reshape(regions, 3).clone()
+            if not bool(torch.isfinite(pivots).all()):
+                raise ValueError('Nonfinite dynamic pivots')
+        else:
+            raise ValueError('Unknown dynamic layout mode')
+    else:
+        parent_count = reader.integer()
+        if parent_count > regions - 1:
+            raise ValueError('Too many parent edits')
+        last = 0
+        for _ in range(parent_count):
+            node = reader.integer()
+            parent = reader.integer()
+            if node <= last or node >= regions or parent >= regions or parent == int(parents[node]):
+                raise ValueError('Invalid parent edit')
+            parents[node] = parent
+            last = node
     _topological_order(parents)
     owner = prior_owner.clone()
     edit_count = reader.integer()
