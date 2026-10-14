@@ -1,0 +1,19 @@
+{
+  "upstream_source": "/home/gamer-02/Documents/DeepLearning/S2GS/submodules/diff-gaussian-rasterization",
+  "purpose": "training-only compositing contribution mask; native inference backend unchanged",
+  "upstream_files": {
+    "ext.cpp": "102d6ca2a07cf57717e5828c49a7100841cc0147f7373de768070f06bc4909ef",
+    "rasterize_points.cu": "b2300a1658e93829aa24ea7d68d75bc0144aef1e5022e5a3c197739312450032",
+    "rasterize_points.h": "4403a136bb3ae3c68acbd0ec7f457f55273832c78bb7a36503c00ef598b5a86b",
+    "LICENSE.md": "cd5c95b3cfff3acc1bd412420c770f88809331c3db6872df11a970147aa8e81f",
+    "cuda_rasterizer/forward.h": "9ff3dd8405ca0fed59fdb2c07a26b622ce8a7836d60a34678930273c55d5b394",
+    "cuda_rasterizer/config.h": "86d90fe26989e5a991104842961341d1bcb4374d5068dcb2a56d63a9017f8d65",
+    "cuda_rasterizer/forward.cu": "83c182561b9f75e93b7b72a24aaf1fce507388a0198aa4a56137d25deabcd6c8",
+    "cuda_rasterizer/backward.cu": "f37bd8192453b05b299c54d060649ab12d114d46cef0a54d728fc130f23c99d6",
+    "cuda_rasterizer/backward.h": "b2f10cc1b3fc2367872fb08a9f91c73c54e22f1a37f8080aef439daf00252a91",
+    "cuda_rasterizer/auxiliary.h": "17fffa921479c55dcb04ac55dbb9edd724fee6e05752ab4b9dc87a11e8c58897",
+    "cuda_rasterizer/rasterizer_impl.cu": "d9a02d3ea00939c574e682946b050599a75fd1e7d84d34f4749bb9e349249fe2",
+    "cuda_rasterizer/rasterizer.h": "9fa0440e6862c4ba787411c816f214ca0ee89ae719362c03932fb6472e09f03c",
+    "cuda_rasterizer/rasterizer_impl.h": "58b97a9728e24d41602a2ac3e8eace025cfd3228de6e75033dc458d0303a46f4"
+  }
+}

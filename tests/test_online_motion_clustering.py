@@ -30,7 +30,7 @@ def config(method, **kwargs):
 class OnlineMotionClusteringTests(unittest.TestCase):
     def test_frame_zero_then_one_observation_is_sufficient(self):
         ids, source = np.arange(12), np.zeros((12, 3))
-        for method in ('kmeans', 'gmm', 'hdbscan', 'greedy'):
+        for method in ('kmeans', 'gmm', 'hdbscan', 'dbscan', 'greedy'):
             with self.subTest(method=method):
                 history = History()
                 empty = propose(history, ids, 1., config(method))
@@ -54,7 +54,7 @@ class OnlineMotionClusteringTests(unittest.TestCase):
         aligned = history.aligned(ids[::-1])
         self.assertFalse(aligned['observed'][0, 0])  # New GS ID11 before birth.
         self.assertFalse(aligned['observed'][-1, 1])  # ID0 lacks current evidence.
-        for method in ('kmeans', 'gmm', 'hdbscan', 'greedy'):
+        for method in ('kmeans', 'gmm', 'hdbscan', 'dbscan', 'greedy'):
             result = propose(history, ids, 1., config(method))
             self.assertEqual(result.labels[0], -3)
             self.assertFalse(np.any(result.labels[1:] == -2))
@@ -88,7 +88,7 @@ class OnlineMotionClusteringTests(unittest.TestCase):
         history = History()
         history.append(1, ids, source, source + first)
         history.append(2, ids, source + first, source + first + [.1, 0, 0])
-        for method in ('kmeans', 'gmm', 'hdbscan', 'greedy'):
+        for method in ('kmeans', 'gmm', 'hdbscan', 'dbscan', 'greedy'):
             with self.subTest(method=method):
                 result = propose(history, ids, 1., config(method))
                 self.assertGreaterEqual(len(result.groups), 2)
@@ -104,7 +104,7 @@ class OnlineMotionClusteringTests(unittest.TestCase):
         history = History()
         q = np.tile([.70710678, 0, 0, .70710678], (12, 1))
         history.append(1, ids, source, target, q, observed)
-        for method in ('kmeans', 'gmm', 'hdbscan', 'greedy'):
+        for method in ('kmeans', 'gmm', 'hdbscan', 'dbscan', 'greedy'):
             result = propose(history, ids, 1., config(method))
             self.assertTrue(np.all(result.labels[:8] == -2))
             self.assertTrue(np.all(result.labels[8:11] == -1))
@@ -138,7 +138,7 @@ class OnlineMotionClusteringTests(unittest.TestCase):
         history = History()
         history.append(1, ids, source, source + displacement)
         permutation = np.random.default_rng(9).permutation(120)
-        for method in ('kmeans', 'gmm', 'hdbscan', 'greedy'):
+        for method in ('kmeans', 'gmm', 'hdbscan', 'dbscan', 'greedy'):
             cfg = config(method, max_fit_points=40)
             before = propose(history, ids, 1., cfg)
             after = propose(history, ids[permutation], 1., cfg)
@@ -160,6 +160,50 @@ class OnlineMotionClusteringTests(unittest.TestCase):
         bad = dict(records=history.state_dict()['records'] * 2)
         with self.assertRaises(ValueError):
             restored.load_state_dict(bad)
+
+    def test_dbscan_exact_duplicate_weights_match_full_density_and_border_order(self):
+        from sklearn.cluster import DBSCAN
+
+        # Border1.0 sees both edges0.5/1.5, but only three observations; it is
+        # not core. Each edge is core via its repeated dense endpoint. Visiting
+        # the right component first must assign the ambiguous border to it.
+        values = np.array([1.] + [2.] * 8 + [1.5] + [0.] * 8 + [.5] + [9.])[:, None]
+        cfg = config('dbscan', dbscan_eps=.6, dbscan_min_samples=4)
+        expected = DBSCAN(eps=.6, min_samples=4, algorithm='kd_tree', n_jobs=1).fit_predict(values)
+        result, metrics = MODULE._dbscan_partition(values, cfg)
+        np.testing.assert_array_equal(result, expected)
+        self.assertEqual(result[0], result[1])
+        self.assertNotEqual(result[0], result[10])
+        self.assertEqual(result[-1], -1)
+        self.assertEqual(metrics['fit_points'], 20)
+        self.assertEqual(metrics['unique_fit_points'], 6)
+        self.assertTrue(metrics['density_preserved_by_sample_weights'])
+
+    def test_dbscan_dense_exact_duplicates_do_not_allocate_quadratic_neighbors(self):
+        values = np.full((40000, 3), .25)
+        labels, metrics = MODULE._dbscan_partition(values,
+            config('dbscan', dbscan_min_samples=8, dbscan_max_neighbor_entries=8))
+        self.assertTrue(np.all(labels == 0))
+        self.assertEqual(metrics['unique_fit_points'], 1)
+        self.assertEqual(metrics['exact_duplicate_points'], 39999)
+        self.assertEqual(metrics['neighborhood_entries'], 1)
+        self.assertEqual(metrics['neighbor_index_bytes'], np.dtype(np.intp).itemsize)
+
+    def test_dbscan_dense_unique_neighborhood_guard_does_not_sample_or_change_eps(self):
+        values = np.arange(6, dtype=float)[:, None] / 100
+        cfg = config('dbscan', dbscan_eps=1., dbscan_max_neighbor_entries=25)
+        with self.assertRaisesRegex(MemoryError, 'no sampling or eps change'):
+            MODULE._dbscan_partition(values, cfg)
+        self.assertEqual(cfg.dbscan_eps, 1.)
+        np.testing.assert_array_equal(values[:, 0], np.arange(6) / 100)
+
+    def test_dbscan_parameters_reject_invalid_configuration(self):
+        for fields in ({'dbscan_eps': 0.}, {'dbscan_eps': float('nan')},
+                       {'dbscan_eps': True}, {'dbscan_min_samples': 0},
+                       {'dbscan_min_samples': True}, {'dbscan_max_neighbor_entries': -1}):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    config('dbscan', **fields).validate()
 
 
 if __name__ == '__main__':

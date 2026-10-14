@@ -13,7 +13,28 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
 birth_codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_birth_codec')
+opacity_codec = importlib.import_module('pipeline.ReCon-GS.model.sparse_opacity')
 fields = ('xyz', 'rotation', 'logscale', 'opacity', 'sh_dc', 'sh_rest')
+
+
+def apply_stream_opacity_update(directory, frame, current, old_count, manifest=None):
+    """Apply optional old-row logits AFTER births used preceding appearance."""
+    if manifest is None:
+        import json
+        path = directory / f'frame_{frame:03d}.json'
+        manifest = json.loads(path.read_text()) if path.exists() else {}
+    name = manifest.get('opacity_update')
+    expected = f'opacity_{frame:03d}.bin'
+    if name not in (None, expected):
+        raise ValueError('Opacity manifest filename differs from expected frame packet')
+    path = directory / expected
+    if name is None:
+        if path.exists():
+            raise ValueError('Unexpected opacity packet absent from frame manifest')
+        return current
+    current['opacity'][:old_count] = opacity_codec.decode_opacity_delta(
+        path.read_bytes(), current['opacity'][:old_count], frame_index=frame).logits
+    return current
 
 
 def replay(directory: Path, reference: Path, through: int):
@@ -56,6 +77,7 @@ def replay(directory: Path, reference: Path, through: int):
                 raise ValueError('Birth attributes disagree with decoded motion')
         elif birth_file.exists():
             raise ValueError('Unexpected birth stream for empty birth frame')
+        current = apply_stream_opacity_update(directory, frame, current, old_count)
         manifest_path = directory / f'frame_{frame:03d}.json'
         if manifest_path.exists():
             import json

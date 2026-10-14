@@ -20,6 +20,7 @@ from libgs.pipeline import TrainerConfig as BaseTrainerConfig
 from .data import PairedFetcher
 from .model.birth_quantization import RAW_FIELDS, model_raw
 from .model.rigid_residual_tree import initial_layout
+from libgs.metric import psnr
 
 
 @dataclass
@@ -30,6 +31,7 @@ class TrainerConfig(BaseTrainerConfig):
     saving_ckpt_frames: Optional[List[int]] = field(default_factory=lambda: [
         1, 29, 49, 63, 99, 149, 199, 249, 299])
     saving_ckpt_every_n_frames: int = 1000
+    stage_image_camera: Optional[str] = None
 
 
 class Trainer(BaseTrainer):
@@ -45,11 +47,40 @@ class Trainer(BaseTrainer):
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         self.global_step = int(ckpt['global_step'])
         self.datamodule.on_load_checkpoint(ckpt)
+        extension_plan = None
+        prefix = getattr(self, 'resume_prefix_dir', None)
+        if prefix is not None:
+            from .sequence_extension import validate_sequence_extension
+            from libgs.data.types import getNerfppNorm
+            if Path(ckpt_path).resolve().parent != Path(prefix).resolve():
+                raise ValueError('Extension checkpoint must belong to its source prefix run')
+            items = list(self.datamodule.scene.train_dataset.items)
+            if self.datamodule.scene.test_dataset is not None:
+                items += list(self.datamodule.scene.test_dataset.items)
+            first = [item for item in self.datamodule.scene.train_dataset.items if item.frame == 0]
+            if not first or getNerfppNorm(first)['radius'] != self.datamodule.cameras_extent:
+                raise ValueError('Extension scene extent must already be determined by frame0 cameras')
+            extension_plan = validate_sequence_extension(
+                checkpoint=ckpt, current_data_config=asdict(self.datamodule.config),
+                current_trainer_config=asdict(self.config), source_run=prefix,
+                destination_run=self.output_dir, current_extent=self.datamodule.cameras_extent,
+                current_images=[(item.frame, item.path) for item in items])
         if ckpt.get('rigid_tree_version') is not None:
-            if (ckpt.get('rigid_tree_data_config') != asdict(self.datamodule.config) or
-                    ckpt.get('rigid_tree_trainer_config') != asdict(self.config)):
+            saved_trainer = ckpt.get('rigid_tree_trainer_config')
+            if isinstance(saved_trainer, dict) and 'stage_image_camera' not in saved_trainer:
+                saved_trainer = {**saved_trainer, 'stage_image_camera': None}
+            if extension_plan is None and (
+                    ckpt.get('rigid_tree_data_config') != asdict(self.datamodule.config) or
+                    saved_trainer != asdict(self.config)):
                 raise ValueError('Rigid checkpoint needs matching data and trainer settings')
         self.module.on_load_checkpoint(ckpt)
+        if extension_plan is not None:
+            from .sequence_extension import copy_verified_prefix
+            provenance = copy_verified_prefix(extension_plan)
+            with (self.output_dir / 'prefix_provenance.json').open('x') as file:
+                json.dump(provenance, file, indent=2)
+            logging.info('Extending completed prefix 0–%d to %d frames; past packets copied unchanged',
+                         extension_plan.resume_frame, extension_plan.extended_frames)
         self._resume_rng = ckpt.get('rng_state')
         adaptive = self.module.config.rigid_tree.adaptive_clustering
         online_flat = self.module.config.rigid_tree.online_flat_clustering
@@ -88,6 +119,13 @@ class Trainer(BaseTrainer):
                 self._write_reference(frame_index=state.frame_index, state=state)
         logging.info('Loaded frame %d step %d from %s',
                      self.current_frame, self.global_step, ckpt_path)
+        if self.module.config.old_opacity.enabled:
+            logging.info('Sparse old opacity: birth phase only, %s step=%g, lr=%g, '
+                         'motion per-byte price x%g; birth predictor precedes opacity update',
+                         self.module.config.old_opacity.mode,
+                         self.module.config.old_opacity.step,
+                         self.module.config.old_opacity.learning_rate,
+                         self.module.config.old_opacity.storage_price_scale)
 
     def _write_reference(self, frame_index, state=None):
         """Lossless decoder bootstrap, including layout and static GS fields."""
@@ -238,6 +276,13 @@ class Trainer(BaseTrainer):
         train_loss = 0.0
         last_metrics = {}
         metrics_ema = dict(image=0., psnr=0.)
+        stage_view = None
+
+        def record_pre_structure():
+            nonlocal stage_view
+            stage_view = self._record_stage_image(self.global_step, stage_view,
+                                                 phase_override='pre_structure')
+
         with tqdm(total=self.num_steps, initial=self.global_step,
                   desc=f'Training frame {frame}', dynamic_ncols=True,
                   bar_format='{desc}: {percentage:3.0f}%|{bar}| '
@@ -249,7 +294,15 @@ class Trainer(BaseTrainer):
                 loss, metrics, package = self.module.training_step(viewpoint, step)
                 if loss.requires_grad:
                     loss.backward()
-                self.module.post_training_step(package)
+                pre_structure = (record_pre_structure
+                    if self.config.stage_image_camera is not None and
+                       self.module.config.rigid_tree.persistent_shared_from_start and
+                       step == self.module.config.rigid_tree.motion_steps else None)
+                self.module.post_training_step(package, pre_topology_callback=pre_structure)
+                if (self.config.stage_image_camera is not None and
+                        step in (self.module.config.rigid_tree.motion_steps,
+                                 self.module.motion_steps, self.module.total_steps)):
+                    stage_view = self._record_stage_image(step, stage_view)
                 train_loss += float(loss.detach())
                 last_metrics = metrics
                 for name, value in (('image', metrics['image_loss']), ('psnr', metrics['psnr'])):
@@ -262,6 +315,7 @@ class Trainer(BaseTrainer):
                     self.save_checkpoint()
         evaluation = self.validation_loop()
         report = dict(self.module.frame_report or {},
+            stage_image_metrics=self.module.stage_image_metrics,
             evaluation=evaluation, final_train_metrics=last_metrics,
             mean_train_loss=train_loss / max(1, executed_steps),
             train_loss_steps=executed_steps,
@@ -293,6 +347,54 @@ class Trainer(BaseTrainer):
                          gate.get('acceptance_policy'), gate.get('accepted'), gate.get('old', {}).get('bytes'),
                          candidate.get('bytes'), gate.get('packet_bytes_delta'), gate.get('decision_reason'))
         return report
+
+    @torch.no_grad()
+    def _record_stage_image(self, step, viewpoint=None, phase_override=None):
+        """One fixed heldout view; no gradients, selection, or RNG side effects."""
+        rng = self._capture_rng()
+        try:
+            if viewpoint is None:
+                loader = self.datamodule.test_dataloader()
+                if loader is None:
+                    raise ValueError('Stage image diagnostics require a heldout test dataset')
+                dataset = loader.dataset
+                indices = [index for index, item in enumerate(dataset.items)
+                           if Path(str(item.path)).name == self.config.stage_image_camera]
+                if len(indices) != 1:
+                    raise ValueError('Stage image camera must identify exactly one heldout view')
+                iterator = iter(loader)
+                try:
+                    for candidate in iterator:
+                        if Path(str(candidate.path)).name == self.config.stage_image_camera:
+                            viewpoint = candidate.to(self.device)
+                            break
+                    if viewpoint is None:
+                        raise ValueError('Stage image camera was not returned by the evaluation loader')
+                finally:
+                    shutdown = getattr(iterator, '_shutdown_workers', None)
+                    if shutdown is not None:
+                        shutdown()
+            old_only = step == self.module.motion_steps
+            rendered = self.module.forward(viewpoint, old_only=old_only)['render'].clamp(0, 1)
+            difference = rendered - viewpoint.image
+            labels = {self.module.config.rigid_tree.motion_steps: 'post_partition',
+                      self.module.motion_steps: 'post_joint_motion_old_only',
+                      self.module.total_steps: 'final_decoded_with_birth_and_opacity'}
+            record = dict(step=int(step), phase=phase_override or labels[step], camera=str(viewpoint.path),
+                          mse=float(difference.square().mean()),
+                          psnr=float(psnr(rendered, viewpoint.image)), old_only=old_only,
+                          shared_prestructure_active=bool(getattr(getattr(self.module, 'motion', None),
+                                                                 'shared_prestructure_active', False)),
+                          participates_in_training_or_selection=False)
+            records = self.module.stage_image_metrics
+            records[:] = [item for item in records
+                          if (item['step'], item['phase']) != (step, record['phase'])]
+            records.append(record)
+            logging.info('Stage heldout: frame=%d step=%d %s PSNR=%.6f MSE=%.9g',
+                         self.current_frame, step, record['phase'], record['psnr'], record['mse'])
+            return viewpoint
+        finally:
+            self._restore_rng(rng)
 
     @torch.no_grad()
     def validation_loop(self):

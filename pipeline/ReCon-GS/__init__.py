@@ -23,6 +23,7 @@ class Config(BaseConfig):
     experiment_name: str = datetime.now().strftime("%Y-%m-%d")
     mode: Literal["train", "validate"] = "train"
     ckpt_path: Optional[Path] = None
+    resume_prefix_dir: Optional[Path] = None
     gui_ip: str = "127.0.0.1"
     gui_port: int = 6009
     gui_enabled: bool = True
@@ -53,3 +54,6 @@ class Pipeline(BasePipeline):
         self.module = Module(self.config.module, datamodule=self.datamodule)
         self.module.gui_enabled = self.config.gui_enabled
         self.trainer = Trainer(self.config.trainer, output_dir=output_dir)
+        if self.config.resume_prefix_dir is not None and self.config.mode != 'train':
+            raise ValueError('Completed-prefix extension is a training entry point')
+        self.trainer.resume_prefix_dir = self.config.resume_prefix_dir

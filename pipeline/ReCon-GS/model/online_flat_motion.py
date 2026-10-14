@@ -5,6 +5,7 @@ implementation; this mixin is enabled only by online_flat_clustering.
 """
 
 import time
+from copy import deepcopy
 import numpy as np
 import torch
 from torch import nn
@@ -261,10 +262,19 @@ class OnlineFlatMotionMixin:
         if not score['valid']:
             raise ValueError('Refined motion does not match its decoded packet within quantization tolerance')
         refinement['after'] = self._online_refinement_snapshot(self.motion_steps, score)
+        if self.config.causal_translation_init:
+            self._record_translation_prediction_correction(self.motion_steps)
+        if self.config.persistent_regions.enabled:
+            self._finalize_persistent_evidence()
+            self.flat_region_diagnostics.setdefault('persistent', {})['evidence'] = deepcopy(self.persistent_state.region_evidence)
+            if self.config.persistent_regions.local_maintenance_enabled:
+                self.flat_region_diagnostics['local_residual_evidence'] = deepcopy(self.persistent_state.subset_last_observation)
+                self.flat_region_diagnostics['world_zero_evidence'] = deepcopy(self.persistent_state.world_zero_evidence)
         refinement['finalized'] = True
 
 
     def _update_online_region_diagnostics(self, target_xyz, target_q, old_owner=None, candidate_owner=None, decoded=None):
+        from copy import deepcopy
         from .online_motion_diagnostics import summarize_flat_regions
         shared_q, shared_b = self._global_regions()
         labels = self.cluster_labels
@@ -289,6 +299,23 @@ class OnlineFlatMotionMixin:
             noise_mask=None if labels is None else labels == -1,
             unknown_mask=None if labels is None else labels == -3,
             previous_owner=old_owner, candidate_owner=candidate_owner, extent=self.extent)
+        if self.config.persistent_regions.enabled:
+            from .persistent_motion_diagnostics import summarize_persistent_regions
+            rt, rr, gt, gr = self._values(hard=True)
+            identifiers = self.persistent_state.region_ids
+            if len(identifiers) != len(self.parents):
+                identifiers = torch.arange(len(self.parents))  # Initial Kmeans allocation.
+            summary = summarize_persistent_regions(source_xyz, target_xyz, source_q, target_q,
+                owner, self.parents, shared_q, shared_b, region_ids=identifiers,
+                surviving_count=len(self.owner), gs_translation_i16=gt, gs_rotation_i16=gr,
+                region_translation_i16=rt, region_rotation_i16=rr, observed_mask=observed,
+                previous_owner=old_owner, candidate_owner=candidate_owner,
+                static_mask=None if labels is None else labels == -2,
+                noise_mask=None if labels is None else labels == -1,
+                unknown_mask=None if labels is None else labels == -3,
+                extent=self.extent,
+                edit_metrics=deepcopy(self.flat_region_diagnostics.get('persistent', {})),
+                packet_metrics=deepcopy(self.flat_region_diagnostics.get('gate', {})))
         if old_owner is None:
             for name in ('ownership_changed_fraction', 'ownership_compared_gs',
                          'candidate_region_count', 'candidate_ownership_changed_fraction'):

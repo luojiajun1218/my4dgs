@@ -1,0 +1,141 @@
+# First100 images: causal GS translation initialization; existing local maintenance and opacity retained.
+# Free100 -> sharing adjustment -> joint motion100 -> birth+old-opacity100.
+experiment_name: fs_persistent_causalinit_first100_20261014
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+mode: train
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+random_seed: 0
+quiet: false
+gui_enabled: false
+detect_anomaly: false
+data:
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak
+  resolution: -1
+  white_background: false
+  split_train_test: true
+  shuffle: true
+  eval_train: false
+  eval_test: true
+  first_frame_eval_train: false
+  canonical_training_view_order: true
+  training_view_seed: 0
+  expected_image_size: [1600, 1199]
+  extra_dataset_kwargs:
+    num_frames: 100
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+trainer:
+  cache_data_on_device: true
+  num_init_steps: 15000
+  saving_ckpt_frames: [9, 29, 49, 99]
+  saving_ckpt_steps: [300]
+  stage_image_camera: cam00.png
+module:
+  sh_degree: 1
+  initial_opacity_threshold: 0.0075
+  lambda_dssim: 0.2
+  lpips_required: true
+  num_saving_images: 2
+  old_opacity:
+    enabled: true
+    step: 0.01
+    learning_rate: 0.05
+    storage_price_scale: 1.0
+  rigid_tree:
+    online_flat_clustering: true
+    online_partition_policy: accept_valid
+    post_partition_steps: 100
+    root_motion_discovery:
+      enabled: true
+      min_motion_observations: 2
+      min_region_size: 8
+      max_candidates: 2
+      spatial_scale_extent: 0.05
+    tree_child_relative_loss_weight: 0.001
+    motion_tree:
+      max_depth: 3
+      update_interval: 10
+      neighbors: 8
+      min_quantized_reduction: 0.25
+      history_frames: 5
+    persistent_regions:
+      enabled: true
+      tree_enabled: true
+      local_maintenance_enabled: true
+      local_subset_high_units: 4.0
+      local_subset_frames: 3
+      local_subset_max_new_leaves: 2
+      local_subset_spatial_scale_extent: 0.05
+      world_zero_frames: 3
+      structure_interval: 10
+      max_leaves: 64
+      min_region_size: 8
+      migration_gain: 0.25
+      migration_frames: 2
+      migration_neighbors: 8
+      split_p90_units: 4.0
+      split_frames: 3
+      idle_frames: 3
+      merge_neighbors: 8
+      max_merge_trials: 8
+      max_split_trials: 4
+    adaptive_clustering: true
+    residual_hierarchy: false
+    region_count: 1
+    motion_steps: 100
+    birth_steps: 100
+    shared_steps: 0
+    tree_edit_step: 100
+    motion_warm_start: false
+    causal_translation_init: true
+    gs_translation_lr: 0.0001
+    gs_rotation_lr: 0.0001
+    gs_xyz_step_extent: 0.0001
+    gs_rotation_step_rad: 0.001
+    motion_xyz_step_extent: 0.000005
+    motion_rotation_step_rad: 0.00005
+    region_translation_lr: 0.0005
+    region_rotation_lr: 0.00015
+    rate_loss_weight: 0.03
+    relative_motion_loss_weight: 0.006
+    rate_warmup_steps: 20
+    rate_ramp_steps: 20
+    online_clustering:
+      method: kmeans
+      history_frames: 5
+      update_interval: 1
+      min_region_size: 8
+      min_observations: 1
+      translation_scale_extent: 0.0004
+      static_translation_extent: 0.0004
+      rotation_feature_weight: 0.0
+      orientation_fit_weight: 0.0
+      component_counts: [1, 2, 4, 8]
+      max_fit_points: 8192
+      max_iter: 50
+      assignment_chunk_size: 4096
+      random_seed: 0
+  birth:
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    densify_interval: 40
+    densify_grad_threshold: 0.00015
+    opacity_threshold: 0.01
+    new_max_screen_size: 20.0
+    max_new_gaussians: null
+    new_xyz_step_extent: 0.00001
+    new_rotation_step: 0.001
+    new_logscale_step: 0.001
+    new_opacity_step: 0.01
+    new_sh_step: 0.001
+  gaussian_stage2:
+    position_lr_init: 0.0024
+    position_lr_final: 0.000024
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.075
+    opacity_lr: 0.75
+    scaling_lr: 0.075
+    rotation_lr: 0.015
+    percent_dense: 0.01

@@ -247,6 +247,8 @@ def _decode_frame(stream: Path, frame: int, state, raw):
             current[name] = torch.cat((current[name], newborn[name]))
     elif birth_file.exists():
         raise ValueError('Unexpected birth packet for empty birth frame')
+    from scripts.replay_rigid_tree import apply_stream_opacity_update
+    current = apply_stream_opacity_update(stream, frame, current, old_count)
     return decoded, current
 
 
@@ -377,23 +379,78 @@ def summarize_render_frames(rows):
 
 
 def _summarize_storage(rows):
-    """Actual dynamic packet bytes; the one-time bootstrap is reported apart."""
+    """Keep legacy payload metrics and separately count necessary JSON indices.
+
+    Historical rows without measured index sizes retain their payload metrics,
+    but complete-update metrics stay unknown rather than inventing zero bytes.
+    """
     dynamic = [row for row in rows if int(row['frame']) > 0]
     sizes = sorted(int(row['encoded_bytes']) for row in dynamic)
     motion = sum(int(row['motion_bytes']) for row in dynamic)
     birth = sum(int(row['birth_bytes']) for row in dynamic)
-    if not sizes:
-        return dict(dynamic_frame_count=0, motion_bytes_total=0,
-                    birth_bytes_total=0, encoded_bytes_total=0,
-                    encoded_bytes_mean=None, encoded_bytes_p95=None,
-                    encoded_bytes_max=None)
-    rank = .95 * (len(sizes) - 1)
-    low, high = int(rank), min(len(sizes) - 1, int(rank) + 1)
-    return dict(dynamic_frame_count=len(sizes), motion_bytes_total=motion,
-                birth_bytes_total=birth, encoded_bytes_total=motion + birth,
-                encoded_bytes_mean=(motion + birth) / len(sizes),
-                encoded_bytes_p95=sizes[low] + (sizes[high] - sizes[low]) * (rank - low),
-                encoded_bytes_max=sizes[-1])
+    opacity = sum(int(row.get('opacity_update_bytes', 0)) for row in dynamic)
+    for row in dynamic:
+        payload = (int(row['motion_bytes']) + int(row['birth_bytes']) +
+                   int(row.get('opacity_update_bytes', 0)))
+        if int(row['encoded_bytes']) != payload or int(row.get('payload_bytes', payload)) != payload:
+            raise ValueError('Dynamic payload bytes must equal actual motion, birth and optional opacity bytes')
+
+    def statistics_for(values):
+        if not values:
+            return dict(total=0, mean=None, p95=None, max=None)
+        values = sorted(values)
+        rank = .95 * (len(values) - 1)
+        low, high = int(rank), min(len(values) - 1, int(rank) + 1)
+        return dict(total=sum(values), mean=sum(values) / len(values),
+                    p95=values[low] + (values[high] - values[low]) * (rank - low),
+                    max=values[-1])
+
+    payload_stats = statistics_for(sizes)
+    result = dict(dynamic_frame_count=len(sizes), motion_bytes_total=motion,
+                  birth_bytes_total=birth,
+                  opacity_update_bytes_total=opacity,
+                  manifest_index_measured=all('manifest_index_bytes' in row for row in dynamic),
+                  encoded_bytes_scope='payload only: motion, birth and optional old-opacity packet files',
+                  complete_update_bytes_scope='payload plus necessary per-frame manifest JSON file')
+    for name, value in payload_stats.items():
+        result[f'encoded_bytes_{name}'] = value  # Preserve legacy payload names.
+        result[f'payload_bytes_{name}'] = value
+    if result['manifest_index_measured']:
+        indices, complete = [], []
+        for row in dynamic:
+            index_bytes = int(row['manifest_index_bytes'])
+            if index_bytes < 0:
+                raise ValueError('Manifest index bytes must be nonnegative')
+            complete_bytes = int(row['encoded_bytes']) + index_bytes
+            if int(row.get('complete_update_bytes', complete_bytes)) != complete_bytes:
+                raise ValueError('Complete update bytes must include payload and manifest index')
+            indices.append(index_bytes)
+            complete.append(complete_bytes)
+        index_stats, complete_stats = statistics_for(indices), statistics_for(complete)
+    else:
+        index_stats = complete_stats = dict(total=None, mean=None, p95=None, max=None)
+    for name, value in index_stats.items():
+        result[f'manifest_index_bytes_{name}'] = value
+    for name, value in complete_stats.items():
+        result[f'complete_update_bytes_{name}'] = value
+    return result
+
+
+def _summarize_sequence_storage(rows, reference_bytes):
+    """Separate payload-compatible totals from complete exported sequence size."""
+    dynamic = _summarize_storage(rows)
+    payload_total = int(reference_bytes) + dynamic['payload_bytes_total']
+    complete_total = (None if dynamic['complete_update_bytes_total'] is None else
+                      int(reference_bytes) + dynamic['complete_update_bytes_total'])
+    return dict(bootstrap_reference_bytes=int(reference_bytes), dynamic_packets=dynamic,
+                manifest_index_bytes_total=dynamic['manifest_index_bytes_total'],
+                complete_update_bytes_total=dynamic['complete_update_bytes_total'],
+                total_reference_and_dynamic_bytes=payload_total,  # Legacy payload scope.
+                total_reference_and_dynamic_payload_bytes=payload_total,
+                total_reference_and_complete_update_bytes=complete_total,
+                accounting_version=2,
+                scopes=dict(total_reference_and_dynamic_bytes='legacy: bootstrap reference plus dynamic payload only',
+                    total_reference_and_complete_update_bytes='bootstrap reference plus every dynamic payload and manifest index'))
 
 
 def _sequence_groups(rows, segment_size):
@@ -439,20 +496,34 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
     """Stat packet files and reject stale or misleading saved size metadata."""
     motion_name = f'motion_{frame:03d}.bin'
     birth_name = f'birth_{frame:03d}.bin'
-    if manifest.get('motion') != motion_name or manifest.get('birth') not in (None, birth_name):
+    opacity_name = f'opacity_{frame:03d}.bin'
+    if (manifest.get('motion') != motion_name or manifest.get('birth') not in (None, birth_name) or
+            manifest.get('opacity_update') not in (None, opacity_name)):
         raise ValueError(f'Frame {frame} manifest packet names differ from expected files')
     motion_bytes = (stream / motion_name).stat().st_size
     birth_bytes = (stream / birth_name).stat().st_size if manifest['birth'] else 0
+    opacity_bytes = (stream / opacity_name).stat().st_size if manifest.get('opacity_update') else 0
+    if not manifest.get('opacity_update') and (stream / opacity_name).exists():
+        raise ValueError('Opacity packet is not declared by frame manifest')
+    manifest_index_bytes = (stream / f'frame_{frame:03d}.json').stat().st_size
     saved_motion = summary['motion']['bytes']
     saved_birth = summary['birth']['archive_bytes'] if summary.get('birth') else 0
-    if (saved_motion != motion_bytes or saved_birth != birth_bytes or
-            summary['encoded_bytes'] != motion_bytes + birth_bytes or
+    saved_opacity = summary['opacity_update']['archive_bytes'] if summary.get('opacity_update') else 0
+    payload = motion_bytes + birth_bytes + opacity_bytes
+    if (saved_motion != motion_bytes or saved_birth != birth_bytes or saved_opacity != opacity_bytes or
+            summary['encoded_bytes'] != payload or
             summary['shared_reference_bytes'] != reference_bytes or
             summary['decoder_reference'] != relative_reference or
             (summary.get('birth') is None) != (manifest['birth'] is None)):
         raise ValueError(f'Frame {frame} saved storage summary differs from actual files')
-    return dict(motion_bytes=motion_bytes, birth_bytes=birth_bytes,
-                encoded_bytes=motion_bytes + birth_bytes)
+    result = dict(motion_bytes=motion_bytes, birth_bytes=birth_bytes,
+                encoded_bytes=payload,
+                payload_bytes=payload,
+                manifest_index_bytes=manifest_index_bytes,
+                complete_update_bytes=payload + manifest_index_bytes)
+    if 'opacity_update' in manifest:
+        result['opacity_update_bytes'] = opacity_bytes
+    return result
 
 
 def _time_sequence_render(module, view, warmups, timed):
@@ -542,7 +613,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         if test_views != 1:
             raise ValueError('Complete-sequence cam00 PSNR needs one test view per frame')
         expected = None
-        storage = dict(motion_bytes=0, birth_bytes=0, encoded_bytes=0)
+        storage = dict(motion_bytes=0, birth_bytes=0, opacity_update_bytes=0, encoded_bytes=0,
+                       payload_bytes=0, manifest_index_bytes=0, complete_update_bytes=0)
         if frame:
             summary = json.loads((run / 'frame_summary' /
                 f'frame_{frame:03d}.json').read_text())
@@ -566,10 +638,12 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         if (frame + 1) % 50 == 0 or frame == num_frames - 1:
             completed = summarize_render_frames(rows)
             total_bytes = sum(row['encoded_bytes'] for row in rows)
+            complete_bytes = sum(row['complete_update_bytes'] for row in rows)
             print(f"Sequence {frame + 1}/{num_frames}: "
                   f"render {completed['aggregate_fps']:.2f} FPS, "
                   f"mean PSNR {completed['psnr_mean']:.3f} dB, "
-                  f"dynamic packets {total_bytes} bytes", flush=True)
+                  f"dynamic payload {total_bytes} bytes, "
+                  f"with manifest indices {complete_bytes} bytes", flush=True)
         if ((frame + 1) % args.gpu_check_interval == 0 or
                 frame == num_frames - 1):
             checks.append(dict(after_frame=frame,
@@ -581,10 +655,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         expected_frames=num_frames, measured_frames=len(rows),
         image_shape=[3, 1199, 1600], cache_enabled=cache_enabled,
         gpu_name=torch.cuda.get_device_name(device),
-        storage=dict(bootstrap_reference_bytes=reference_bytes,
-                     dynamic_packets=_summarize_storage(rows),
-                     total_reference_and_dynamic_bytes=(
-                         reference_bytes + sum(row['encoded_bytes'] for row in rows))),
+        storage=_summarize_sequence_storage(rows, reference_bytes),
         timing_protocol=dict(warmups_per_frame=args.sequence_warmups,
             timed_full_renders_per_frame=args.sequence_renders,
             cuda_synchronize_before_and_after=True,
@@ -597,7 +668,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         scopes=dict(render_fps='Only synchronized full materialized render + clamp '
                     'after per-frame decode/upload; warmups, camera loading, quality '
                     'checks and decode are excluded.',
-                    decode='Motion/birth file reads, CPU decode and manifest verification '
+                    decode='Motion/birth/optional-opacity file reads, CPU decode and manifest verification '
                            'reported separately; initial reference load is one-time '
                            'and excluded.'),
         no_training_updates=True)
@@ -607,6 +678,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         dynamic_frames_fps=groups['dynamic_frames']['aggregate_fps'],
         all_frames_psnr=groups['all_frames']['psnr_mean'],
         dynamic_frames_psnr=groups['dynamic_frames']['psnr_mean'],
+        dynamic_payload_bytes_mean=result['storage']['dynamic_packets']['payload_bytes_mean'],
+        complete_update_bytes_mean=result['storage']['dynamic_packets']['complete_update_bytes_mean'],
         output=str(args.output))))
 
 

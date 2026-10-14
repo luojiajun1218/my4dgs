@@ -240,6 +240,44 @@ class OnlineFlatIntegrationTests(unittest.TestCase):
                     model.export_motion(Path(directory) / 'motion_001.bin')
                 self.assert_diagnostics_json_roundtrip(model.flat_region_diagnostics)
 
+    def test_actual_dbscan_partition_codec_and_json_with_static_noise_unknown_rows(self):
+        rigid, _, _, codec = self.modules()
+        base = self.fixture()
+        clustering = replace(base.config.online_clustering, method='dbscan',
+                             min_region_size=8, dbscan_eps=1., dbscan_min_samples=8)
+        model = rigid.RigidResidualTree(replace(base.config, online_clustering=clustering))
+        model.setup(base.base_xyz, base.base_rotation, 1., frame_index=1)
+        prior = model.frame_reference_state
+        model.observations.fill_(10)
+        model.observations[0] = 0
+        with torch.no_grad():
+            model.gs_translation[:24, 0] = .02
+            model.gs_translation[24:, 1] = .05
+            model.gs_translation[1] = 0
+            model.gs_translation[2] = torch.tensor([.3, -.2, .05])
+        model.update_topology(100)
+        report = self.assert_diagnostics_json_roundtrip(model.flat_region_diagnostics)
+        self.assertEqual(report['proposal']['method'], 'dbscan')
+        self.assertEqual(report['proposal']['candidate_regions'], 2)
+        self.assertEqual(model.cluster_labels[:3].tolist(), [-3, -2, -1])
+        self.assertTrue(report['gate']['accepted'])
+        self.assertEqual(model.owner[:3].tolist(), [0, 0, 0])
+        self.assertEqual(int((model.owner > 0).sum()), 45)
+        self.assertEqual(len(torch.unique(model.owner)), 3)
+        self.assertAlmostEqual(report['regions']['unknown_fraction'], 1 / 48)
+        self.assertAlmostEqual(report['regions']['noise_fraction'], 1 / 48)
+        self.assertAlmostEqual(report['regions']['static_fraction'], 1 / 48)
+        pose = tuple(value.detach().clone() for value in model.materialized_pose())
+        model.register_materialized_layout(*pose)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'motion_001.bin'
+            model.export_motion(path)
+            decoded = codec.decode_motion(path.read_bytes(), prior)
+        self.assertTrue(torch.equal(decoded.owner, model.owner))
+        self.assertEqual(decoded.digest(), model.codec_previous_state.digest())
+        self.assertEqual(len(model.online_history.records), 1)
+        self.assert_diagnostics_json_roundtrip(model.flat_region_diagnostics)
+
     def test_complete_packet_gate_frame0_immutability_and_causal_export(self):
         rigid, _, flat, codec = self.modules()
         model = self.fixture()

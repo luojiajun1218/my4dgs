@@ -19,6 +19,12 @@ from .residual_region_clustering import ResidualGmmConfig, ResidualHdbscanConfig
 from .heir_motion_hierarchy import HeirHierarchyConfig, HeirMotionHierarchy
 from .motion_history import MotionHistory
 from .online_motion_clustering import OnlineMotionClusteringConfig, OnlineMotionHistory
+from .persistent_motion_regions import PersistentRegionConfig, PersistentRegionState, PersistentMotionMixin
+from .online_motion_tree import MotionTreeConfig
+from .persistent_motion_tree_integration import PersistentMotionTreeMixin
+from .persistent_local_motion import PersistentLocalMotionMixin
+from .causal_motion_initialization import CausalTranslationInitializationMixin
+from .root_motion_discovery import RootMotionDiscoveryConfig
 
 
 @dataclass
@@ -52,6 +58,8 @@ class RigidTreeConfig:
     adaptive_clustering: bool = False  # False reads/tests the existing fixed-layout method.
     bootstrap_tree_step: int = 20
     motion_warm_start: bool = False
+    causal_translation_init: bool = False
+    persistent_shared_from_start: bool = False
     clustering: MotionClusteringConfig = field(default_factory=MotionClusteringConfig)
     residual_hierarchy: bool = False  # True: HDBSCAN regions + HEIR learned parents.
     tree_refine_steps: int = 0
@@ -64,6 +72,10 @@ class RigidTreeConfig:
     online_partition_policy: str = 'accept_valid'
     post_partition_steps: int = 0
     online_clustering: OnlineMotionClusteringConfig = field(default_factory=OnlineMotionClusteringConfig)
+    persistent_regions: PersistentRegionConfig = field(default_factory=PersistentRegionConfig)
+    motion_tree: MotionTreeConfig = field(default_factory=MotionTreeConfig)
+    tree_child_relative_loss_weight: float = .001
+    root_motion_discovery: RootMotionDiscoveryConfig = field(default_factory=RootMotionDiscoveryConfig)
 
     def tree_frame(self, frame):
         return frame >= 1 and (frame == 1 or frame % self.tree_edit_interval == 0)
@@ -91,6 +103,30 @@ class RigidTreeConfig:
             raise ValueError('shared_fit_min_reduction must be in [0, 1)')
         self.heir.validate()
         self.online_clustering.validate()
+        self.persistent_regions.validate()
+        self.motion_tree.validate()
+        self.root_motion_discovery.validate()
+        if not isinstance(self.causal_translation_init, bool):
+            raise ValueError('causal_translation_init must be boolean')
+        if not isinstance(self.persistent_shared_from_start, bool):
+            raise ValueError('persistent_shared_from_start must be boolean')
+        if self.persistent_shared_from_start and (not self.online_flat_clustering or
+                not self.persistent_regions.enabled or self.post_partition_steps < 1 or
+                self.motion_warm_start or self.shared_steps != 0):
+            raise ValueError('Shared-from-start requires persistent online regions, refinement, zero initial increments, and concurrent GS fitting')
+        if self.causal_translation_init and (not self.online_flat_clustering or
+                self.motion_warm_start or self.online_clustering.history_frames < 2):
+            raise ValueError('Causal translation initialization requires online history>=2 and no legacy warm start')
+        if self.root_motion_discovery.enabled and (not self.persistent_regions.enabled or
+                self.online_clustering.history_frames < self.root_motion_discovery.min_motion_observations):
+            raise ValueError('Root discovery requires persistent regions and enough causal motion history')
+        if (isinstance(self.tree_child_relative_loss_weight, bool) or
+                not math.isfinite(self.tree_child_relative_loss_weight) or self.tree_child_relative_loss_weight < 0):
+            raise ValueError('tree_child_relative_loss_weight must be nonnegative')
+        if self.persistent_regions.enabled and (not self.online_flat_clustering or
+                self.post_partition_steps < 1 or self.online_clustering.method != 'kmeans' or
+                self.motion_warm_start):
+            raise ValueError('Persistent regions require Kmeans initialization, online refinement, and zero initial shared increments')
         if self.online_partition_policy not in ('accept_valid', 'require_smaller'):
             raise ValueError('online_partition_policy must be accept_valid or require_smaller')
         if (isinstance(self.post_partition_steps, bool) or
@@ -180,11 +216,16 @@ def saved_config_with_default_motion_lr(saved_config):
                         hdbscan=asdict(ResidualHdbscanConfig()), heir=asdict(HeirHierarchyConfig()),
                         residual_clustering_method='hdbscan', gmm=asdict(ResidualGmmConfig()),
                         shared_fit_min_reduction=0.05, rate_normalization='frame')
-        defaults.update(online_flat_clustering=False,
+        defaults.update(online_flat_clustering=False, causal_translation_init=False,
+                        persistent_shared_from_start=False,
                         post_partition_steps=0,
                         online_partition_policy=('require_smaller' if
                             saved_config.get('online_flat_clustering', False) else 'accept_valid'),
                         online_clustering=asdict(OnlineMotionClusteringConfig()))
+        defaults['persistent_regions'] = asdict(PersistentRegionConfig())
+        defaults['motion_tree'] = asdict(MotionTreeConfig())
+        defaults['tree_child_relative_loss_weight'] = .001
+        defaults['root_motion_discovery'] = asdict(RootMotionDiscoveryConfig())
         normalized = {**defaults, **saved_config}
         normalized['hdbscan'] = {**asdict(ResidualHdbscanConfig()),
                                  **saved_config.get('hdbscan', {})}
@@ -192,6 +233,11 @@ def saved_config_with_default_motion_lr(saved_config):
         normalized['heir'] = {**asdict(HeirHierarchyConfig()), **saved_config.get('heir', {})}
         normalized['online_clustering'] = {**asdict(OnlineMotionClusteringConfig()),
                                          **saved_config.get('online_clustering', {})}
+        normalized['persistent_regions'] = {**asdict(PersistentRegionConfig()),
+                                          **saved_config.get('persistent_regions', {})}
+        normalized['motion_tree'] = {**asdict(MotionTreeConfig()), **saved_config.get('motion_tree', {})}
+        normalized['root_motion_discovery'] = {**asdict(RootMotionDiscoveryConfig()),
+                                             **saved_config.get('root_motion_discovery', {})}
         return normalized
     return saved_config
 
@@ -419,7 +465,7 @@ from .adaptive_motion_tree import AdaptiveMotionTreeMixin
 from .online_flat_motion import OnlineFlatMotionMixin
 
 
-class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Module):
+class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMotionMixin, PersistentMotionTreeMixin, PersistentMotionMixin, OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Module):
     def __init__(self, config):
         super().__init__()
         config.validate()
@@ -458,6 +504,8 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
         self.materialized_online_ids = None
         self.online_next_id = 0
         self.flat_region_diagnostics = {}
+        self.persistent_state = PersistentRegionState()
+        self._reset_causal_translation_prediction()
 
     @property
     def steps(self):
@@ -564,6 +612,7 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
         self.region_rotation = nn.Parameter(xyz.new_zeros(count, 3))
         self.gs_translation = nn.Parameter(torch.zeros_like(xyz))
         self.gs_rotation = nn.Parameter(torch.zeros_like(xyz))
+        self._initialize_causal_translation_prediction()
         self.optimizer = torch.optim.Adam([
             dict(params=[self.region_translation], lr=self.config.region_translation_lr),
             dict(params=[self.region_rotation], lr=self.config.region_rotation_lr),
@@ -597,6 +646,10 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
                     self.frame_index % self.config.online_clustering.update_interval == 0)}
         if warm is not None:
             self._initialize_warm_motion(warm)
+        if self.config.persistent_regions.enabled:
+            self._persistent_start_frame()
+        if self.config.causal_translation_init:
+            self.flat_region_diagnostics['translation_initialization'] = deepcopy(self.causal_prediction_metrics)
 
     def _values(self, hard=False, step=None):
         region_step, gs_step = self.steps, self.gs_steps
@@ -627,12 +680,22 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
     def materialized_pose(self, step=None):
         return self.forward(self.motion_steps if step is None else step)
 
+    @property
+    def shared_prestructure_active(self):
+        # This reference is the previous decoded frame, not the layout which
+        # current step100 can create. Delayed first discovery stays free.
+        reference = self.frame_reference_state
+        return bool(self.config.persistent_shared_from_start and
+                    self.config.online_flat_clustering and self.config.persistent_regions.enabled and
+                    reference is not None and reference.frame_index >= 1 and
+                    reference.owner.ne(0).any())
+
     @torch.no_grad()
-    def optimizer_step(self):
+    def optimizer_step(self, pre_topology_callback=None):
         if (self.config.online_flat_clustering and self.config.post_partition_steps > 0 and
-                self.last_step <= self.config.motion_steps):
-            # Each frame starts with zero shared transforms. Fit independent GS
-            # first; the accepted partition enables joint shared/residual fitting.
+                self.last_step <= self.config.motion_steps and not self.shared_prestructure_active):
+            # First discovery fits independent GS. With inherited sharing
+            # enabled, the previous decoded basis can learn from step1.
             self.region_translation.grad = None
             self.region_rotation.grad = None
         if self.last_step <= self.config.shared_steps:
@@ -668,12 +731,21 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
             # in the same step as a pose-preserving tree edit.
             self._proximal_region_blocks()
             self._proximal_gs_blocks()
+        if (self.config.causal_translation_init and
+                self.last_step == self.config.motion_steps):
+            self._fallback_unobserved_translation_prediction()
+        if pre_topology_callback is not None and self.last_step == self.config.motion_steps:
+            pre_topology_callback()
         edits = self.update_topology(self.last_step) if self.config.adaptive_clustering else []
         if not residual_edit:
             self._proximal_region_blocks()
             if self.last_step > self.config.shared_steps:
                 self._proximal_gs_blocks()
         self.last_metrics['motion/int16_projected_blocks'] = projected
+        if self.config.causal_translation_init and self.last_step == self.config.motion_steps:
+            self._record_translation_prediction_correction(self.last_step)
+        if self.config.persistent_shared_from_start and self.last_step == self.config.motion_steps:
+            self.flat_region_diagnostics['shared_prestructure_active'] = self.shared_prestructure_active
         self.optimizer.zero_grad(set_to_none=True)
         return edits
 
@@ -759,7 +831,8 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
 
     def stage(self, step):
         if self.config.online_flat_clustering:
-            due = self.frame_index == 1 or self.frame_index % self.config.online_clustering.update_interval == 0
+            due = (self.config.persistent_regions.enabled or self.frame_index == 1 or
+                   self.frame_index % self.config.online_clustering.update_interval == 0)
             if step > self.motion_steps:
                 return 'birth_fit'
             if due and step == self.config.motion_steps and not self._topology_updated:
@@ -883,6 +956,11 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
                       rate_bytes_surrogate=soft_bytes,
                       rate_fraction=rate,
                       relative_motion=relative)
+        if self.config.persistent_regions.tree_enabled:
+            child_relative = self._tree_child_relative_motion()
+            result.update(child_relative_motion_loss=child_relative * self.config.tree_child_relative_loss_weight,
+                          child_relative_motion=child_relative,
+                          child_relative_motion_region_count=self.base_xyz.new_tensor(int((self.parents > 0).sum())))
         if diagnostics:
             # This is the exact size of the uncompressed delta-row stream.
             # The actual stored size is known only after export_motion.
@@ -933,6 +1011,14 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
             self.region_translation[1:], self.region_rotation[1:],
             self.extent).mean()
 
+    def _tree_child_relative_motion(self):
+        """Shrink child corrections without shrinking root-level shared motion."""
+        children = self.parents > 0
+        if self.last_step <= self.config.motion_steps or not bool(children.any()):
+            return self.gs_translation.sum() * 0
+        return relative_motion_magnitude(self.region_translation[children],
+            self.region_rotation[children], self.extent).mean()
+
     @torch.no_grad()
     def _residual_for_target(self, target_xyz, target_rotation, candidate_owner,
                              q_global=None, b_global=None):
@@ -956,6 +1042,8 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
         checked against the current decoded target and a cycle-free hierarchy.
         """
         if self.config.online_flat_clustering:
+            if self.config.persistent_regions.enabled:
+                return self._update_persistent_regions(step) if self.stage(step) == 'flat_partition' else []
             return self._update_online_flat_partition(step) if self.stage(step) == 'flat_partition' else []
         if self.config.residual_hierarchy:
             if self.stage(step) == 'tree_edit':
@@ -1257,6 +1345,8 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
                     online_history=self.online_history.state_dict(),
                     online_ids=self.online_ids, materialized_online_ids=self.materialized_online_ids,
                     online_next_id=self.online_next_id, flat_region_diagnostics=deepcopy(self.flat_region_diagnostics),
+                    persistent_state=self.persistent_state.capture(),
+                    causal_translation_prediction=self._capture_causal_translation_prediction(),
                     heir_finalized=self.heir_finalized,
                     heir_state=(None if self.heir_hierarchy is None else self.heir_hierarchy.state_dict()),
                     heir_optimizer=(None if self.heir_optimizer is None else self.heir_optimizer.state_dict()),
@@ -1315,6 +1405,8 @@ class RigidResidualTree(OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Modul
             self.materialized_online_ids = self.materialized_online_ids.detach().cpu().long()
         self.online_next_id = int(packet.get('online_next_id', 0))
         self.flat_region_diagnostics = deepcopy(packet.get('flat_region_diagnostics', {}))
+        self.persistent_state.restore(packet.get('persistent_state', {}))
+        self._restore_causal_translation_prediction(packet.get('causal_translation_prediction'))
         self.heir_finalized = bool(packet.get('heir_finalized', False))
         self.heir_hierarchy = None
         self.heir_optimizer = None

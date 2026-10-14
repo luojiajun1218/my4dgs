@@ -14,13 +14,18 @@ from scripts import benchmark_rigid_residual_tree as benchmark
 
 
 def frame_row(frame, seconds, psnr, decode_seconds=0., motion_bytes=0,
-              birth_bytes=0):
-    return dict(frame=frame, timed_renders=50, render_seconds=seconds,
+              birth_bytes=0, manifest_index_bytes=None):
+    row = dict(frame=frame, timed_renders=50, render_seconds=seconds,
                 file_decode_verify_seconds=decode_seconds,
                 upload_seconds=decode_seconds,
                 motion_bytes=motion_bytes, birth_bytes=birth_bytes,
                 encoded_bytes=motion_bytes + birth_bytes,
                 quality=dict(psnr=psnr))
+    if manifest_index_bytes is not None:
+        row.update(payload_bytes=motion_bytes + birth_bytes,
+                   manifest_index_bytes=manifest_index_bytes,
+                   complete_update_bytes=motion_bytes + birth_bytes + manifest_index_bytes)
+    return row
 
 
 class SequenceAggregationTests(unittest.TestCase):
@@ -50,7 +55,8 @@ class SequenceAggregationTests(unittest.TestCase):
     def test_all_300_and_dynamic_299_ranges_and_segment_weights(self):
         rows = [frame_row(frame, 1. if frame < 150 else 2.,
                           30. + frame / 1000., decode_seconds=999.,
-                          motion_bytes=frame, birth_bytes=2 * frame)
+                          motion_bytes=frame, birth_bytes=2 * frame,
+                          manifest_index_bytes=0 if frame == 0 else 400 + len(str(frame)))
                 for frame in range(300)]
         result = benchmark._sequence_groups(rows, segment_size=50)
         self.assertEqual(result['all_frames']['frame_count'], 300)
@@ -74,6 +80,17 @@ class SequenceAggregationTests(unittest.TestCase):
         self.assertEqual(storage['encoded_bytes_mean'], 450.)
         self.assertAlmostEqual(storage['encoded_bytes_p95'], 3 * 284.1)
         self.assertEqual(storage['encoded_bytes_max'], 897)
+        expected_index_total = sum(400 + len(str(frame)) for frame in range(1, 300))
+        self.assertEqual(storage['manifest_index_bytes_total'], expected_index_total)
+        self.assertEqual(storage['payload_bytes_mean'], storage['encoded_bytes_mean'])
+        self.assertAlmostEqual(storage['complete_update_bytes_mean'],
+                               (3 * sum(range(1, 300)) + expected_index_total) / 299)
+        self.assertEqual(storage['complete_update_bytes_max'], 897 + 403)
+        whole_storage = benchmark._summarize_sequence_storage(rows, reference_bytes=12345)
+        self.assertEqual(whole_storage['total_reference_and_dynamic_bytes'],
+                         12345 + 3 * sum(range(1, 300)))
+        self.assertEqual(whole_storage['total_reference_and_complete_update_bytes'],
+                         whole_storage['total_reference_and_dynamic_bytes'] + expected_index_total)
         self.assertEqual(result['all_segments'][0]['storage']['encoded_bytes_total'],
                          3 * sum(range(1, 50)))
         self.assertEqual(result['bootstrap_frame0']['storage']['dynamic_frame_count'], 0)
@@ -91,13 +108,17 @@ class SequenceAggregationTests(unittest.TestCase):
             (stream / 'motion_001.bin').write_bytes(b'12345')
             (stream / 'birth_001.bin').write_bytes(b'ab')
             manifest = dict(motion='motion_001.bin', birth='birth_001.bin')
+            manifest_path = stream / 'frame_001.json'
+            manifest_path.write_text(json.dumps(manifest))
             summary = dict(motion=dict(bytes=5), birth=dict(archive_bytes=2),
                            encoded_bytes=7, shared_reference_bytes=11,
                            decoder_reference='reference_frame0.npz')
             measured = benchmark._actual_frame_storage(
                 stream, 1, manifest, summary, 11, 'reference_frame0.npz')
             self.assertEqual(measured, dict(motion_bytes=5, birth_bytes=2,
-                                            encoded_bytes=7))
+                encoded_bytes=7, payload_bytes=7,
+                manifest_index_bytes=manifest_path.stat().st_size,
+                complete_update_bytes=7 + manifest_path.stat().st_size))
             summary['encoded_bytes'] = 8
             with self.assertRaisesRegex(ValueError, 'storage summary'):
                 benchmark._actual_frame_storage(
@@ -107,6 +128,52 @@ class SequenceAggregationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'storage summary'):
                 benchmark._actual_frame_storage(
                     stream, 1, manifest, summary, 11, 'reference_frame0.npz')
+
+    def test_manifest_actual_bytes_change_complete_mean_without_changing_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stream = Path(directory)
+            (stream / 'motion_001.bin').write_bytes(b'12345')
+            manifest = dict(motion='motion_001.bin', birth=None)
+            path = stream / 'frame_001.json'
+            path.write_text(json.dumps(manifest), encoding='utf-8')
+            summary = dict(motion=dict(bytes=5), birth=None, encoded_bytes=5,
+                           shared_reference_bytes=11, decoder_reference='reference_frame0.npz')
+            first = benchmark._actual_frame_storage(stream, 1, manifest, summary,
+                                                     11, 'reference_frame0.npz')
+            # UTF-8 byte length and formatting can differ from character count.
+            path.write_text(json.dumps({**manifest, 'note': '实际索引'},
+                                       ensure_ascii=False, indent=2), encoding='utf-8')
+            second = benchmark._actual_frame_storage(stream, 1, manifest, summary,
+                                                      11, 'reference_frame0.npz')
+            self.assertEqual(first['encoded_bytes'], second['encoded_bytes'])
+            self.assertEqual(second['manifest_index_bytes'], path.stat().st_size)
+            self.assertGreater(second['manifest_index_bytes'], first['manifest_index_bytes'])
+            self.assertGreater(second['manifest_index_bytes'], len(path.read_text(encoding='utf-8')))
+            rows = [frame_row(0, 1., 30., manifest_index_bytes=0),
+                    dict(frame=1, **first), dict(frame=2, **second)]
+            result = benchmark._summarize_sequence_storage(rows, reference_bytes=11)
+            dynamic = result['dynamic_packets']
+            self.assertEqual(dynamic['encoded_bytes_mean'], 5.)
+            self.assertEqual(dynamic['complete_update_bytes_mean'],
+                             (first['complete_update_bytes'] + second['complete_update_bytes']) / 2)
+            self.assertEqual(result['total_reference_and_complete_update_bytes'],
+                             11 + first['complete_update_bytes'] + second['complete_update_bytes'])
+            path.unlink()
+            with self.assertRaises(FileNotFoundError):
+                benchmark._actual_frame_storage(stream, 1, manifest, summary,
+                                                 11, 'reference_frame0.npz')
+
+    def test_historical_rows_cannot_silently_claim_zero_index_bytes(self):
+        row = frame_row(1, 1., 34., motion_bytes=50000)
+        summary = benchmark._summarize_sequence_storage([row], reference_bytes=11)
+        self.assertEqual(summary['dynamic_packets']['encoded_bytes_mean'], 50000.)
+        self.assertFalse(summary['dynamic_packets']['manifest_index_measured'])
+        self.assertIsNone(summary['dynamic_packets']['complete_update_bytes_mean'])
+        self.assertIsNone(summary['total_reference_and_complete_update_bytes'])
+        measured = frame_row(1, 1., 34., motion_bytes=50000, manifest_index_bytes=436)
+        measured['complete_update_bytes'] = 50000
+        with self.assertRaisesRegex(ValueError, 'include payload and manifest'):
+            benchmark._summarize_storage([measured])
 
     def test_missing_duplicate_and_nonpositive_samples_fail(self):
         for rows in ([frame_row(0, 1., 30.), frame_row(2, 1., 30.)],

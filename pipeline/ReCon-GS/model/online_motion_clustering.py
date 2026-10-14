@@ -38,17 +38,21 @@ class OnlineMotionClusteringConfig:
     gmm_reg_covar: float = 1e-4
     hdbscan_min_samples: int = 8
     hdbscan_allow_single_cluster: bool = True
+    dbscan_eps: float = 1.0
+    dbscan_min_samples: int = 8
+    dbscan_max_neighbor_entries: int = 250_000_000
     greedy_seed_size: int = 32
     greedy_neighbors: int = 8
     greedy_max_regions: int = 64
     greedy_fit_tolerance_extent: float = 4e-4
 
     def validate(self):
-        if self.method not in ('kmeans', 'gmm', 'hdbscan', 'greedy'):
-            raise ValueError('online clustering method must be kmeans/gmm/hdbscan/greedy')
+        if self.method not in ('kmeans', 'gmm', 'hdbscan', 'dbscan', 'greedy'):
+            raise ValueError('online clustering method must be kmeans/gmm/hdbscan/dbscan/greedy')
         for name in ('history_frames', 'update_interval', 'min_region_size',
                      'min_observations', 'max_fit_points', 'max_iter',
                      'assignment_chunk_size', 'hdbscan_min_samples',
+                     'dbscan_min_samples', 'dbscan_max_neighbor_entries',
                      'greedy_seed_size', 'greedy_neighbors', 'greedy_max_regions'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -65,6 +69,7 @@ class OnlineMotionClusteringConfig:
         for name in ('translation_scale_extent', 'static_translation_extent',
                      'rotation_scale_rad', 'orientation_length_extent',
                      'max_feature_distance', 'gmm_reg_covar',
+                     'dbscan_eps',
                      'greedy_fit_tolerance_extent'):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -195,17 +200,20 @@ def _features(window, rows, slots, extent, config):
     return features.reshape(len(rows), -1) / math.sqrt(len(slots))
 
 
-def _statistical_partition(values, config, fit_budget):
+def _statistical_partition(values, config, fit_budget, *, reject_feature_distance=True):
     """Bounded deterministic model selection followed by chunked rejection."""
     from threadpoolctl import threadpool_limits
 
+    if not isinstance(reject_feature_distance, bool):
+        raise ValueError('reject_feature_distance must be boolean')
     random = np.random.default_rng(config.random_seed)
     fit = values[np.sort(random.choice(len(values), min(len(values), fit_budget), replace=False))]
     counts = [k for k in config.component_counts if
               k <= min(len(fit), len(values) // config.min_region_size,
                        len(np.unique(fit, axis=0)))]
     if not counts or len(fit) < 2:
-        return np.full(len(values), -1, np.int64), dict(fit_points=len(fit), components=0)
+        return np.full(len(values), -1, np.int64), dict(fit_points=len(fit), components=0,
+            feature_distance_rejection_applied=reject_feature_distance, feature_distance_rejected_points=0)
     best, best_score = None, math.inf
     with threadpool_limits(limits=1):
         for k in counts:
@@ -228,8 +236,10 @@ def _statistical_partition(values, config, fit_budget):
                 best, best_score = model, float(score)
         predicted = np.full(len(values), -1, np.int64)
         if best is None:
-            return predicted, dict(fit_points=len(fit), components=0)
+            return predicted, dict(fit_points=len(fit), components=0,
+                feature_distance_rejection_applied=reject_feature_distance, feature_distance_rejected_points=0)
         centers = best.cluster_centers_ if config.method == 'kmeans' else best.means_
+        distance_rejected = 0
         for start in range(0, len(values), config.assignment_chunk_size):
             chunk = values[start:start + config.assignment_chunk_size]
             if config.method == 'kmeans':
@@ -239,9 +249,63 @@ def _statistical_partition(values, config, fit_budget):
                 probability = best.predict_proba(chunk)
                 label = probability.argmax(1)
                 accepted = probability.max(1) >= config.gmm_min_probability
-            accepted &= np.linalg.norm(chunk - centers[label], axis=1) <= config.max_feature_distance
+            within_distance = np.linalg.norm(chunk - centers[label], axis=1) <= config.max_feature_distance
+            distance_rejected += int((~within_distance).sum())
+            if reject_feature_distance:
+                accepted &= within_distance
             predicted[start:start + len(chunk)] = np.where(accepted, label, -1)
-    return predicted, dict(fit_points=len(fit), components=len(centers), selection_score=best_score)
+    return predicted, dict(fit_points=len(fit), components=len(centers), selection_score=best_score,
+        feature_distance_rejection_applied=reject_feature_distance,
+        feature_distance_rejected_points=distance_rejected)
+
+
+def _dbscan_partition(values, config):
+    """Exact weighted DBSCAN with duplicate compression, never sampling.
+
+    Density is counted on all original observations. First-occurrence ordering
+    of the distinct feature vectors preserves the canonical GS visit order,
+    including DBSCAN's deterministic choice for ambiguous border points.
+    The count-only guard prevents an unexpectedly dense radius graph from
+    allocating quadratic neighborhood lists; it does not change eps or labels.
+    """
+    from sklearn.cluster import DBSCAN
+    from threadpoolctl import threadpool_limits
+
+    unique, first, inverse, counts = np.unique(values, axis=0,
+        return_index=True, return_inverse=True, return_counts=True)
+    ordered = np.argsort(first, kind='stable')
+    unique, weights = unique[ordered], counts[ordered]
+    remap = np.empty_like(ordered)
+    remap[ordered] = np.arange(len(ordered))
+    restored_rows = remap[inverse]
+    tree = cKDTree(unique)
+    neighborhood_entries, largest_neighborhood = 0, 0
+    # Count references without materializing any radius-neighbor lists. A tiny
+    # outward rounding is conservative at the floating-point radius boundary.
+    radius = np.nextafter(float(config.dbscan_eps), math.inf)
+    for start in range(0, len(unique), config.assignment_chunk_size):
+        sizes = tree.query_ball_point(unique[start:start + config.assignment_chunk_size],
+                                      radius, return_length=True, workers=1)
+        neighborhood_entries += int(sizes.sum())
+        largest_neighborhood = max(largest_neighborhood, int(sizes.max(initial=0)))
+        if neighborhood_entries > config.dbscan_max_neighbor_entries:
+            raise MemoryError('Exact DBSCAN radius neighborhoods exceed '
+                f'{config.dbscan_max_neighbor_entries} entries after duplicate compression; '
+                'no sampling or eps change was applied')
+    with threadpool_limits(limits=1):
+        fitted = DBSCAN(eps=config.dbscan_eps, min_samples=config.dbscan_min_samples,
+                        metric='euclidean', algorithm='kd_tree', n_jobs=1).fit(
+                            unique, sample_weight=weights)
+    return fitted.labels_[restored_rows], dict(
+        fit_points=len(values), unique_fit_points=len(unique),
+        exact_duplicate_points=len(values) - len(unique),
+        feature_dimensions=values.shape[1], eps=float(config.dbscan_eps),
+        min_samples=int(config.dbscan_min_samples),
+        density_preserved_by_sample_weights=True,
+        neighborhood_entries=neighborhood_entries,
+        maximum_unique_neighbors=largest_neighborhood,
+        neighbor_index_bytes=neighborhood_entries * np.dtype(np.intp).itemsize,
+        neighbor_entry_limit=int(config.dbscan_max_neighbor_entries))
 
 
 def _rigid_statistics(source, target, rotations=None):
@@ -432,6 +496,8 @@ def propose_motion_regions(history, current_ids, extent, config):
             values = _features(window, rows, slots, extent, config)
             if config.method in ('kmeans', 'gmm'):
                 proposed, detail = _statistical_partition(values, config, fit_budget)
+            elif config.method == 'dbscan':
+                proposed, detail = _dbscan_partition(values, config)
             elif config.method == 'hdbscan':
                 from sklearn.cluster import HDBSCAN
 
