@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
 birth_codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_birth_codec')
-opacity_codec = importlib.import_module('pipeline.ReCon-GS.model.sparse_opacity')
+opacity_codec = importlib.import_module('pipeline.ReCon-GS.model.legacy_opacity_codec')
 fields = ('xyz', 'rotation', 'logscale', 'opacity', 'sh_dc', 'sh_rest')
 
 
@@ -40,11 +40,7 @@ def apply_stream_opacity_update(directory, frame, current, old_count, manifest=N
 def replay(directory: Path, reference: Path, through: int):
     with np.load(reference, allow_pickle=False) as packet:
         raw = {key: torch.from_numpy(packet[key].copy()) for key in fields}
-        state = codec.DecodedState(
-            raw['xyz'], raw['rotation'],
-            torch.from_numpy(packet['owner'].copy()).long(),
-            torch.from_numpy(packet['parents'].copy()).long(),
-            int(packet['frame_index']))
+        state = codec.DecodedState.from_reference(packet)
     if through < state.frame_index:
         raise ValueError('Requested frame precedes the decoder reference')
     for frame in range(state.frame_index + 1, through + 1):
@@ -65,8 +61,14 @@ def replay(directory: Path, reference: Path, through: int):
             sources = decoded.birth_sources
             if sources is None or len(sources) != birth_count:
                 raise ValueError('Motion stream lost birth attachment rows')
-            if not torch.equal(decoded.owner[old_count:],
-                               decoded.owner[:old_count][sources]):
+            expected_owner = decoded.owner[:old_count][sources]
+            if decoded.spatial_centers is not None:
+                from importlib import import_module
+                spatial = import_module('pipeline.ReCon-GS.model.spatial_gate')
+                expected_paths = spatial.spatial_route(decoded.xyz[old_count:],
+                    decoded.spatial_centers, decoded.spatial_paths.shape[1])
+                expected_owner = spatial.spatial_owner(expected_paths, decoded.spatial_open)
+            if not torch.equal(decoded.owner[old_count:], expected_owner):
                 raise ValueError('Birth owner differs from encoded source owner')
             for name in fields:
                 current[name] = torch.cat((current[name], newborn[name]))

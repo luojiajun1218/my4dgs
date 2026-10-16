@@ -5,7 +5,7 @@ is deliberately imported only when the suite is explicitly run.
 """
 
 import copy
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import importlib
 import json
 from pathlib import Path
@@ -19,15 +19,15 @@ import numpy as np
 from PIL import Image
 import torch
 
-import test_persistent_motion_integration as lifecycle_tests
 
 
 class SequenceExtensionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.extension = importlib.import_module('pipeline.ReCon-GS.sequence_extension')
-        cls.lifecycle = lifecycle_tests.PersistentLifecycleTests()
-        cls.rigid, _, _, _, cls.codec = cls.lifecycle.modules()
+        cls.rigid = importlib.import_module('pipeline.ReCon-GS.model.rigid_residual_tree')
+        cls.spatial = importlib.import_module('pipeline.ReCon-GS.model.spatial_gated_motion')
+        cls.codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
         cls.birth = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
         cls.replay = importlib.import_module('scripts.replay_rigid_tree')
         cls.data_module = importlib.import_module('pipeline.ReCon-GS.data')
@@ -81,9 +81,15 @@ class SequenceExtensionTests(unittest.TestCase):
 
     @classmethod
     def shared_fixture(cls):
-        template = cls.lifecycle.fixture()
-        model = cls.rigid.RigidResidualTree(replace(template.config, persistent_shared_from_start=True))
-        model.setup(template.base_xyz, template.base_rotation, 1., frame_index=1)
+        xyz = torch.cartesian_prod(torch.tensor([.1, .3, .6, .9]),
+            torch.tensor([.1, .9]), torch.tensor([.1, .9])).repeat_interleave(2, 0)
+        rotation = torch.zeros(len(xyz), 4); rotation[:, 0] = 1
+        config = cls.rigid.RigidTreeConfig(motion_steps=200, birth_steps=100,
+            motion_xyz_step_extent=.001, gs_xyz_step_extent=.001,
+            motion_rotation_step_rad=.001, gs_rotation_step_rad=.001,
+            rate_loss_weight=0., relative_motion_loss_weight=0.)
+        model = cls.spatial.SpatialGatedMotion(config)
+        model.setup(xyz, rotation, 1., frame_index=1)
         return model
 
     @classmethod
@@ -93,7 +99,9 @@ class SequenceExtensionTests(unittest.TestCase):
         state = model.frame_reference_state
         np.savez_compressed(stream / 'reference_frame0.npz',
             **{k: v.numpy() for k, v in raw.items()}, owner=state.owner.numpy(),
-            parents=state.parents.numpy(), frame_index=np.array(0),
+            parents=state.parents.numpy(), spatial_paths=state.spatial_paths.numpy(),
+            spatial_centers=state.spatial_centers.numpy(),
+            spatial_open=state.spatial_open.numpy(), frame_index=np.array(0),
             extent=np.array(model.extent), region_count=np.array(len(state.parents)))
 
     @classmethod
@@ -116,9 +124,15 @@ class SequenceExtensionTests(unittest.TestCase):
                 model.observations.fill_(10)
                 xyz, q = model.forward(step, training=True)
                 loss = (xyz - desired - jitter).square().mean() + (q - model.base_rotation).square().mean()
+                terms = model.loss_terms(step, False)
+                loss = loss + terms['rate_loss'] + terms['relative_motion_loss']
                 loss.backward()
                 model.optimizer_step()
-            decoded = cls.lifecycle.finish_export(model, stream / f'motion_{frame:03}.bin')
+            model.record_final_diagnostics()
+            xyz, rotation = model.materialized_pose()
+            model.register_materialized_layout(xyz, rotation)
+            model.export_motion(stream / f'motion_{frame:03}.bin')
+            decoded = model.codec_previous_state
             raw['xyz'], raw['rotation'] = decoded.xyz.clone(), decoded.rotation.clone()
             manifest = dict(version=1, frame=frame,
                 reference='frame_storage/rigid_tree/reference_frame0.npz',
@@ -164,7 +178,7 @@ class SequenceExtensionTests(unittest.TestCase):
         self.current_trainer = copy.deepcopy(self.old_trainer)
         self.current_trainer['saving_ckpt_frames'] = [1, 2, 4]
         module_config = self.module.ModuleConfig(rigid_tree=self.template.config,
-            sh_degree=1, old_opacity=self.module.OldOpacityConfig(enabled=False))
+            sh_degree=1)
         gaussian_capture = (1, self.final_raw['xyz'].clone(), self.final_raw['sh_dc'].clone(),
             self.final_raw['sh_rest'].clone(), self.final_raw['logscale'].clone(),
             self.final_raw['rotation'].clone(), self.final_raw['opacity'].clone(),
@@ -172,6 +186,7 @@ class SequenceExtensionTests(unittest.TestCase):
             torch.zeros(len(self.final_raw['xyz']), 1), dict(state={}, param_groups=[]), 1.)
         report = json.loads((self.source / 'frame_summary/frame_002.json').read_text())
         self.checkpoint = dict(global_step=300, current_frame=2, rigid_tree_version=1,
+            birth_allocation='clone_small_v1',
             rng_state=copy.deepcopy(self.saved_rng), rigid_tree_data_config=self.old_data,
             rigid_tree_trainer_config=self.old_trainer,
             rigid_tree_module_config=asdict(module_config), rigid_tree_config=asdict(self.template.config),
@@ -215,9 +230,78 @@ class SequenceExtensionTests(unittest.TestCase):
                                  for p in self.source.rglob('*') if p.is_file()})
         self.assertEqual((self.destination / 'config.yaml').read_text(), 'new run config must stay intact\n')
 
+    def test_explicit_completed_prefix_from_interrupted_longer_plan_is_verified(self):
+        # Three completed frames, with an original four-frame plan. Never
+        # rewrite the checkpoint to pretend the old run had another config.
+        checkpoint = copy.deepcopy(self.checkpoint)
+        checkpoint['rigid_tree_data_config']['extra_dataset_kwargs']['num_frames'] = 4
+        (self.source / 'cameras.json').write_text(json.dumps(self.camera_records(4)))
+        with self.assertRaises(ValueError):
+            self.plan(checkpoint=checkpoint)
+        before = copy.deepcopy(checkpoint)
+        plan = self.plan(checkpoint=checkpoint, completed_prefix_frames=3)
+        self.assertEqual((plan.resume_frame, plan.previous_frames, plan.source_planned_frames), (2, 3, 4))
+        self.assertEqual({image['frame'] for image in plan.images}, {0, 1, 2})
+        self.assertFalse(any('frame_003' in entry.relative_path for entry in plan.files))
+        provenance = self.extension.copy_verified_prefix(plan)
+        self.assertEqual(provenance['source_planned_frames'], 4)
+        self.assertEqual(checkpoint['rigid_tree_data_config'], before['rigid_tree_data_config'])
+        self.assertEqual((self.source / 'config.yaml').read_text(), 'old run config must stay intact\n')
+        decoded, _ = self.replay.replay(self.destination / 'frame_storage/rigid_tree',
+            self.destination / 'frame_storage/rigid_tree/reference_frame0.npz', through=2)
+        self.assertEqual(decoded.digest().hex(), plan.decoded_sha256)
+
+    def test_explicit_incomplete_prefix_can_recover_same_planned_length(self):
+        checkpoint = copy.deepcopy(self.checkpoint)
+        checkpoint['rigid_tree_data_config']['extra_dataset_kwargs']['num_frames'] = 4
+        source_cameras = json.dumps(self.camera_records(4))
+        (self.source / 'cameras.json').write_text(source_cameras)
+        (self.destination / 'cameras.json').write_text(source_cameras)
+        data = copy.deepcopy(self.current_data)
+        data['extra_dataset_kwargs']['num_frames'] = 4
+        trainer = copy.deepcopy(self.current_trainer)
+        trainer['saving_ckpt_frames'] = [1, 2, 3]
+        arguments = dict(checkpoint=checkpoint, current_data_config=data,
+                         current_trainer_config=trainer)
+        before = {str(p.relative_to(self.source)): p.read_bytes()
+                  for p in self.source.rglob('*') if p.is_file()}
+        plan = self.plan(**arguments, completed_prefix_frames=3)
+        self.assertEqual((plan.previous_frames, plan.extended_frames,
+                          plan.source_planned_frames, plan.resume_frame), (3, 4, 4, 2))
+        with self.assertRaises(ValueError):
+            self.plan(**arguments)
+        with self.assertRaises(ValueError):
+            self.plan(**arguments, completed_prefix_frames=4)
+        bad = copy.deepcopy(checkpoint)
+        bad['global_step'] -= 1
+        with self.assertRaises(ValueError):
+            self.plan(**{**arguments, 'checkpoint': bad}, completed_prefix_frames=3)
+        self.extension.copy_verified_prefix(plan)
+        stream = self.destination / 'frame_storage' / 'rigid_tree'
+        decoded, raw = self.replay.replay(stream, stream / 'reference_frame0.npz', through=2)
+        self.assertEqual(decoded.digest().hex(), plan.decoded_sha256)
+        self.assertEqual(self.birth.reference_digest(raw), plan.raw_sha256)
+        self.assertEqual(before, {str(p.relative_to(self.source)): p.read_bytes()
+                                  for p in self.source.rglob('*') if p.is_file()})
+
+    def test_explicit_prefix_length_cannot_bypass_completion_or_replay_checks(self):
+        for length in (True, 0, 1, 4, 2.5):
+            with self.subTest(length=length), self.assertRaises(ValueError):
+                self.plan(completed_prefix_frames=length)
+        with self.assertRaises(ValueError):
+            self.plan(completed_prefix_frames=2)
+        bad = copy.deepcopy(self.checkpoint)
+        bad['global_step'] -= 1
+        with self.assertRaises(ValueError):
+            self.plan(checkpoint=bad, completed_prefix_frames=3)
+        bad = copy.deepcopy(self.checkpoint)
+        bad['gaussians'][1][0, 0] += 1
+        with self.assertRaises(ValueError):
+            self.plan(checkpoint=bad, completed_prefix_frames=3)
+
     def test_cpu_three_to_five_continuation_matches_parameters_rng_and_every_packet(self):
         self.extension.copy_verified_prefix(self.plan())
-        continued = self.rigid.RigidResidualTree(self.template.config)
+        continued = self.spatial.SpatialGatedMotion(self.template.config)
         continued.restore(copy.deepcopy(self.checkpoint['rigid_tree_motion']))
         self.restore_rng(copy.deepcopy(self.checkpoint['rng_state']))
         resumed_raw = self.run_frames(continued, 3, 4, self.destination, self.final_raw)
@@ -232,7 +316,7 @@ class SequenceExtensionTests(unittest.TestCase):
         for name in ('region_translation', 'region_rotation', 'gs_translation', 'gs_rotation'):
             torch.testing.assert_close(getattr(continued, name), getattr(continuous, name), rtol=0, atol=0)
         self.assertTrue(torch.equal(continued.owner, continuous.owner))
-        self.assertEqual(continued.persistent_state.region_ids.tolist(), continuous.persistent_state.region_ids.tolist())
+        torch.testing.assert_close(continued.opened, continuous.opened, rtol=0, atol=0)
         torch.testing.assert_close(resumed_rng['torch'], continuous_rng['torch'], rtol=0, atol=0)
         np.testing.assert_equal(resumed_rng['numpy'], continuous_rng['numpy'])
         self.assertEqual(resumed_rng['python'], continuous_rng['python'])

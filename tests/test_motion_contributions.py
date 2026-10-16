@@ -4,62 +4,21 @@ import math
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
-from unittest.mock import patch
-from pathlib import Path
-import tempfile
 
 import torch
 
-from test_sparse_opacity_module import SparseOpacityModuleTests
-import test_persistent_motion_integration as lifecycle
-
-lifecycle.PersistentLifecycleTests().modules()
+import test_spatial_gated_motion as spatial_tests
 OBSERVED = importlib.import_module('pipeline.ReCon-GS.model.contribution_rasterizer')
 
 
 class MotionEvidenceHookTests(unittest.TestCase):
-    def test_mid_birth_restore_keeps_observations_and_does_not_collect_heldout(self):
-        with tempfile.TemporaryDirectory() as directory:
-            case = SparseOpacityModuleTests()
-            module, source, birth, view = case.fixture(Path(directory)/'source', with_birth=False)
-            module.config.effective_motion_observations = True
-            module.motion.observations.zero_()
-            module.motion.mark_observed(torch.arange(len(module.motion.observations)).remainder(2).eq(0))
-            module.birth_control.update(motion_frustum_samples=100, motion_observed_samples=17)
-            checkpoint = dict(global_step=250)
-            module.on_save_checkpoint(checkpoint)
-            restored, _, birth, _ = case.fixture(Path(directory)/'restore', with_birth=False)
-            restored.config.effective_motion_observations = True
-            with patch.object(source,'BirthGaussianModel',birth):
-                restored.on_load_checkpoint(checkpoint)
-            self.assertTrue(torch.equal(restored.motion.observations,module.motion.observations))
-            self.assertEqual(restored.birth_control['motion_observed_samples'],17)
-            restored.renderer.collect_contributions = False
-            restored.forward(view, training=False)
-            self.assertFalse(restored.renderer.collect_contributions)
-            restored.forward(view, training=True)
-            self.assertFalse(restored.renderer.collect_contributions)  # Birth stage does not alter motion evidence.
 
-    def test_legacy_checkpoint_defaults_to_original_evidence_and_rejects_new_mode(self):
-        with tempfile.TemporaryDirectory() as directory:
-            case=SparseOpacityModuleTests()
-            module,source,birth,_=case.fixture(Path(directory)/'source',with_birth=False)
-            checkpoint=dict(global_step=250)
-            module.on_save_checkpoint(checkpoint)
-            checkpoint['rigid_tree_module_config'].pop('effective_motion_observations')
-            restored,_,birth,_=case.fixture(Path(directory)/'restore',with_birth=False)
-            with patch.object(source,'BirthGaussianModel',birth):restored.on_load_checkpoint(checkpoint)
-            restored.config.effective_motion_observations=True
-            with patch.object(source,'BirthGaussianModel',birth),self.assertRaisesRegex(ValueError,'module configuration'):
-                restored.on_load_checkpoint(checkpoint)
 
     def test_actual_motion_counter_uses_compositing_not_frustum(self):
         source = importlib.import_module('pipeline.ReCon-GS.module')
-        motion = lifecycle.PersistentLifecycleTests().fixture()
-        lifecycle.PersistentLifecycleTests().initialize(motion)
+        motion = spatial_tests.SpatialGatedMotionTests().model()
         motion.observations.zero_()
         config = source.ModuleConfig(effective_motion_observations=True)
-        config.rigid_tree.adaptive_clustering = True
         adapter = SimpleNamespace(mark_observed=motion.mark_observed, stage=lambda step: 'free',
                                   optimizer_step=lambda **kwargs: [])
         module = SimpleNamespace(trainer=SimpleNamespace(global_step=1), motion_committed=False,
@@ -80,7 +39,6 @@ class MotionEvidenceHookTests(unittest.TestCase):
     def test_old_configuration_still_uses_frustum(self):
         source = importlib.import_module('pipeline.ReCon-GS.module')
         config = source.ModuleConfig()
-        config.rigid_tree.adaptive_clustering = True
         mark = Mock()
         module = SimpleNamespace(trainer=SimpleNamespace(global_step=1), motion_committed=False,
             motion=SimpleNamespace(mark_observed=mark, stage=lambda step: 'free',

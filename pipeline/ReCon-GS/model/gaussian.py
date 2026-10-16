@@ -148,6 +148,7 @@ class GaussianModel(BaseGaussianModel):
         sigma_scale: float = 2.0,
         *,
         max_new_gaussians: Optional[int] = None,
+        source_covariance_init: bool = False,
     ):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
@@ -169,15 +170,24 @@ class GaussianModel(BaseGaussianModel):
 
         means = self._xyz[selected_pts_mask]
         stds = self.get_scaling[selected_pts_mask]
-        new_xyz = torch.normal(means, stds * sigma_scale)
+        source_rotation = self._rotation[selected_pts_mask]
+        if source_covariance_init:
+            from .rigid_residual_tree import quaternion_rotate
+            samples = torch.normal(torch.zeros_like(means), stds * sigma_scale)
+            q = torch.nn.functional.normalize(source_rotation, dim=-1)
+            new_xyz = means + quaternion_rotate(q, samples)
+        else:
+            new_xyz = torch.normal(means, stds * sigma_scale)
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         # Preserve ReCon-GS's raw opacity-logit initialization.
         new_opacities = torch.zeros_like(self._opacity[selected_pts_mask]) + 0.1
         new_scaling = self._scaling[selected_pts_mask]
-        # Set rotation to identity quaternion
-        new_rotation = torch.zeros_like(self._rotation[selected_pts_mask])
-        new_rotation[:, 0] = 1
+        if source_covariance_init:
+            new_rotation = source_rotation.clone()
+        else:
+            new_rotation = torch.zeros_like(source_rotation)
+            new_rotation[:, 0] = 1
 
         self.densification_postfix(
             new_xyz,

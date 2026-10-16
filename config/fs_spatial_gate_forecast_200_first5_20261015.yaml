@@ -1,0 +1,108 @@
+# Experimental projected gate residual forecast.
+# Use /tmp/my4dgs_run_gate_forecast_20261015.py train; ordinary main.py uses the baseline policy.
+experiment_name: fs_spatial_gate_forecast_200_first5_20261015
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+mode: train
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+random_seed: 0
+quiet: false
+gui_enabled: false
+detect_anomaly: false
+data:
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak
+  resolution: -1
+  white_background: false
+  split_train_test: true
+  shuffle: true
+  eval_train: false
+  eval_test: true
+  first_frame_eval_train: false
+  canonical_training_view_order: true
+  training_view_seed: 0
+  expected_image_size:
+  - 1600
+  - 1199
+  extra_dataset_kwargs:
+    num_frames: 5
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+trainer:
+  cache_data_on_device: true
+  num_init_steps: 15000
+  saving_ckpt_frames:
+  - 1
+  - 4
+  saving_ckpt_steps:
+  - 20
+  - 40
+  - 60
+  - 80
+  - 100
+  - 200
+  stage_image_camera: cam00.png
+  motion_views_per_step: 4
+module:
+  sh_degree: 1
+  initial_opacity_threshold: 0.0075
+  lambda_dssim: 0.2
+  lpips_required: true
+  num_saving_images: 2
+  rigid_tree:
+    region_count: 9
+    motion_steps: 100
+    birth_steps: 100
+    motion_xyz_step_extent: 3.0e-05
+    motion_rotation_step_rad: 0.001
+    gs_xyz_step_extent: 3.0e-05
+    gs_rotation_step_rad: 0.001
+    region_translation_lr: 0.0003246817779541016
+    region_rotation_lr: 0.0003
+    gs_translation_lr: 0.0006493635559082032
+    gs_rotation_lr: 0.0001
+    motion_lr_final_ratio: 0.2
+    rate_loss_weight: 0.03
+    rate_normalization: reference
+    relative_motion_loss_weight: 1.0
+    rate_warmup_steps: 20
+    rate_ramp_steps: 20
+    spatial_gate:
+      enabled: true
+      max_depth: 5
+      min_region_size: 16
+      learning_rate: 0.15
+      initial_logit: -2.0
+      start_step: 40
+      freeze_step: 60
+      learn_region_motion: false
+      temperature: 3.0
+      gate_start_step: 40
+      image_fit_during_gate: true
+    relative_motion_units: extent_radians
+    motion_fit_window_steps: 20
+  birth:
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    densify_interval: 40
+    densify_grad_threshold: 0.00015
+    opacity_threshold: 0.01
+    new_max_screen_size: 20.0
+    max_new_gaussians: null
+    new_xyz_step_extent: 1.0e-05
+    new_rotation_step: 0.001
+    new_logscale_step: 0.001
+    new_opacity_step: 0.01
+    new_sh_step: 0.001
+    source_covariance_init: true
+  gaussian_stage2:
+    position_lr_init: 0.0024
+    position_lr_final: 2.4e-05
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.075
+    opacity_lr: 0.75
+    scaling_lr: 0.075
+    rotation_lr: 0.015
+    percent_dense: 0.01
+  effective_motion_observations: true
+  motion_coarse_to_fine: true

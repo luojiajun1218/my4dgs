@@ -14,8 +14,9 @@ import zlib
 
 import torch
 
-from .rigid_residual_tree import (compose_pose, initial_layout,
+from .rigid_residual_tree import (compose_pose,
                                   region_pivots, _topological_order)
+from .spatial_gate import compose_spatial_pose, spatial_owner
 
 
 MAGIC = b'RRT1'
@@ -33,12 +34,15 @@ DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC = b'RSL2'
 DYNAMIC_MAGIC = b'RSD3'
 DYNAMIC_COMPRESSED_MAGIC = b'RSC3'
 DYNAMIC_LZMA_COMPRESSED_MAGIC = b'RSL3'
+SPATIAL_MAGIC = b'SPG1'
+SPATIAL_COMPRESSED_MAGIC = b'SPC1'
+SPATIAL_LZMA_COMPRESSED_MAGIC = b'SPL1'
 CHECKSUM_BYTES = 16
 MAX_RAW_PACKET_BYTES = 512 * 1024 * 1024
 MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
 
 RAW_MAGICS = (MAGIC, DUAL_STEP_MAGIC, DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC,
-              DYNAMIC_MAGIC)
+              DYNAMIC_MAGIC, SPATIAL_MAGIC)
 WRAPPERS = {
     MAGIC: (COMPRESSED_MAGIC, LZMA_COMPRESSED_MAGIC),
     DUAL_STEP_MAGIC: (DUAL_STEP_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC),
@@ -46,6 +50,7 @@ WRAPPERS = {
     DUAL_STEP_DELTA_MAGIC: (DUAL_STEP_DELTA_COMPRESSED_MAGIC,
                             DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC),
     DYNAMIC_MAGIC: (DYNAMIC_COMPRESSED_MAGIC, DYNAMIC_LZMA_COMPRESSED_MAGIC),
+    SPATIAL_MAGIC: (SPATIAL_COMPRESSED_MAGIC, SPATIAL_LZMA_COMPRESSED_MAGIC),
 }
 INNER_MAGIC = {wrapper: raw for raw, pair in WRAPPERS.items()
                for wrapper in pair}
@@ -59,17 +64,23 @@ class DecodedState:
     parents: torch.Tensor
     frame_index: int
     birth_sources: torch.Tensor | None = None
+    spatial_paths: torch.Tensor | None = None
+    spatial_open: torch.Tensor | None = None
+    spatial_centers: torch.Tensor | None = None
 
     def capture(self):
         return dict(xyz=self.xyz, rotation=self.rotation, owner=self.owner,
                     parents=self.parents, frame_index=self.frame_index,
-                    birth_sources=self.birth_sources)
+                    birth_sources=self.birth_sources,
+                    spatial_paths=self.spatial_paths, spatial_open=self.spatial_open,
+                    spatial_centers=self.spatial_centers)
 
     @classmethod
     def restore(cls, packet):
         # torch.load(map_location='cuda') moves checkpoint tensors, but decoded
         # states are CPU codec data. Preserve every tensor's saved dtype.
-        fields = ('xyz', 'rotation', 'owner', 'parents', 'birth_sources')
+        fields = ('xyz', 'rotation', 'owner', 'parents', 'birth_sources',
+                  'spatial_paths', 'spatial_open', 'spatial_centers')
         restored = {name: (None if packet.get(name) is None else
                            torch.as_tensor(packet[name]).detach().cpu().contiguous())
                     for name in fields}
@@ -82,17 +93,26 @@ class DecodedState:
             value = tensor.detach().cpu().contiguous()
             digest.update(str(tuple(value.shape)).encode('ascii'))
             digest.update(value.numpy().tobytes())
+        if self.spatial_paths is not None:
+            for tensor in (self.spatial_paths, self.spatial_open):
+                value = tensor.detach().cpu().contiguous()
+                digest.update(str(tuple(value.shape)).encode('ascii'))
+                digest.update(value.numpy().tobytes())
+        if self.spatial_centers is not None:
+            value = self.spatial_centers.detach().cpu().contiguous()
+            digest.update(b'previous_decoded_position_routing_v1')
+            digest.update(str(tuple(value.shape)).encode('ascii'))
+            digest.update(value.numpy().tobytes())
         return digest.digest()
 
-
-def bootstrap_state(xyz, rotation, region_count, frame_index=0):
-    """Rebuild the deterministic tree from the shared first-frame raw pose."""
-    xyz = _cpu(xyz, torch.float32)
-    rotation = _cpu(rotation, torch.float32, (len(xyz), 4))
-    owner, parents = initial_layout(xyz, region_count)
-    state = DecodedState(xyz, rotation, owner, parents, int(frame_index))
-    _validate_state(state)
-    return state
+    @classmethod
+    def from_reference(cls, packet):
+        def read(name):
+            return torch.from_numpy(packet[name].copy()) if name in packet else None
+        return cls(read('xyz'), read('rotation'), read('owner').long(),
+                   read('parents').long(), int(packet['frame_index']),
+                   spatial_paths=read('spatial_paths'), spatial_open=read('spatial_open'),
+                   spatial_centers=read('spatial_centers'))
 
 
 def _uvar(value):
@@ -188,7 +208,9 @@ def motion_packet_info(packet):
                DELTA_LZMA_COMPRESSED_MAGIC: 'RSL1-lzma',
                DUAL_STEP_DELTA_LZMA_COMPRESSED_MAGIC: 'RSL2-lzma',
                DYNAMIC_MAGIC: 'RSD3-raw', DYNAMIC_COMPRESSED_MAGIC: 'RSC3-zlib',
-               DYNAMIC_LZMA_COMPRESSED_MAGIC: 'RSL3-lzma'}
+               DYNAMIC_LZMA_COMPRESSED_MAGIC: 'RSL3-lzma',
+               SPATIAL_MAGIC: 'SPG1-raw', SPATIAL_COMPRESSED_MAGIC: 'SPC1-zlib',
+               SPATIAL_LZMA_COMPRESSED_MAGIC: 'SPL1-lzma'}
     return dict(format=formats[magic], stored_bytes=len(packet),
                 raw_stream_bytes=len(raw), compression_savings_bytes=len(raw) - len(packet))
 
@@ -268,76 +290,6 @@ def _sparse_read(reader, count, *, delta_rows=False):
     return t, r
 
 
-def repack_legacy_motion_packet(packet):
-    """Losslessly rewrite old absolute sparse IDs into the current stream.
-
-    This changes only the four-byte format magic, two sparse row-ID sequences,
-    and the mandatory checksum. All symbols, topology, quantization metadata,
-    birth attachments, and pose bytes retain their original representation.
-    """
-    raw = uncompressed_motion_packet(packet)
-    old_magic = raw[:4]
-    if old_magic not in (MAGIC, DUAL_STEP_MAGIC):
-        raise ValueError('Repacking requires a legacy absolute-row motion packet')
-    payload = raw[:-CHECKSUM_BYTES]
-    reader = _Reader(payload)
-    reader.take(4 + 32)
-    _, regions, count, births = [reader.integer() for _ in range(4)]
-    if regions < 2 or count < 1 or births > 10_000_000:
-        raise ValueError('Invalid legacy motion counts')
-    reader.take(40 if old_magic == DUAL_STEP_MAGIC else 24)
-    mode = reader.take(1)[0]
-    if mode == 1:
-        for _ in range(reader.integer()):
-            reader.integer()
-    elif mode != 0:
-        raise ValueError('Invalid legacy survivor mapping mode')
-    for _ in range(reader.integer()):
-        reader.integer()
-        reader.integer()
-    for _ in range(reader.integer()):
-        reader.integer()
-        reader.integer()
-    changes = []
-    for limit in (regions - 1, count):
-        blocks = reader.integer()
-        if blocks > limit:
-            raise ValueError('Too many legacy sparse motion blocks')
-        last = -1
-        for _ in range(blocks):
-            start = reader.cursor
-            row = reader.integer()
-            end = reader.cursor
-            if row <= last or row >= limit:
-                raise ValueError('Invalid legacy sparse row')
-            changes.append((start, end, _uvar(row - last)))
-            flags = reader.take(1)[0]
-            if flags not in (1, 2, 3):
-                raise ValueError('Invalid legacy sparse flags')
-            if flags & 1:
-                if not any(struct.unpack('<3h', reader.take(6))):
-                    raise ValueError('Redundant legacy translation block')
-            if flags & 2:
-                if not any(struct.unpack('<3h', reader.take(6))):
-                    raise ValueError('Redundant legacy rotation block')
-            last = row
-    for _ in range(births):
-        reader.integer()
-    reader.take(28 * births)
-    if reader.cursor != len(payload):
-        raise ValueError('Trailing legacy motion bytes')
-    result = bytearray(DUAL_STEP_DELTA_MAGIC if old_magic == DUAL_STEP_MAGIC
-                       else DELTA_MAGIC)
-    cursor = 4
-    for start, end, encoded_gap in changes:
-        result.extend(payload[cursor:start])
-        result.extend(encoded_gap)
-        cursor = end
-    result.extend(payload[cursor:])
-    result.extend(hashlib.sha256(result).digest()[:CHECKSUM_BYTES])
-    return compress_motion_packet(result, mode='auto')
-
-
 def _validate_state(state):
     if not isinstance(state, DecodedState):
         raise ValueError('Decoder requires the previous decoded state')
@@ -356,6 +308,29 @@ def _validate_state(state):
             not bool(torch.isfinite(state.rotation).all()) or
             bool(state.rotation.norm(dim=-1).le(0).any())):
         raise ValueError('Previous decoded pose is nonfinite or has zero rotation')
+    if state.spatial_paths is not None or state.spatial_open is not None:
+        paths, opened = state.spatial_paths, state.spatial_open
+        if (paths is None or opened is None or paths.dtype != torch.long or
+                opened.dtype != torch.bool or paths.ndim != 2 or
+                paths.shape[0] != len(state.xyz) or paths.shape[1] < 1 or
+                opened.shape != state.parents.shape or not bool(opened[0]) or
+                bool(((paths < 1) | (paths >= len(state.parents))).any())):
+            raise ValueError('Invalid spatial reference paths or gates')
+        if (bool(state.parents[paths[:, 0]].ne(0).any()) or
+                (paths.shape[1] > 1 and
+                 not torch.equal(state.parents[paths[:, 1:]], paths[:, :-1])) or
+                bool(opened[paths[:, -1]].any()) or
+                not torch.equal(state.owner, spatial_owner(paths, opened))):
+            raise ValueError('Spatial paths or gates disagree with the selected frontier')
+    if state.spatial_centers is not None:
+        centers = state.spatial_centers
+        if (state.spatial_paths is None or centers.dtype != torch.float32 or
+                centers.shape != (sum(8 ** level for level in
+                    range(state.spatial_paths.shape[1])), 3) or
+                len(state.parents) != sum(8 ** level for level in
+                    range(state.spatial_paths.shape[1] + 1)) or
+                not bool(torch.isfinite(centers).all())):
+            raise ValueError('Invalid static spatial split planes')
 
 
 def dynamic_layout_bytes(previous_state, previous_rows, parents, pivots, region_map):
@@ -397,7 +372,7 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                   birth_source_rows, birth_xyz, birth_rotation,
                   translation_step_extent, rotation_step_rad, compression='none',
                   gs_translation_step_extent=None, gs_rotation_step_rad=None,
-                  region_map=None, pivots=None):
+                  region_map=None, pivots=None, spatial_open=None):
     """Encode actual sparse translation/rotation blocks and topology deltas."""
     _validate_state(previous_state)
     if frame_index != previous_state.frame_index + 1:
@@ -405,6 +380,11 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
     previous_rows = _cpu(previous_rows, torch.long)
     count = len(previous_rows)
     dynamic = region_map is not None or pivots is not None
+    spatial = spatial_open is not None
+    if spatial and (dynamic or previous_state.spatial_paths is None):
+        raise ValueError('Spatial stream needs a spatial reference and a fixed candidate tree')
+    if previous_state.spatial_paths is not None and not spatial:
+        raise ValueError('Spatial reference requires spatial motion semantics')
     if dynamic and (region_map is None or pivots is None):
         raise ValueError('Dynamic layout requires both region mapping and pivots')
     regions = len(parents) if dynamic else len(previous_state.parents)
@@ -424,6 +404,17 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
             bool(((owner < 0) | (owner >= regions)).any())):
         raise ValueError('Invalid survivor, birth source, or owner ID')
     _topological_order(parents)
+    if spatial:
+        spatial_open = _cpu(spatial_open, torch.bool, (regions,))
+        paths = previous_state.spatial_paths[previous_rows]
+        if previous_state.spatial_centers is not None:
+            from .spatial_gate import spatial_route
+            paths = spatial_route(previous_state.xyz[previous_rows],
+                previous_state.spatial_centers, paths.shape[1])
+        if (not torch.equal(parents, previous_state.parents) or
+                not bool(spatial_open[0]) or bool(spatial_open[paths[:, -1]].any()) or
+                not torch.equal(owner, spatial_owner(paths, spatial_open))):
+            raise ValueError('Spatial owners must follow the encoded gates and reference routing')
     if bool(rt[0].ne(0).any()) or bool(rr[0].ne(0).any()):
         raise ValueError('Identity region cannot carry motion')
     if (not math.isfinite(extent) or extent <= 0 or
@@ -441,7 +432,9 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
         raise ValueError('Dual-step stream needs positive GS translation and rotation steps')
     if dynamic and not dual_step:
         raise ValueError('Dynamic motion requires explicit region and GS steps')
-    result = bytearray(DYNAMIC_MAGIC if dynamic else
+    if spatial and not dual_step:
+        raise ValueError('Spatial stream requires explicit region and GS steps')
+    result = bytearray(SPATIAL_MAGIC if spatial else DYNAMIC_MAGIC if dynamic else
                        DUAL_STEP_DELTA_MAGIC if dual_step else DELTA_MAGIC)
     result.extend(previous_state.digest())
     for value in (frame_index, regions, count, len(sources)):
@@ -480,10 +473,17 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                 raise ValueError('Cannot reparent identity region')
             result.extend(_uvar(node))
             result.extend(_uvar(int(parents[node])))
-    result.extend(_uvar(len(owner_edits)))
-    for row in owner_edits:
-        result.extend(_uvar(row))
-        result.extend(_uvar(int(owner[row])))
+    if spatial:
+        # A split changes thousands of owners, but only one region gate bit.
+        gates = bytearray((regions + 7) // 8)
+        for node in torch.where(spatial_open)[0].tolist():
+            gates[node // 8] |= 1 << (node % 8)
+        result.extend(gates)
+    else:
+        result.extend(_uvar(len(owner_edits)))
+        for row in owner_edits:
+            result.extend(_uvar(row))
+            result.extend(_uvar(int(owner[row])))
     _sparse_write(result, rt[1:], rr[1:])
     _sparse_write(result, gt, gr)
     for source in sources.tolist():
@@ -510,12 +510,15 @@ def decode_motion(payload, prior_state):
         raise ValueError('Previous decoded state digest mismatch')
     frame_index, regions, count, birth_count = [reader.integer() for _ in range(4)]
     dynamic = stream_magic == DYNAMIC_MAGIC
+    spatial = stream_magic == SPATIAL_MAGIC
+    if spatial != (prior_state.spatial_paths is not None):
+        raise ValueError('Motion semantics differ from the decoder reference')
     if (frame_index != prior_state.frame_index + 1 or regions < 1 or
             (not dynamic and regions != len(prior_state.parents)) or count == 0 or
             count > len(prior_state.xyz) or birth_count > 10_000_000):
         raise ValueError('Invalid frame index, region count, or Gaussian count')
-    dual_step = stream_magic in (DUAL_STEP_MAGIC, DUAL_STEP_DELTA_MAGIC, DYNAMIC_MAGIC)
-    delta_rows = stream_magic in (DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC, DYNAMIC_MAGIC)
+    dual_step = stream_magic in (DUAL_STEP_MAGIC, DUAL_STEP_DELTA_MAGIC, DYNAMIC_MAGIC, SPATIAL_MAGIC)
+    delta_rows = stream_magic in (DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC, DYNAMIC_MAGIC, SPATIAL_MAGIC)
     quantization = struct.unpack('<5d' if dual_step else '<3d',
                                  reader.take(40 if dual_step else 24))
     if not all(math.isfinite(v) and v > 0 for v in quantization):
@@ -587,7 +590,22 @@ def decode_motion(payload, prior_state):
             last = node
     _topological_order(parents)
     owner = prior_owner.clone()
-    edit_count = reader.integer()
+    paths, opened = None, None
+    if spatial:
+        if not torch.equal(parents, prior_state.parents):
+            raise ValueError('Spatial candidate tree cannot be reparented')
+        bits = reader.take((regions + 7) // 8)
+        opened = torch.tensor([bool(bits[node // 8] & (1 << (node % 8)))
+                               for node in range(regions)])
+        paths = prior_state.spatial_paths[rows].clone()
+        if prior_state.spatial_centers is not None:
+            from .spatial_gate import spatial_route
+            paths = spatial_route(prior_state.xyz[rows], prior_state.spatial_centers,
+                                  paths.shape[1])
+        if not bool(opened[0]) or bool(opened[paths[:, -1]].any()):
+            raise ValueError('Invalid spatial gate frontier')
+        owner = spatial_owner(paths, opened)
+    edit_count = 0 if spatial else reader.integer()
     if edit_count > count:
         raise ValueError('Too many owner edits')
     last = -1
@@ -612,17 +630,28 @@ def decode_motion(payload, prior_state):
     if reader.cursor != len(reader.payload):
         raise ValueError('Trailing rigid motion bytes')
     step_t = extent * step_extent
-    xyz, rotation = compose_pose(
-        base_xyz, base_rotation, owner, parents, pivots,
-        rt.float() * step_t, rr.float() * step_rotation,
-        gt.float() * (extent * gs_step_extent), gr.float() * gs_step_rotation)
+    values = (rt.float() * step_t, rr.float() * step_rotation,
+              gt.float() * (extent * gs_step_extent), gr.float() * gs_step_rotation)
+    if spatial:
+        xyz, rotation = compose_spatial_pose(base_xyz, base_rotation, owner, *values)
+    else:
+        xyz, rotation = compose_pose(base_xyz, base_rotation, owner, parents, pivots, *values)
     if births:
         birth_xyz = torch.tensor([entry[:3] for entry in births], dtype=torch.float32)
         birth_rotation = torch.tensor([entry[3:] for entry in births], dtype=torch.float32)
         xyz = torch.cat((xyz, birth_xyz))
         rotation = torch.cat((rotation, birth_rotation))
         owner = torch.cat((owner, owner[torch.tensor(sources, dtype=torch.long)]))
+        if spatial:
+            birth_paths = paths[torch.tensor(sources, dtype=torch.long)]
+            if prior_state.spatial_centers is not None:
+                from .spatial_gate import spatial_route
+                birth_paths = spatial_route(birth_xyz, prior_state.spatial_centers,
+                                            paths.shape[1])
+                owner[-birth_count:] = spatial_owner(birth_paths, opened)
+            paths = torch.cat((paths, birth_paths))
     if not bool(torch.isfinite(xyz).all()) or not bool(torch.isfinite(rotation).all()):
         raise ValueError('Decoded pose contains nonfinite values')
     return DecodedState(xyz, rotation, owner, parents, frame_index,
-                        torch.tensor(sources, dtype=torch.long))
+                        torch.tensor(sources, dtype=torch.long), paths, opened,
+                        prior_state.spatial_centers)

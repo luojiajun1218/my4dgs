@@ -96,7 +96,7 @@ def main():
         raise ValueError('Diagnosis requires the 1600x1199 full-resolution run')
     reference = (args.reference or
         run / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz').resolve()
-    state, raw = _load_reference(reference, config.module.rigid_tree.region_count)
+    state, raw = _load_reference(reference, None)
     if state.frame_index != 0:
         raise ValueError('This diagnosis must use the untouched first-frame reference')
 

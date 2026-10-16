@@ -1,4 +1,4 @@
-"""Frame trainer for the single rigid residual tree production method."""
+"""Frame trainer for spatial gates, GS motion residuals, and quantized births."""
 
 import json
 import random
@@ -19,7 +19,6 @@ from libgs.pipeline import TrainerConfig as BaseTrainerConfig
 
 from .data import PairedFetcher
 from .model.birth_quantization import RAW_FIELDS, model_raw
-from .model.rigid_residual_tree import initial_layout
 from libgs.metric import psnr
 
 
@@ -32,16 +31,20 @@ class TrainerConfig(BaseTrainerConfig):
         1, 29, 49, 63, 99, 149, 199, 249, 299])
     saving_ckpt_every_n_frames: int = 1000
     stage_image_camera: Optional[str] = None
+    motion_views_per_step: int = 1
 
 
 class Trainer(BaseTrainer):
     def setup(self, module, ckpt_path=None):
+        if (isinstance(self.config.motion_views_per_step, bool) or
+                not isinstance(self.config.motion_views_per_step, int) or
+                self.config.motion_views_per_step < 1):
+            raise ValueError('motion_views_per_step must be a positive integer')
         self.module, module.trainer = module, self
         self.init_logger()
         self.datamodule.setup(self.output_dir)
         self.module.to(self.device).setup()
         self._resume_rng = None
-        self.bootstrap_pending = False
         if ckpt_path is None:
             raise ValueError('The active method requires a shared completed first-frame checkpoint')
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
@@ -64,11 +67,14 @@ class Trainer(BaseTrainer):
                 checkpoint=ckpt, current_data_config=asdict(self.datamodule.config),
                 current_trainer_config=asdict(self.config), source_run=prefix,
                 destination_run=self.output_dir, current_extent=self.datamodule.cameras_extent,
-                current_images=[(item.frame, item.path) for item in items])
+                current_images=[(item.frame, item.path) for item in items],
+                completed_prefix_frames=getattr(self, 'resume_completed_prefix_frames', None))
         if ckpt.get('rigid_tree_version') is not None:
             saved_trainer = ckpt.get('rigid_tree_trainer_config')
             if isinstance(saved_trainer, dict) and 'stage_image_camera' not in saved_trainer:
                 saved_trainer = {**saved_trainer, 'stage_image_camera': None}
+            if isinstance(saved_trainer, dict):
+                saved_trainer = {'motion_views_per_step': 1, **saved_trainer}
             if extension_plan is None and (
                     ckpt.get('rigid_tree_data_config') != asdict(self.datamodule.config) or
                     saved_trainer != asdict(self.config)):
@@ -82,32 +88,13 @@ class Trainer(BaseTrainer):
             logging.info('Extending completed prefix 0–%d to %d frames; past packets copied unchanged',
                          extension_plan.resume_frame, extension_plan.extended_frames)
         self._resume_rng = ckpt.get('rng_state')
-        adaptive = self.module.config.rigid_tree.adaptive_clustering
-        online_flat = self.module.config.rigid_tree.online_flat_clustering
-        if adaptive and self.datamodule.num_frames < 2:
-            raise ValueError('Shared-motion tree initialization needs frames 0 and 1')
         if ckpt.get('rigid_tree_version') is None:
-            if online_flat:
-                # Frame0 is static and decodable before observing frame1. All
-                # later memberships/pivots belong to their own frame packets.
-                self._write_reference(frame_index=0)
-                logging.info('Online flat motion: causal %s candidates, history=%d transitions',
-                             self.module.config.rigid_tree.online_clustering.method,
-                             self.module.config.rigid_tree.online_clustering.history_frames)
-            elif adaptive:
-                self.bootstrap_pending = True
-                if self.module.config.rigid_tree.residual_hierarchy:
-                    logging.info('Frame1 initialization: 100 residual steps, '
-                                 '100 %s/HEIR refinement steps, 100 birth steps',
-                                 self.module.config.rigid_tree.residual_clustering_method.upper())
-                else:
-                    logging.info('Initial tree will use frame1 normal motion training; no extra steps')
-            else:
-                self._write_reference(frame_index=0)
-        elif adaptive and not online_flat and self.current_frame == 1 and not self.module.motion_committed:
-            # A mid-motion resume must finish the same first frame, not train
-            # another initialization frame or serialize an unfinished tree.
-            self.bootstrap_pending = True
+            self._write_reference(frame_index=0)
+            logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
+                         '%d motion + %d birth steps',
+                         self.module.config.rigid_tree.spatial_gate.max_depth,
+                         self.module.config.rigid_tree.motion_steps,
+                         self.module.config.rigid_tree.birth_steps)
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():
@@ -115,18 +102,10 @@ class Trainer(BaseTrainer):
             else:
                 state = self.module.motion.codec_previous_state
                 if state is None:
-                    raise ValueError('Rigid checkpoint has no decoded bootstrap state')
+                    raise ValueError('Spatial checkpoint has no decoded bootstrap state')
                 self._write_reference(frame_index=state.frame_index, state=state)
         logging.info('Loaded frame %d step %d from %s',
                      self.current_frame, self.global_step, ckpt_path)
-        if self.module.config.old_opacity.enabled:
-            logging.info('Sparse old opacity: birth phase only, %s step=%g, lr=%g, '
-                         'motion per-byte price x%g; birth predictor precedes opacity update',
-                         self.module.config.old_opacity.mode,
-                         self.module.config.old_opacity.step,
-                         self.module.config.old_opacity.learning_rate,
-                         self.module.config.old_opacity.storage_price_scale)
-
     def _write_reference(self, frame_index, state=None):
         """Lossless decoder bootstrap, including layout and static GS fields."""
         directory = self.output_dir / 'frame_storage' / 'rigid_tree'
@@ -134,18 +113,12 @@ class Trainer(BaseTrainer):
         path = directory / f'reference_frame{frame_index}.npz'
         raw = model_raw(self.module.gaussians)
         if state is None:
-            if self.module.config.rigid_tree.online_flat_clustering:
-                owner = torch.zeros(len(raw['xyz']), dtype=torch.long, device=raw['xyz'].device)
-                parents = torch.tensor([-1], dtype=torch.long, device=owner.device)
-            else:
-                owner, parents = initial_layout(raw['xyz'],
-                    self.module.config.rigid_tree.region_count)
-        else:
-            if len(raw['xyz']) != len(state.xyz):
-                raise ValueError('Checkpoint GS count differs from decoder bootstrap')
-            raw['xyz'] = state.xyz
-            raw['rotation'] = state.rotation
-            owner, parents = state.owner, state.parents
+            state = self.module.motion.initialize_reference(raw['xyz'], raw['rotation'],
+                self.datamodule.cameras_extent, frame_index)
+        if len(raw['xyz']) != len(state.xyz):
+            raise ValueError('Checkpoint GS count differs from decoder bootstrap')
+        raw['xyz'], raw['rotation'] = state.xyz, state.rotation
+        owner, parents = state.owner, state.parents
         fields = {name: raw[name].detach().cpu().numpy() for name in RAW_FIELDS}
         fields.update(owner=owner.detach().cpu().numpy(),
                       parents=parents.detach().cpu().numpy(),
@@ -153,6 +126,11 @@ class Trainer(BaseTrainer):
                       extent=np.array(self.datamodule.cameras_extent, dtype=np.float64),
                       region_count=np.array(len(parents),
                                             dtype=np.int32))
+        if state is not None and state.spatial_paths is not None:
+            fields.update(spatial_paths=state.spatial_paths.cpu().numpy(),
+                          spatial_open=state.spatial_open.cpu().numpy())
+            if state.spatial_centers is not None:
+                fields['spatial_centers'] = state.spatial_centers.cpu().numpy()
         initial = self.module.initial_reference
         if initial is None:
             raise ValueError('Decoder bootstrap lost initial reference metadata')
@@ -228,21 +206,40 @@ class Trainer(BaseTrainer):
 
     def _resume_fetcher(self, fetcher):
         if self.global_step:
-            for _ in range(self.global_step):
-                fetcher.next()
+            for step in range(1, self.global_step + 1):
+                for _ in range(self._views_per_step(step)):
+                    fetcher.next()
             # Rebuilding a DataLoader and replaying views can draw host RNG.
             # The optimizer and cloning resume from the saved post-step state.
             self._restore_rng(self._resume_rng)
             self._resume_rng = None
 
+    def _views_per_step(self, step):
+        return (self.config.motion_views_per_step
+                if step <= self.module.motion_steps else 1)
+
+    def _fit_views(self, fetcher, step):
+        """Average image objectives before one shared-motion optimizer update."""
+        count = self._views_per_step(step)
+        packages, metrics, loss_value = [], {}, 0.
+        for _ in range(count):
+            loss, values, package = self.module.training_step(fetcher.next(), step)
+            if loss.requires_grad:
+                (loss / count).backward()
+            loss_value += float(loss.detach()) / count
+            for name, value in values.items():
+                metrics[name] = metrics.get(name, 0.) + value / count
+            if count > 1:
+                # Keep only evidence needed after backward, not full images.
+                package = {name: package[name] for name in
+                    ('visibility_filter', 'motion_contribution_filter', 'viewspace_points')
+                    if name in package}
+            packages.append(package)
+        metrics['gs'] = values['gs']
+        self.module.post_training_step(packages[0] if count == 1 else packages)
+        return loss_value, metrics
+
     def training_loop(self):
-        if not self.module.config.rigid_tree.adaptive_clustering:
-            raise ValueError('Fixed spatial-region training is retired; use the '
-                             'motion-cluster configuration with 100+100 steps')
-        if not (self.module.config.rigid_tree.residual_hierarchy or
-                self.module.config.rigid_tree.online_flat_clustering):
-            raise ValueError('The moving-seed bootstrap is retired; use the '
-                             'HDBSCAN/HEIR residual hierarchy configuration')
         if self.is_first_frame:
             if self.global_step != self.config.num_init_steps:
                 raise ValueError('The shared first frame must already be fully trained')
@@ -278,11 +275,6 @@ class Trainer(BaseTrainer):
         metrics_ema = dict(image=0., psnr=0.)
         stage_view = None
 
-        def record_pre_structure():
-            nonlocal stage_view
-            stage_view = self._record_stage_image(self.global_step, stage_view,
-                                                 phase_override='pre_structure')
-
         with tqdm(total=self.num_steps, initial=self.global_step,
                   desc=f'Training frame {frame}', dynamic_ncols=True,
                   bar_format='{desc}: {percentage:3.0f}%|{bar}| '
@@ -290,20 +282,11 @@ class Trainer(BaseTrainer):
             for step in range(self.global_step + 1, self.num_steps + 1):
                 self.global_step = step
                 self.module.pre_training_step()
-                viewpoint = fetcher.next()
-                loss, metrics, package = self.module.training_step(viewpoint, step)
-                if loss.requires_grad:
-                    loss.backward()
-                pre_structure = (record_pre_structure
-                    if self.config.stage_image_camera is not None and
-                       self.module.config.rigid_tree.persistent_shared_from_start and
-                       step == self.module.config.rigid_tree.motion_steps else None)
-                self.module.post_training_step(package, pre_topology_callback=pre_structure)
+                loss_value, metrics = self._fit_views(fetcher, step)
                 if (self.config.stage_image_camera is not None and
-                        step in (self.module.config.rigid_tree.motion_steps,
-                                 self.module.motion_steps, self.module.total_steps)):
+                        step in (self.module.motion_steps, self.module.total_steps)):
                     stage_view = self._record_stage_image(step, stage_view)
-                train_loss += float(loss.detach())
+                train_loss += loss_value
                 last_metrics = metrics
                 for name, value in (('image', metrics['image_loss']), ('psnr', metrics['psnr'])):
                     metrics_ema[name] = .6 * metrics_ema[name] + .4 * value
@@ -339,17 +322,10 @@ class Trainer(BaseTrainer):
                      report.get('total_count', last_metrics.get('gs', 0)),
                      report.get('birth_count', 0), report.get('region_count', 0),
                      report.get('birth_control', {}).get('tree_edit_count', 0))
-        if self.module.config.rigid_tree.online_flat_clustering:
-            flat = report.get('flat_region_diagnostics', {})
-            gate = flat.get('gate', {})
-            candidate = gate.get('candidate') or {}
-            logging.info('  Flat partition: policy=%s | accepted=%s | old=%s bytes | candidate=%s bytes | delta=%s bytes | reason=%s',
-                         gate.get('acceptance_policy'), gate.get('accepted'), gate.get('old', {}).get('bytes'),
-                         candidate.get('bytes'), gate.get('packet_bytes_delta'), gate.get('decision_reason'))
         return report
 
     @torch.no_grad()
-    def _record_stage_image(self, step, viewpoint=None, phase_override=None):
+    def _record_stage_image(self, step, viewpoint=None):
         """One fixed heldout view; no gradients, selection, or RNG side effects."""
         rng = self._capture_rng()
         try:
@@ -377,10 +353,9 @@ class Trainer(BaseTrainer):
             old_only = step == self.module.motion_steps
             rendered = self.module.forward(viewpoint, old_only=old_only)['render'].clamp(0, 1)
             difference = rendered - viewpoint.image
-            labels = {self.module.config.rigid_tree.motion_steps: 'post_partition',
-                      self.module.motion_steps: 'post_joint_motion_old_only',
-                      self.module.total_steps: 'final_decoded_with_birth_and_opacity'}
-            record = dict(step=int(step), phase=phase_override or labels[step], camera=str(viewpoint.path),
+            labels = {self.module.motion_steps: 'hard_spatial_motion_old_only',
+                      self.module.total_steps: 'final_decoded_with_birth'}
+            record = dict(step=int(step), phase=labels[step], camera=str(viewpoint.path),
                           mse=float(difference.square().mean()),
                           psnr=float(psnr(rendered, viewpoint.image)), old_only=old_only,
                           shared_prestructure_active=bool(getattr(getattr(self.module, 'motion', None),

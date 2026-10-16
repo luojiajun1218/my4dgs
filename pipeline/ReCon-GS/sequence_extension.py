@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import torch
 from omegaconf import OmegaConf
 
 from .model.birth_quantization import reference_digest
@@ -36,6 +35,7 @@ class SequenceExtensionPlan:
     images: tuple
     decoded_sha256: str
     raw_sha256: str
+    source_planned_frames: int | None = None
 
 
 def _hash(path):
@@ -102,7 +102,8 @@ def _empty_destination_stream(destination):
 
 def validate_sequence_extension(checkpoint, current_data_config,
                                 current_trainer_config, source_run,
-                                destination_run, current_extent, current_images):
+                                destination_run, current_extent, current_images,
+                                completed_prefix_frames=None):
     source, destination = Path(source_run).absolute(), Path(destination_run).absolute()
     _directory_guard(source)
     _directory_guard(destination)
@@ -118,27 +119,41 @@ def validate_sequence_extension(checkpoint, current_data_config,
     old_frames = old_data.get('extra_dataset_kwargs', {}).get('num_frames')
     new_frames = current_data_config.get('extra_dataset_kwargs', {}).get('num_frames')
     if (any(isinstance(n, bool) or not isinstance(n, int) for n in (old_frames, new_frames)) or
-            old_frames < 2 or new_frames <= old_frames):
-        raise ValueError('Sequence extension requires strictly more frames')
+            old_frames < 2 or new_frames < 2):
+        raise ValueError('Sequence extension requires valid frame counts')
+    prefix_frames = old_frames if completed_prefix_frames is None else completed_prefix_frames
+    if (isinstance(prefix_frames, bool) or not isinstance(prefix_frames, int) or
+            not 2 <= prefix_frames <= old_frames):
+        raise ValueError('Completed prefix length must lie within the source planned sequence')
+    # An interrupted run may recover its unchanged planned length from an
+    # explicitly selected completed prefix. Ordinary extension stays strict;
+    # a complete same-length sequence has no future frame to resume.
+    if (new_frames < old_frames or
+            (new_frames == old_frames and
+             (completed_prefix_frames is None or prefix_frames == old_frames))):
+        raise ValueError('Sequence extension needs more frames or an explicit incomplete prefix for recovery')
     expected_data = {**old_data, 'extra_dataset_kwargs': {
         **old_data['extra_dataset_kwargs'], 'num_frames': new_frames}}
     if expected_data != current_data_config:
         raise ValueError('Only num_frames may change in the data configuration')
     old_trainer = {**old_trainer}
     old_trainer.setdefault('stage_image_camera', None)
+    old_trainer.setdefault('motion_views_per_step', 1)
+    current_trainer_config.setdefault('motion_views_per_step', 1)
     old_saves, new_saves = old_trainer.get('saving_ckpt_frames'), current_trainer_config.get('saving_ckpt_frames')
     if (not isinstance(old_saves, list) or not isinstance(new_saves, list) or
             any(isinstance(n, bool) or not isinstance(n, int) for n in new_saves) or
             len(new_saves) != len(set(new_saves)) or
             not set(old_saves).issubset(new_saves) or
-            any(n < old_frames or n >= new_frames for n in set(new_saves) - set(old_saves)) or
+            any(n < prefix_frames or n >= new_frames for n in set(new_saves) - set(old_saves)) or
             {**old_trainer, 'saving_ckpt_frames': new_saves} != current_trainer_config):
         raise ValueError('Only future checkpoint frame appends are allowed')
-    resume = old_frames - 1
+    resume = prefix_frames - 1
     frame_state = checkpoint.get('rigid_tree_frame', {})
     motion = checkpoint.get('rigid_tree_motion') or {}
     config = checkpoint.get('rigid_tree_config') or {}
     terminal_step = config.get('motion_steps', 0) + config.get('birth_steps', 0)
+    terminal_step += config.get('post_birth_motion_steps', 0)
     if config.get('online_flat_clustering'):
         terminal_step += config.get('post_partition_steps', 0)
     if (checkpoint.get('rigid_tree_version') != 1 or
@@ -148,7 +163,7 @@ def validate_sequence_extension(checkpoint, current_data_config,
             not all(frame_state.get(k) is True for k in ('prepared', 'finalized', 'motion_committed')) or
             not {'torch', 'numpy', 'python', 'cuda'}.issubset(checkpoint.get('rng_state') or {}) or
             checkpoint.get('births') is not None or checkpoint.get('old_opacity_delta') is not None):
-        raise ValueError('Only a completed last-frame checkpoint may extend a prefix')
+        raise ValueError('Extension needs the completed last frame of its explicitly selected prefix')
     if not (np.isfinite(current_extent) and current_extent > 0 and
             float(current_extent) == motion.get('extent')):
         raise ValueError('Extension changed the scene extent')
@@ -156,9 +171,10 @@ def validate_sequence_extension(checkpoint, current_data_config,
     new_cameras = _camera_map(destination / 'cameras.json', new_frames)
     if any(new_cameras.get(key) != value for key, value in old_cameras.items()):
         raise ValueError('Extension changed a prefix camera')
+    old_cameras = {key: value for key, value in old_cameras.items() if key[0] < prefix_frames}
     images, seen = [], set()
     for frame, filename in current_images:
-        if frame >= old_frames:
+        if frame >= prefix_frames:
             continue
         key = (frame, Path(filename).stem)
         if key not in old_cameras or key in seen:
@@ -177,7 +193,7 @@ def validate_sequence_extension(checkpoint, current_data_config,
     if seen != set(old_cameras):
         raise ValueError('Current dataset is missing prefix camera images')
     relative_files = {'frame_storage/rigid_tree/reference_frame0.npz'}
-    for frame in range(1, old_frames):
+    for frame in range(1, prefix_frames):
         index = f'frame_storage/rigid_tree/frame_{frame:03d}.json'
         manifest = _read_json(source / index)
         if (manifest.get('frame') != frame or
@@ -221,8 +237,9 @@ def validate_sequence_extension(checkpoint, current_data_config,
     if (decoded.frame_index != resume or decoded.digest() != saved.digest() or
             reference_digest(raw) != reference_digest(checkpoint_raw)):
         raise ValueError('Checkpoint and decoded prefix do not match')
-    return SequenceExtensionPlan(source, destination, resume, old_frames, new_frames,
-                                 tuple(files), tuple(images), decoded.digest().hex(), reference_digest(raw))
+    return SequenceExtensionPlan(source, destination, resume, prefix_frames, new_frames,
+                                 tuple(files), tuple(images), decoded.digest().hex(), reference_digest(raw),
+                                 source_planned_frames=old_frames)
 
 
 def copy_verified_prefix(plan):
@@ -250,6 +267,7 @@ def copy_verified_prefix(plan):
                 raise ValueError(f'Prefix copy hash mismatch: {entry.relative_path}')
         return dict(source_run=str(plan.source_run), resume_frame=plan.resume_frame,
                     previous_frames=plan.previous_frames, extended_frames=plan.extended_frames,
+                    source_planned_frames=plan.source_planned_frames,
                     decoded_sha256=plan.decoded_sha256, raw_sha256=plan.raw_sha256,
                     files=[vars(entry) for entry in plan.files], images=list(plan.images),
                     identity_scope='current_resolved_dataset_paths_no_historical_image_hash',

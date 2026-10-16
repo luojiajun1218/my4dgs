@@ -1,15 +1,12 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Union
+from typing import Literal, Optional
 
 import torch
-from absl import logging
 
 from libgs.pipeline import Config as BaseConfig
 from libgs.pipeline import Pipeline as BasePipeline
-from libgs.utils.config import to_yaml
-from libgs.utils.dist import is_global_zero
 from libgs.utils.general import safe_state
 
 from .data import DataConfig, DataModule
@@ -24,6 +21,7 @@ class Config(BaseConfig):
     mode: Literal["train", "validate"] = "train"
     ckpt_path: Optional[Path] = None
     resume_prefix_dir: Optional[Path] = None
+    resume_completed_prefix_frames: Optional[int] = None
     gui_ip: str = "127.0.0.1"
     gui_port: int = 6009
     gui_enabled: bool = True
@@ -56,4 +54,8 @@ class Pipeline(BasePipeline):
         self.trainer = Trainer(self.config.trainer, output_dir=output_dir)
         if self.config.resume_prefix_dir is not None and self.config.mode != 'train':
             raise ValueError('Completed-prefix extension is a training entry point')
+        if (self.config.resume_completed_prefix_frames is not None and
+                self.config.resume_prefix_dir is None):
+            raise ValueError('An explicit completed prefix length needs resume_prefix_dir')
         self.trainer.resume_prefix_dir = self.config.resume_prefix_dir
+        self.trainer.resume_completed_prefix_frames = self.config.resume_completed_prefix_frames

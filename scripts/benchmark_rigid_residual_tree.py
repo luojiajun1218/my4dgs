@@ -122,7 +122,12 @@ def _load_config(run: Path):
     from libgs.utils.config import to_structured
 
     Config, _ = load_pipeline('ReCon-GS')
-    config, extra = to_structured(OmegaConf.load(run / 'config.yaml'), Config)
+    from importlib import import_module
+    normalize = import_module('pipeline.ReCon-GS.model.rigid_residual_tree').saved_config_with_default_motion_lr
+    saved = OmegaConf.to_container(OmegaConf.load(run / 'config.yaml'), resolve=True)
+    saved['module']['rigid_tree'] = normalize(saved['module']['rigid_tree'])
+    saved['module'].pop('old_opacity', None)
+    config, extra = to_structured(OmegaConf.create(saved), Config)
     if extra:
         raise ValueError(f'Unrecognized run configuration: {extra}')
     return config
@@ -209,11 +214,7 @@ def _load_reference(path: Path, region_count: int | None):
             raise ValueError('Stream reference region count differs from run config')
         if int(packet['region_count']) != len(packet['parents']):
             raise ValueError('Stream reference region count differs from stored tree')
-        state = codec.DecodedState(
-            raw['xyz'], raw['rotation'],
-            torch.from_numpy(packet['owner'].copy()).long(),
-            torch.from_numpy(packet['parents'].copy()).long(),
-            int(packet['frame_index']))
+        state = codec.DecodedState.from_reference(packet)
     codec._validate_state(state)
     return state, raw
 
@@ -239,9 +240,15 @@ def _decode_frame(stream: Path, frame: int, state, raw):
             decoded.xyz[old_count:], decoded.rotation[old_count:],
             decoded.birth_sources)
         sources = decoded.birth_sources
-        if (sources is None or len(sources) != birth_count or
-                not torch.equal(decoded.owner[old_count:],
-                                decoded.owner[:old_count][sources])):
+        if sources is None or len(sources) != birth_count:
+            raise ValueError('Newborn source lineage is missing')
+        expected_owner = decoded.owner[:old_count][sources]
+        if decoded.spatial_centers is not None:
+            spatial = importlib.import_module('pipeline.ReCon-GS.model.spatial_gate')
+            expected_paths = spatial.spatial_route(decoded.xyz[old_count:],
+                decoded.spatial_centers, decoded.spatial_paths.shape[1])
+            expected_owner = spatial.spatial_owner(expected_paths, decoded.spatial_open)
+        if not torch.equal(decoded.owner[old_count:], expected_owner):
             raise ValueError('Newborn source lineage differs from decoded owners')
         for name in RAW_FIELDS:
             current[name] = torch.cat((current[name], newborn[name]))
@@ -584,8 +591,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
                      run / 'frame_summary' / f'frame_{frame:03d}.json'):
             if not path.is_file():
                 raise FileNotFoundError(f'Incomplete sequence: {path}')
-    state, raw = _load_reference(reference, None if config.module.rigid_tree.adaptive_clustering
-                                else config.module.rigid_tree.region_count)
+    state, raw = _load_reference(reference, None)
     if state.frame_index != 0:
         raise ValueError('Complete sequence must start from reference frame0')
     cache_enabled = _selected_render_cache(module, args)
@@ -780,8 +786,7 @@ def main():
         manifest = json.loads(manifest_path.read_text())
         reference_path = args.reference or run / manifest['reference']
         reference_state, reference_raw = _load_reference(
-            reference_path, None if config.module.rigid_tree.adaptive_clustering
-            else config.module.rigid_tree.region_count)
+            reference_path, None)
         if reference_state.frame_index >= args.frame:
             raise ValueError('Decoder reference must precede benchmark frame')
         # Validate hashes and all raw attributes before measuring; this also

@@ -1,47 +1,28 @@
-"""Shared-motion region tree for motion-only dynamic Gaussians.
+"""Shared motion optimization utilities and historical rigid-stream pose math.
 
-Quaternions are scalar-first. Region zero is the identity reference; a point
-has one hard owner. Every region transform acts on the *previous decoded*
-world-space pose, after its parent's transform. The GS residual acts last.
+The active trainer uses SpatialGatedMotion. Parent/pivot composition below is
+retained only to decode historical packets; it is not a training method.
 """
-
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import math
-from pathlib import Path
-
+from typing import Optional
 import torch
 from torch import nn
 from torch.nn import functional as F
-
-from .shared_motion_clustering import MotionClusteringConfig
-from .residual_region_clustering import ResidualGmmConfig, ResidualHdbscanConfig
-from .heir_motion_hierarchy import HeirHierarchyConfig, HeirMotionHierarchy
-from .motion_history import MotionHistory
-from .online_motion_clustering import OnlineMotionClusteringConfig, OnlineMotionHistory
-from .persistent_motion_regions import PersistentRegionConfig, PersistentRegionState, PersistentMotionMixin
-from .online_motion_tree import MotionTreeConfig
-from .persistent_motion_tree_integration import PersistentMotionTreeMixin
-from .persistent_local_motion import PersistentLocalMotionMixin
-from .causal_motion_initialization import CausalTranslationInitializationMixin
-from .root_motion_discovery import RootMotionDiscoveryConfig
+from .spatial_gate import SpatialGateConfig
 
 
 @dataclass
 class RigidTreeConfig:
-    region_count: int = 32
+    """Settings for spatial gate motion and quantized births."""
+    region_count: int = 9
     motion_steps: int = 100
     birth_steps: int = 100
-    tree_edit_interval: int = 10
-    tree_edit_step: int = 60
-    tree_edit_neighbors: int = 8
-    tree_edit_region_trials: int = 4
-    parent_max_depth: int = 8
-    shared_steps: int = 0
     motion_xyz_step_extent: float = 5e-6
     motion_rotation_step_rad: float = 5e-5
-    gs_xyz_step_extent: float | None = None
-    gs_rotation_step_rad: float | None = None
+    gs_xyz_step_extent: float = 5e-6
+    gs_rotation_step_rad: float = 5e-5
     region_translation_lr: float = 1e-3
     region_rotation_lr: float = 1e-3
     gs_translation_lr: float = 1e-3
@@ -50,196 +31,82 @@ class RigidTreeConfig:
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
-    rate_normalization: str = 'frame'  # Legacy checkpoints priced bytes per current GS count.
+    rate_normalization: str = 'frame'
     relative_motion_loss_weight: float = 0.001
-    rate_support_temperature: float = 1.0
+    relative_motion_units: str = 'extent_radians'
     rate_warmup_steps: int = 0
     rate_ramp_steps: int = 1
-    adaptive_clustering: bool = False  # False reads/tests the existing fixed-layout method.
-    bootstrap_tree_step: int = 20
-    motion_warm_start: bool = False
-    causal_translation_init: bool = False
-    persistent_shared_from_start: bool = False
-    clustering: MotionClusteringConfig = field(default_factory=MotionClusteringConfig)
-    residual_hierarchy: bool = False  # True: HDBSCAN regions + HEIR learned parents.
-    tree_refine_steps: int = 0
-    hdbscan: ResidualHdbscanConfig = field(default_factory=ResidualHdbscanConfig)
-    residual_clustering_method: str = 'hdbscan'
-    gmm: ResidualGmmConfig = field(default_factory=ResidualGmmConfig)
-    shared_fit_min_reduction: float = 0.05
-    heir: HeirHierarchyConfig = field(default_factory=HeirHierarchyConfig)
-    online_flat_clustering: bool = False
-    online_partition_policy: str = 'accept_valid'
-    post_partition_steps: int = 0
-    online_clustering: OnlineMotionClusteringConfig = field(default_factory=OnlineMotionClusteringConfig)
-    persistent_regions: PersistentRegionConfig = field(default_factory=PersistentRegionConfig)
-    motion_tree: MotionTreeConfig = field(default_factory=MotionTreeConfig)
-    tree_child_relative_loss_weight: float = .001
-    root_motion_discovery: RootMotionDiscoveryConfig = field(default_factory=RootMotionDiscoveryConfig)
-
-    def tree_frame(self, frame):
-        return frame >= 1 and (frame == 1 or frame % self.tree_edit_interval == 0)
+    motion_fit_window_steps: Optional[int] = None
+    spatial_gate: SpatialGateConfig = field(default_factory=SpatialGateConfig)
 
     def motion_steps_for_frame(self, frame):
-        if self.online_flat_clustering:
-            return self.motion_steps + self.post_partition_steps
-        return self.motion_steps + (self.tree_refine_steps
-            if self.residual_hierarchy and self.tree_frame(frame) else 0)
+        return self.motion_steps
 
     def total_steps_for_frame(self, frame):
-        return self.motion_steps_for_frame(frame) + self.birth_steps
+        return self.motion_steps + self.birth_steps
 
     def validate(self):
-        if self.rate_normalization not in ('frame', 'reference'):
-            raise ValueError('rate_normalization must be frame or reference')
-        self.clustering.validate()
-        self.hdbscan.validate()
-        self.gmm.validate()
-        if self.residual_clustering_method not in ('hdbscan', 'gmm'):
-            raise ValueError('residual_clustering_method must be hdbscan or gmm')
-        if (isinstance(self.shared_fit_min_reduction, bool) or
-                not math.isfinite(self.shared_fit_min_reduction) or
-                not 0 <= self.shared_fit_min_reduction < 1):
-            raise ValueError('shared_fit_min_reduction must be in [0, 1)')
-        self.heir.validate()
-        self.online_clustering.validate()
-        self.persistent_regions.validate()
-        self.motion_tree.validate()
-        self.root_motion_discovery.validate()
-        if not isinstance(self.causal_translation_init, bool):
-            raise ValueError('causal_translation_init must be boolean')
-        if not isinstance(self.persistent_shared_from_start, bool):
-            raise ValueError('persistent_shared_from_start must be boolean')
-        if self.persistent_shared_from_start and (not self.online_flat_clustering or
-                not self.persistent_regions.enabled or self.post_partition_steps < 1 or
-                self.motion_warm_start or self.shared_steps != 0):
-            raise ValueError('Shared-from-start requires persistent online regions, refinement, zero initial increments, and concurrent GS fitting')
-        if self.causal_translation_init and (not self.online_flat_clustering or
-                self.motion_warm_start or self.online_clustering.history_frames < 2):
-            raise ValueError('Causal translation initialization requires online history>=2 and no legacy warm start')
-        if self.root_motion_discovery.enabled and (not self.persistent_regions.enabled or
-                self.online_clustering.history_frames < self.root_motion_discovery.min_motion_observations):
-            raise ValueError('Root discovery requires persistent regions and enough causal motion history')
-        if (isinstance(self.tree_child_relative_loss_weight, bool) or
-                not math.isfinite(self.tree_child_relative_loss_weight) or self.tree_child_relative_loss_weight < 0):
-            raise ValueError('tree_child_relative_loss_weight must be nonnegative')
-        if self.persistent_regions.enabled and (not self.online_flat_clustering or
-                self.post_partition_steps < 1 or self.online_clustering.method != 'kmeans' or
-                self.motion_warm_start):
-            raise ValueError('Persistent regions require Kmeans initialization, online refinement, and zero initial shared increments')
-        if self.online_partition_policy not in ('accept_valid', 'require_smaller'):
-            raise ValueError('online_partition_policy must be accept_valid or require_smaller')
-        if (isinstance(self.post_partition_steps, bool) or
-                not isinstance(self.post_partition_steps, int) or self.post_partition_steps < 0):
-            raise ValueError('post_partition_steps must be a nonnegative integer')
-        if self.post_partition_steps and not self.online_flat_clustering:
-            raise ValueError('Post-partition refinement requires online flat clustering')
-        if self.online_flat_clustering and (not self.adaptive_clustering or
-                self.residual_hierarchy or self.region_count != 1 or self.shared_steps != 0):
-            raise ValueError('Online flat clustering requires an independent identity root, '
-                             'adaptive storage, and no hierarchy/shared-only phase')
-        if not isinstance(self.residual_hierarchy, bool):
-            raise ValueError('residual_hierarchy must be boolean')
-        if isinstance(self.tree_refine_steps, bool) or not isinstance(self.tree_refine_steps, int):
-            raise ValueError('tree_refine_steps must be an integer')
-        if self.residual_hierarchy:
-            if (not self.adaptive_clustering or self.region_count != 1 or
-                    self.tree_refine_steps != 100 or
-                    self.bootstrap_tree_step != 100 or self.tree_edit_step != 100):
-                raise ValueError('Residual hierarchy needs an identity-only root, '
-                                 '100 residual steps, then 100 HEIR steps')
-        elif self.tree_refine_steps != 0:
-            raise ValueError('Extra tree steps require the residual HDBSCAN/HEIR method')
-        if not isinstance(self.adaptive_clustering, bool) or not isinstance(self.motion_warm_start, bool):
-            raise ValueError('Adaptive clustering and motion warm start must be boolean')
-        if (isinstance(self.bootstrap_tree_step, bool) or
-                not isinstance(self.bootstrap_tree_step, int) or self.bootstrap_tree_step < 1):
-            raise ValueError('bootstrap_tree_step must be a positive integer')
-        if self.adaptive_clustering and not self.online_flat_clustering:
-            if (self.motion_steps, self.birth_steps, self.tree_edit_interval, self.shared_steps) != (100, 100, 10, 0):
-                raise ValueError('Motion-cluster training requires 100+100 steps, '
-                                 'ten-frame edits, and no separate shared/probe phase')
-            if ((not self.residual_hierarchy and self.bootstrap_tree_step >= self.motion_steps) or
-                    self.gs_xyz_step_extent is None or self.gs_rotation_step_rad is None):
-                raise ValueError('Adaptive clustering needs an in-motion bootstrap step and explicit GS quantization')
-        for name in ('region_count', 'motion_steps', 'birth_steps',
-                     'tree_edit_interval', 'tree_edit_step',
-                     'tree_edit_neighbors', 'tree_edit_region_trials',
-                     'parent_max_depth'):
+        self.spatial_gate.validate(self.motion_steps)
+        if not self.spatial_gate.enabled or self.spatial_gate.learn_region_motion:
+            raise ValueError('Use statistically initialized motion and learnable subdivision gates')
+        for name in ('region_count', 'motion_steps', 'birth_steps', 'rate_ramp_steps'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f'{name} must be a positive integer')
-        if self.region_count < (1 if self.residual_hierarchy or self.online_flat_clustering else 2) or self.tree_edit_step > self.motion_steps:
-            raise ValueError('Invalid initial region count or tree edit step')
-        if (isinstance(self.shared_steps, bool) or not isinstance(self.shared_steps, int) or
-                self.shared_steps < 0 or self.shared_steps >= self.motion_steps or
-                self.tree_edit_step <= self.shared_steps):
-            raise ValueError('shared_steps must leave joint fitting and precede tree edits')
+        for name in ('rate_warmup_steps',):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f'{name} must be a nonnegative integer')
+        if self.region_count != 9 or self.total_steps_for_frame(1) > 300:
+            raise ValueError('Use eight initial regions and at most 300 steps per frame')
+        if self.rate_warmup_steps >= self.motion_steps:
+            raise ValueError('Rate warmup must fit the motion phase')
+        if self.rate_loss_weight and self.spatial_gate.start_step <= self.rate_warmup_steps:
+            raise ValueError('Fit complete GS motion proposals before region initialization')
+        window = self.motion_fit_window_steps
+        if window is not None and (isinstance(window, bool) or
+                not isinstance(window, int) or not 1 <= window <= self.motion_steps):
+            raise ValueError('Motion fit window must be a positive integer within the motion phase')
+        if self.rate_normalization not in ('frame', 'reference'):
+            raise ValueError('rate_normalization must be frame or reference')
+        if self.relative_motion_units != 'extent_radians':
+            raise ValueError('Active motion fitting uses extent-normalized translation and radians')
         for name in ('motion_xyz_step_extent', 'motion_rotation_step_rad',
                      'region_translation_lr', 'region_rotation_lr',
-                     'gs_translation_lr', 'gs_rotation_lr', 'adam_eps',
-                     'rate_support_temperature'):
+                     'gs_translation_lr', 'gs_rotation_lr', 'adam_eps'):
             value = getattr(self, name)
-            if not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be finite and positive')
         for name in ('rate_loss_weight', 'relative_motion_loss_weight'):
             value = getattr(self, name)
-            if not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name} must be finite and nonnegative')
         if (isinstance(self.motion_lr_final_ratio, bool) or
-                not isinstance(self.motion_lr_final_ratio, (float, int)) or
-                not math.isfinite(self.motion_lr_final_ratio) or
-                not 0 < self.motion_lr_final_ratio <= 1):
+                not math.isfinite(self.motion_lr_final_ratio) or not 0 < self.motion_lr_final_ratio <= 1):
             raise ValueError('motion_lr_final_ratio must be in (0, 1]')
-        for name in ('gs_xyz_step_extent', 'gs_rotation_step_rad'):
-            value = getattr(self, name)
-            if value is not None and (not isinstance(value, (float, int)) or
-                                      not math.isfinite(value) or value <= 0):
-                raise ValueError(f'{name} must be finite and positive when set')
-        if ((self.gs_xyz_step_extent is None) !=
-                (self.gs_rotation_step_rad is None)):
-            raise ValueError('Both GS quantization steps must be set together')
-        if (self.rate_warmup_steps < 0 or self.rate_ramp_steps < 1 or
-                self.rate_warmup_steps >= self.motion_steps):
-            raise ValueError('Invalid rate warmup/ramp schedule')
-        if len(self.adam_betas) != 2 or any(not 0 <= v < 1 for v in self.adam_betas):
+        if (self.gs_xyz_step_extent != self.motion_xyz_step_extent or
+                self.gs_rotation_step_rad != self.motion_rotation_step_rad):
+            raise ValueError('Spatial recoding requires the same region and GS quantization grid')
+        if len(self.adam_betas) != 2 or any(not 0 <= value < 1 for value in self.adam_betas):
             raise ValueError('adam_betas must contain two values in [0, 1)')
 
 
+# Older spatial checkpoints contain defaults for retired training paths.
+# Strip only these known metadata fields when comparing/loading their config.
+RETIRED_TREE_CONFIG_FIELDS = frozenset(('post_birth_motion_steps', 'fixed_support_refinement', 'tree_edit_interval', 'tree_edit_step', 'tree_edit_neighbors', 'tree_edit_region_trials', 'parent_max_depth', 'shared_steps', 'rate_support_temperature', 'adaptive_clustering', 'bootstrap_tree_step', 'motion_warm_start', 'causal_translation_init', 'persistent_shared_from_start', 'clustering', 'residual_hierarchy', 'tree_refine_steps', 'hdbscan', 'residual_clustering_method', 'gmm', 'shared_fit_min_reduction', 'heir', 'online_flat_clustering', 'online_partition_policy', 'post_partition_steps', 'online_clustering', 'persistent_regions', 'motion_tree', 'tree_child_relative_loss_weight', 'root_motion_discovery'))
+
+
 def saved_config_with_default_motion_lr(saved_config):
-    """Compare pre-schedule checkpoints without changing their saved payload."""
-    if isinstance(saved_config, dict):
-        defaults = dict(motion_lr_final_ratio=1.0, adaptive_clustering=False,
-                        motion_warm_start=False, bootstrap_tree_step=20,
-                        clustering=asdict(MotionClusteringConfig()),
-                        residual_hierarchy=False, tree_refine_steps=0,
-                        hdbscan=asdict(ResidualHdbscanConfig()), heir=asdict(HeirHierarchyConfig()),
-                        residual_clustering_method='hdbscan', gmm=asdict(ResidualGmmConfig()),
-                        shared_fit_min_reduction=0.05, rate_normalization='frame')
-        defaults.update(online_flat_clustering=False, causal_translation_init=False,
-                        persistent_shared_from_start=False,
-                        post_partition_steps=0,
-                        online_partition_policy=('require_smaller' if
-                            saved_config.get('online_flat_clustering', False) else 'accept_valid'),
-                        online_clustering=asdict(OnlineMotionClusteringConfig()))
-        defaults['persistent_regions'] = asdict(PersistentRegionConfig())
-        defaults['motion_tree'] = asdict(MotionTreeConfig())
-        defaults['tree_child_relative_loss_weight'] = .001
-        defaults['root_motion_discovery'] = asdict(RootMotionDiscoveryConfig())
-        normalized = {**defaults, **saved_config}
-        normalized['hdbscan'] = {**asdict(ResidualHdbscanConfig()),
-                                 **saved_config.get('hdbscan', {})}
-        normalized['gmm'] = {**asdict(ResidualGmmConfig()), **saved_config.get('gmm', {})}
-        normalized['heir'] = {**asdict(HeirHierarchyConfig()), **saved_config.get('heir', {})}
-        normalized['online_clustering'] = {**asdict(OnlineMotionClusteringConfig()),
-                                         **saved_config.get('online_clustering', {})}
-        normalized['persistent_regions'] = {**asdict(PersistentRegionConfig()),
-                                          **saved_config.get('persistent_regions', {})}
-        normalized['motion_tree'] = {**asdict(MotionTreeConfig()), **saved_config.get('motion_tree', {})}
-        normalized['root_motion_discovery'] = {**asdict(RootMotionDiscoveryConfig()),
-                                             **saved_config.get('root_motion_discovery', {})}
-        return normalized
-    return saved_config
+    if not isinstance(saved_config, dict):
+        return saved_config
+    normalized = {**asdict(RigidTreeConfig()), **{
+        name: value for name, value in saved_config.items()
+        if name not in RETIRED_TREE_CONFIG_FIELDS}}
+    normalized['spatial_gate'] = {**asdict(SpatialGateConfig()), **saved_config.get('spatial_gate', {})}
+    normalized['spatial_gate']['image_fit_during_gate'] = saved_config.get('spatial_gate', {}).get('image_fit_during_gate', False)
+    normalized['spatial_gate']['learn_region_motion'] = saved_config.get('spatial_gate', {}).get('learn_region_motion', True)
+    normalized['relative_motion_units'] = saved_config.get('relative_motion_units', 'extent_radians')
+    return normalized
 
 
 def rotation_vector_quaternion(vector):
@@ -267,16 +134,6 @@ def quaternion_rotate(q, vector):
 def rotation_delta(q, vector):
     t = 2 * torch.cross(q[..., 1:], vector, dim=-1)
     return q[..., :1] * t + torch.cross(q[..., 1:], t, dim=-1)
-
-
-def quaternion_rotvec(q):
-    q = F.normalize(q, dim=-1)
-    q = torch.where(q[..., :1] < 0, -q, q)
-    v = q[..., 1:]
-    norm = v.norm(dim=-1, keepdim=True)
-    angle = 2 * torch.atan2(norm, q[..., :1])
-    return v * torch.where(norm > 0, angle / norm.clamp_min(1e-30),
-                           torch.full_like(norm, 2))
 
 
 def quaternion_angle_error(a, b):
@@ -332,33 +189,6 @@ def _depth_levels(parents):
         depth[node] = depth[values[node]] + 1
     return [[node for node in order if depth[node] == level]
             for level in range(1, max(depth) + 1)]
-
-
-def initial_layout(xyz, region_count):
-    """Stable spatial bisection; keeps all allocated empty regions valid."""
-    if xyz.ndim != 2 or xyz.shape[1] != 3 or not len(xyz):
-        raise ValueError('Initial layout needs a nonempty [N, 3] point cloud')
-    if region_count < 2:
-        raise ValueError('Region count must include root and one moving region')
-    points = xyz.detach().cpu()
-    owner = torch.ones(len(points), dtype=torch.long)
-    parents = torch.zeros(region_count, dtype=torch.long)
-    parents[0] = -1
-    groups = {1: torch.arange(len(points), dtype=torch.long)}
-    for child in range(2, min(region_count, len(points) + 1)):
-        largest = max(groups, key=lambda node: (len(groups[node]), -node))
-        rows = groups[largest]
-        if len(rows) < 2:
-            break
-        axis = int((points[rows].amax(0) - points[rows].amin(0)).argmax())
-        ordered = sorted(rows.tolist(), key=lambda row: (float(points[row, axis]), row))
-        half = len(ordered) // 2
-        moved = torch.tensor(ordered[half:], dtype=torch.long)
-        kept = torch.tensor(ordered[:half], dtype=torch.long)
-        owner[moved] = child
-        parents[child] = 0
-        groups[largest], groups[child] = kept, moved
-    return owner.to(xyz.device), parents.to(xyz.device)
 
 
 def region_pivots(xyz, owner, parents):
@@ -418,11 +248,6 @@ def _id_lengths(count, reference):
     return length
 
 
-def relative_motion_magnitude(translation, rotvec, extent):
-    """L1 residual SE(3) magnitude per region, with translation scale-free."""
-    return (translation / extent).abs().sum(-1) + rotvec.abs().sum(-1)
-
-
 def compose_pose(base_xyz, base_rotation, owner, parents, pivots,
                  region_translation, region_rotvec, gs_translation, gs_rotvec):
     """Apply noncommuting parent-to-child SE(3), then GS pose residual."""
@@ -461,51 +286,21 @@ def region_transforms(base_xyz, parents, pivots, translation, rotvec):
     return q_global, b_global
 
 
-from .adaptive_motion_tree import AdaptiveMotionTreeMixin
-from .online_flat_motion import OnlineFlatMotionMixin
-
-
-class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMotionMixin, PersistentMotionTreeMixin, PersistentMotionMixin, OnlineFlatMotionMixin, AdaptiveMotionTreeMixin, nn.Module):
+class MotionBase(nn.Module):
+    """Optimizer, quantization, and checkpoint lifecycle shared by spatial motion."""
     def __init__(self, config):
         super().__init__()
         config.validate()
         self.config = config
         self.optimizer = None
-        self.owner = None
-        self.parents = None
-        self.pivots = None
-        self.codec_previous_state = None
-        self.frame_reference_state = None
+        self.owner = self.parents = None
+        self.codec_previous_state = self.frame_reference_state = None
         self.rate_reference_count = None
-        self.materialized_owner = None
         self.pending_birth_sources = None
-        self.topology_edits = []
-        self.last_metrics = {}
-        self.stage_seconds = {}
-        self.committed = False
-        self.last_step = 0
-        self._topology_updated = False
-        self._metadata_cache = None
-        self.bootstrap_finalized = False
-        self.bootstrap_seconds = 0.
-        self.heir_hierarchy = None
-        self.heir_optimizer = None
-        self.heir_features = None
-        self.heir_past = None
-        self.previous_partition = None
-        self.motion_history = MotionHistory(config.heir.history_frames)
-        self.heir_finalized = False
-        self.cluster_labels = None
+        self.topology_edits, self.last_metrics = [], {}
+        self.committed, self.last_step = False, 0
         self.observations = None
-        self.region_map = None
-        self._protected_regions = set()
-        self.online_history = OnlineMotionHistory(config.online_clustering.history_frames)
-        self.online_ids = None
-        self.materialized_online_ids = None
-        self.online_next_id = 0
         self.flat_region_diagnostics = {}
-        self.persistent_state = PersistentRegionState()
-        self._reset_causal_translation_prediction()
 
     @property
     def steps(self):
@@ -514,20 +309,17 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
             [self.config.motion_xyz_step_extent * self.extent] * 3 +
             [self.config.motion_rotation_step_rad] * 3)
 
+
     @property
     def gs_steps(self):
-        xyz_step = (self.config.gs_xyz_step_extent
-                    if self.config.gs_xyz_step_extent is not None
-                    else self.config.motion_xyz_step_extent)
-        rotation_step = (self.config.gs_rotation_step_rad
-                         if self.config.gs_rotation_step_rad is not None
-                         else self.config.motion_rotation_step_rad)
-        return self.base_xyz.new_tensor([xyz_step * self.extent] * 3 +
-                                        [rotation_step] * 3)
+        return self.base_xyz.new_tensor([self.config.gs_xyz_step_extent * self.extent] * 3 +
+                                        [self.config.gs_rotation_step_rad] * 3)
+
 
     @property
     def motion_steps(self):
         return self.config.motion_steps_for_frame(self.frame_index)
+
 
     @property
     def rate_normalization_count(self):
@@ -538,225 +330,32 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
             return self.rate_reference_count
         return len(self.base_xyz)
 
+
     @property
     def rate_normalization_bytes(self):
         return max(1, self.rate_normalization_count * 24)
 
-    def setup(self, xyz, rotation, extent, frame_index=0, previous_rows=None):
-        if xyz.ndim != 2 or xyz.shape[1] != 3 or rotation.shape != (len(xyz), 4):
-            raise ValueError('Expected [N,3] centers and [N,4] raw rotations')
-        if not len(xyz) or not math.isfinite(float(extent)) or extent <= 0:
-            raise ValueError('Motion reference must be nonempty with positive extent')
-        if self.rate_reference_count is None:
-            self.rate_reference_count = len(xyz)
-        has_previous = self.materialized_owner is not None
-        warm = (self._warm_motion() if has_previous and self.config.motion_warm_start
-                else None)
-        if not has_previous:
-            if self.config.residual_hierarchy or self.config.online_flat_clustering:
-                owner = torch.zeros(len(xyz), dtype=torch.long, device=xyz.device)
-                parents = torch.tensor([-1], dtype=torch.long, device=xyz.device)
-            else:
-                owner, parents = initial_layout(
-                    xyz, 2 if self.config.adaptive_clustering else self.config.region_count)
-        else:
-            if previous_rows is None:
-                previous_rows = torch.arange(len(xyz), device=xyz.device)
-            rows = torch.as_tensor(previous_rows, device=xyz.device, dtype=torch.long)
-            if (not self.config.online_flat_clustering and self.config.heir.geometry == 'se3' and
-                    not torch.equal(rows, torch.arange(len(self.materialized_owner), device=xyz.device))):
-                raise ValueError('Temporal SE(3) regions require persistent GS rows without deletion')
-            if (rows.shape != (len(xyz),) or
-                    bool(((rows < 0) | (rows >= len(self.materialized_owner))).any()) or
-                    rows.unique().numel() != len(rows)):
-                raise ValueError('Previous rows must map each surviving GS once')
-            if self.codec_previous_state is not None:
-                prior_xyz = self.codec_previous_state.xyz.to(xyz)
-                prior_rotation = self.codec_previous_state.rotation.to(rotation)
-                dot = (F.normalize(rotation, dim=-1) *
-                       F.normalize(prior_rotation[rows], dim=-1)).sum(-1).abs()
-                if (not torch.allclose(xyz, prior_xyz[rows], atol=1e-6, rtol=1e-5) or
-                        not bool((dot > 1 - 1e-5).all())):
-                    raise ValueError('Frame reference differs from previous decoded state')
-            owner = self.materialized_owner.to(xyz.device)[rows].clone()
-            parents = self.parents.clone()
-        self.owner, self.parents = owner, parents
-        self.pivots = region_pivots(xyz.detach(), owner, parents)
-        self.base_xyz = xyz.detach().clone()
-        self.base_rotation = rotation.detach().clone()
-        self.extent = float(extent)
-        self.frame_index = int(frame_index)
-        self.previous_rows = (torch.arange(len(xyz), device=xyz.device)
-                              if previous_rows is None else
-                              torch.as_tensor(previous_rows, device=xyz.device, dtype=torch.long).clone())
-        if self.config.online_flat_clustering:
-            if has_previous:
-                self.online_ids = self.materialized_online_ids[self.previous_rows.cpu()].clone()
-            else:
-                self.online_ids = torch.arange(len(xyz), dtype=torch.long)
-                self.online_next_id = len(xyz)
-        if self.codec_previous_state is not None and has_previous:
-            # The stream, rather than a slightly different CUDA computation,
-            # defines the reference used by every subsequent frame.
-            self.base_xyz = self.codec_previous_state.xyz[self.previous_rows.cpu()].to(xyz)
-            self.base_rotation = self.codec_previous_state.rotation[self.previous_rows.cpu()].to(rotation)
-            self.pivots = region_pivots(self.base_xyz, owner, parents)
-        if self.codec_previous_state is None:
-            from .rigid_tree_codec import DecodedState
-            self.codec_previous_state = DecodedState(
-                self.base_xyz.detach().cpu(), self.base_rotation.detach().cpu(),
-                owner.detach().cpu(), parents.detach().cpu(), self.frame_index - 1)
-        self.frame_reference_state = self.codec_previous_state
-        count = len(parents)
-        self.region_translation = nn.Parameter(xyz.new_zeros(count, 3))
-        self.region_rotation = nn.Parameter(xyz.new_zeros(count, 3))
-        self.gs_translation = nn.Parameter(torch.zeros_like(xyz))
-        self.gs_rotation = nn.Parameter(torch.zeros_like(xyz))
-        self._initialize_causal_translation_prediction()
-        self.optimizer = torch.optim.Adam([
-            dict(params=[self.region_translation], lr=self.config.region_translation_lr),
-            dict(params=[self.region_rotation], lr=self.config.region_rotation_lr),
-            dict(params=[self.gs_translation], lr=self.config.gs_translation_lr),
-            dict(params=[self.gs_rotation], lr=self.config.gs_rotation_lr)],
-            betas=tuple(self.config.adam_betas), eps=self.config.adam_eps)
-        self.materialized_owner = None
-        self.pending_birth_sources = None
-        self.topology_edits = []
-        self.last_metrics = {}
-        self.committed = False
-        self.last_step = 0
-        self._topology_updated = False
-        self._metadata_cache = None
-        self._region_id_lengths = _id_lengths(count - 1, xyz)
-        self._gs_id_lengths = _id_lengths(len(xyz), xyz)
-        self.observations = torch.zeros(len(xyz), dtype=torch.long, device=xyz.device)
-        self.region_map = torch.arange(count, dtype=torch.long, device=xyz.device)
-        self._protected_regions = set()
-        if self.config.heir.geometry == 'linear':
-            self.heir_hierarchy = None
-            self.heir_optimizer = None
-        self.heir_features = None
-        self.heir_past = None
-        self.previous_partition = None
-        self.heir_finalized = False
-        self.cluster_labels = None
-        if self.config.online_flat_clustering:
-            self.flat_region_diagnostics = {'frame': self.frame_index,
-                'proposal_skipped': not (self.frame_index == 1 or
-                    self.frame_index % self.config.online_clustering.update_interval == 0)}
-        if warm is not None:
-            self._initialize_warm_motion(warm)
-        if self.config.persistent_regions.enabled:
-            self._persistent_start_frame()
-        if self.config.causal_translation_init:
-            self.flat_region_diagnostics['translation_initialization'] = deepcopy(self.causal_prediction_metrics)
-
-    def _values(self, hard=False, step=None):
-        region_step, gs_step = self.steps, self.gs_steps
-        quantize = _integer if hard else _quantized
-        rt = quantize(self.region_translation, region_step[:3])
-        rr = quantize(self.region_rotation, region_step[3:])
-        gt = quantize(self.gs_translation, gs_step[:3])
-        gr = quantize(self.gs_rotation, gs_step[3:])
-        if step is not None and step <= self.config.shared_steps:
-            gt, gr = torch.zeros_like(gt), torch.zeros_like(gr)
-        # Root is always the identity and has no transmitted symbols.
-        if hard:
-            rt = rt.clone(); rr = rr.clone()
-            rt[0] = 0; rr[0] = 0
-        else:
-            zero = torch.zeros_like(rt[:1])
-            rt = torch.cat((zero, rt[1:]))
-            rr = torch.cat((zero, rr[1:]))
-        return rt, rr, gt, gr
-
-    def forward(self, step, training=False):
-        if training:
-            self.last_step = int(step)
-        rt, rr, gt, gr = self._values(step=step)
-        return compose_pose(self.base_xyz, self.base_rotation, self.owner,
-                            self.parents, self.pivots, rt, rr, gt, gr)
 
     def materialized_pose(self, step=None):
         return self.forward(self.motion_steps if step is None else step)
 
-    @property
-    def shared_prestructure_active(self):
-        # This reference is the previous decoded frame, not the layout which
-        # current step100 can create. Delayed first discovery stays free.
-        reference = self.frame_reference_state
-        return bool(self.config.persistent_shared_from_start and
-                    self.config.online_flat_clustering and self.config.persistent_regions.enabled and
-                    reference is not None and reference.frame_index >= 1 and
-                    reference.owner.ne(0).any())
-
-    @torch.no_grad()
-    def optimizer_step(self, pre_topology_callback=None):
-        if (self.config.online_flat_clustering and self.config.post_partition_steps > 0 and
-                self.last_step <= self.config.motion_steps and not self.shared_prestructure_active):
-            # First discovery fits independent GS. With inherited sharing
-            # enabled, the previous decoded basis can learn from step1.
-            self.region_translation.grad = None
-            self.region_rotation.grad = None
-        if self.last_step <= self.config.shared_steps:
-            self.gs_translation.grad = None
-            self.gs_rotation.grad = None
-        factor = self._motion_lr_factor(self.last_step)
-        base_lrs = (self.config.region_translation_lr,
-                    self.config.region_rotation_lr,
-                    self.config.gs_translation_lr,
-                    self.config.gs_rotation_lr)
-        for group, base_lr in zip(self.optimizer.param_groups, base_lrs):
-            group['lr'] = base_lr * factor
-        self.optimizer.step()
-        if (self.heir_optimizer is not None and not self.heir_finalized and
-                self.config.motion_steps < self.last_step <= self.motion_steps):
-            self.heir_optimizer.step()
-            self.heir_optimizer.zero_grad(set_to_none=True)
-        self._protected_regions = set()
-        projected = 0
-        for parameter, scale in ((self.region_translation, self.steps[:3]),
-                                 (self.region_rotation, self.steps[3:]),
-                                 (self.gs_translation, self.gs_steps[:3]),
-                                 (self.gs_rotation, self.gs_steps[3:])):
-            limit = 32767 * scale
-            projected += int((parameter.abs() > limit).any(-1).sum())
-            parameter.clamp_(min=-limit, max=limit)
-        residual_edit = (self.config.residual_hierarchy and
-                         self.stage(self.last_step) in ('tree_edit', 'tree_finalize', 'tree_validate'))
-        residual_edit |= self.config.online_flat_clustering and self.stage(self.last_step) == 'flat_partition'
-        if residual_edit:
-            # First regularize the fitted pose; then preserve it while changing
-            # its representation. Never erase newly needed cancellation terms
-            # in the same step as a pose-preserving tree edit.
-            self._proximal_region_blocks()
-            self._proximal_gs_blocks()
-        if (self.config.causal_translation_init and
-                self.last_step == self.config.motion_steps):
-            self._fallback_unobserved_translation_prediction()
-        if pre_topology_callback is not None and self.last_step == self.config.motion_steps:
-            pre_topology_callback()
-        edits = self.update_topology(self.last_step) if self.config.adaptive_clustering else []
-        if not residual_edit:
-            self._proximal_region_blocks()
-            if self.last_step > self.config.shared_steps:
-                self._proximal_gs_blocks()
-        self.last_metrics['motion/int16_projected_blocks'] = projected
-        if self.config.causal_translation_init and self.last_step == self.config.motion_steps:
-            self._record_translation_prediction_correction(self.last_step)
-        if self.config.persistent_shared_from_start and self.last_step == self.config.motion_steps:
-            self.flat_region_diagnostics['shared_prestructure_active'] = self.shared_prestructure_active
-        self.optimizer.zero_grad(set_to_none=True)
-        return edits
 
     def _motion_lr_factor(self, step):
-        """One cosine decay over the second half of motion fitting."""
+        """Decay during the second half of motion fitting."""
         start = self.motion_steps // 2
-        progress = min(max((step - start) /
-                           max(1, self.motion_steps - start), 0.), 1.)
+        progress = (step - start) / max(1, self.motion_steps - start)
+        progress = min(max(progress, 0.), 1.)
         cosine = (1 + math.cos(math.pi * progress)) / 2
         return (self.config.motion_lr_final_ratio +
                 (1 - self.config.motion_lr_final_ratio) * cosine)
+
+    def _motion_fit_window_due(self):
+        """Finish local fit windows, including an incomplete phase-end window."""
+        window = self.config.motion_fit_window_steps
+        if window is None:
+            return True
+        return self.last_step == self.motion_steps or self.last_step % window == 0
+
 
     @torch.no_grad()
     def _proximal_blocks(self, translation, rotation, step_t, step_r,
@@ -801,23 +400,10 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
         choice = torch.stack((cost_both, cost_t, cost_r, cost_none)).argmin(0)
         prune_t = (choice == 2) | (choice == 3)
         prune_r = (choice == 1) | (choice == 3)
-        if translation is self.region_translation and self._protected_regions:
-            protected = torch.tensor(sorted(self._protected_regions), device=values_t.device) - first_row
-            prune_t[protected] = False
-            prune_r[protected] = False
         values_t[prune_t] = 0
         values_r[prune_r] = 0
         return int(prune_t.sum()), int(prune_r.sum())
 
-    @torch.no_grad()
-    def _proximal_region_blocks(self):
-        groups = self.optimizer.param_groups
-        pruned_t, pruned_r = self._proximal_blocks(
-            self.region_translation, self.region_rotation,
-            self.steps[:3], self.steps[3:], self._region_id_lengths,
-            groups[0]['lr'], groups[1]['lr'], 1)
-        self.last_metrics['motion/prox_zero_region_translation_blocks'] = pruned_t
-        self.last_metrics['motion/prox_zero_region_rotation_blocks'] = pruned_r
 
     @torch.no_grad()
     def _proximal_gs_blocks(self):
@@ -829,35 +415,6 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
         self.last_metrics['motion/prox_zero_translation_blocks'] = pruned_t
         self.last_metrics['motion/prox_zero_rotation_blocks'] = pruned_r
 
-    def stage(self, step):
-        if self.config.online_flat_clustering:
-            due = (self.config.persistent_regions.enabled or self.frame_index == 1 or
-                   self.frame_index % self.config.online_clustering.update_interval == 0)
-            if step > self.motion_steps:
-                return 'birth_fit'
-            if due and step == self.config.motion_steps and not self._topology_updated:
-                return 'flat_partition'
-            if self.config.motion_steps < step <= self.motion_steps:
-                return 'flat_refine'
-            return 'free_motion' if self.config.post_partition_steps else 'motion_fit'
-        if self.config.residual_hierarchy:
-            if self.config.tree_frame(self.frame_index):
-                if step == self.config.motion_steps and not self._topology_updated:
-                    return 'tree_edit'
-                if step == self.motion_steps and not self.heir_finalized:
-                    return 'tree_finalize'
-                if self.config.motion_steps < step <= self.motion_steps:
-                    return 'tree_refine'
-            elif (self.config.heir.geometry == 'se3' and step == self.motion_steps and
-                  not self.heir_finalized):
-                return 'tree_validate'
-            return 'motion_fit'
-        if (self.config.adaptive_clustering and self.frame_index == 1 and
-                not self.bootstrap_finalized and step == self.config.bootstrap_tree_step):
-            return 'tree_edit'
-        return ('tree_edit' if (self.frame_index % self.config.tree_edit_interval == 0 and
-                                step == self.config.tree_edit_step and
-                                not self._topology_updated) else 'motion_fit')
 
     def _hard_motion_bytes(self):
         rt, rr, gt, gr = self._values(hard=True)
@@ -878,371 +435,28 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
                     _varint_length(rows.numel()))
         return sparse_bytes(r_t, r_r) + sparse_bytes(g_t, g_r)
 
-    def _metadata_bytes(self):
-        if self._metadata_cache is not None:
-            return self._metadata_cache
-        prior = self.frame_reference_state
-        rows = self.previous_rows.detach().cpu().tolist()
-        birth = (self.pending_birth_sources.tolist()
-                 if self.pending_birth_sources is not None else [])
-        quantization_bytes = (40 if self.config.gs_xyz_step_extent is not None
-                              else 24)
-        size = (4 + 32 + quantization_bytes + 16 +
-                _varint_length(self.frame_index) +
-                _varint_length(len(self.parents)) + _varint_length(len(rows)) +
-                _varint_length(len(birth)) + 1)
-        if len(rows) < len(prior.xyz):
-            deleted = sorted(set(range(len(prior.xyz))) - set(rows))
-            size += _varint_length(len(deleted))
-            last = -1
-            for row in deleted:
-                size += _varint_length(row - last - 1)
-                last = row
-        if self.config.adaptive_clustering:
-            from .rigid_tree_codec import dynamic_layout_bytes
-            layout, mapped_owner = dynamic_layout_bytes(
-                prior, self.previous_rows, self.parents, self.pivots, self.region_map)
-            size += len(layout)
-            owner_edits = torch.where(self.owner.detach().cpu() != mapped_owner)[0].tolist()
-            size += _varint_length(len(owner_edits))
-        else:
-            parent_edits = torch.where(self.parents.detach().cpu() != prior.parents)[0].tolist()
-            owner_edits = torch.where(self.owner.detach().cpu() != prior.owner[rows])[0].tolist()
-            size += _varint_length(len(parent_edits)) + _varint_length(len(owner_edits))
-            for node in parent_edits:
-                size += _varint_length(node) + _varint_length(int(self.parents[node]))
-        for row in owner_edits:
-            size += _varint_length(row) + _varint_length(int(self.owner[row]))
-        size += sum(_varint_length(source) + 28 for source in birth)
-        self._metadata_cache = size
-        return size
 
-    def loss_terms(self, step, diagnostics=True):
-        region_scale_t = self.steps[:3]
-        region_scale_r = self.steps[3:]
-        gs_scale_t = self.gs_steps[:3]
-        gs_scale_r = self.gs_steps[3:]
-        temperature = self.config.rate_support_temperature
-        def support(value, scale):
-            magnitude = (value / scale).abs().sum(-1)
-            return magnitude / (magnitude + temperature)
-        rt = support(self.region_translation[1:], region_scale_t)
-        rr = support(self.region_rotation[1:], region_scale_r)
-        gt = support(self.gs_translation, gs_scale_t)
-        gr = support(self.gs_rotation, gs_scale_r)
-        # Smooth/proximal and owner-edit decisions retain the absolute-ID
-        # proxy. Only _hard_motion_bytes is the exact gap stream.
-        rid = self._region_id_lengths
-        gid = self._gs_id_lengths
-        region_soft_bytes = (((rt + rr - rt * rr) * (rid + 1)).sum() +
-                             (rt.sum() + rr.sum()) * 6)
-        gs_soft_bytes = (((gt + gr - gt * gr) * (gid + 1)).sum() +
-                         (gt.sum() + gr.sum()) * 6)
-        # Both region and GS blocks use the discrete Adam-metric proximal
-        # choice after the optimizer step. Their soft byte count is a
-        # diagnostic only, detached to avoid charging either block twice.
-        soft_bytes = (region_soft_bytes + gs_soft_bytes).detach()
-        metadata = self._metadata_bytes()
-        soft_bytes = soft_bytes + metadata
-        raw_bytes = self.rate_normalization_bytes
-        rate = soft_bytes / raw_bytes
-        ramp = min(max((step - self.config.rate_warmup_steps) /
-                       self.config.rate_ramp_steps, 0.), 1.)
-        # Relative transform is the only regional smoothness prior. Distinct
-        # branches can move differently without a same-world-motion penalty.
-        relative = self._relative_motion()
-        result = dict(rate_loss=rate * self.config.rate_loss_weight * ramp,
-                      relative_motion_loss=relative * self.config.relative_motion_loss_weight,
-                      rate_bytes_surrogate=soft_bytes,
-                      rate_fraction=rate,
-                      relative_motion=relative)
-        if self.config.persistent_regions.tree_enabled:
-            child_relative = self._tree_child_relative_motion()
-            result.update(child_relative_motion_loss=child_relative * self.config.tree_child_relative_loss_weight,
-                          child_relative_motion=child_relative,
-                          child_relative_motion_region_count=self.base_xyz.new_tensor(int((self.parents > 0).sum())))
-        if diagnostics:
-            # This is the exact size of the uncompressed delta-row stream.
-            # The actual stored size is known only after export_motion.
-            result['rate_bytes_hard'] = self._hard_motion_bytes() + metadata
-            result['rate_bytes_hard_uncompressed'] = result['rate_bytes_hard']
-            result['rate_normalization_gs_count'] = self.base_xyz.new_tensor(
-                self.rate_normalization_count)
-            result['rate_byte_price'] = self.base_xyz.new_tensor(
-                self.config.rate_loss_weight * ramp / raw_bytes)
-            result['int16_overflow_blocks'] = sum(
-                (parameter.detach() / scale).abs().gt(32767.5).any(-1).sum()
-                for parameter, scale in ((self.region_translation[1:], region_scale_t),
-                                         (self.region_rotation[1:], region_scale_r),
-                                         (self.gs_translation, gs_scale_t),
-                                         (self.gs_rotation, gs_scale_r)))
-            region_t, region_r, gs_t, gs_r = self._values(hard=True)
-            region_t = region_t[1:].ne(0).any(-1)
-            region_r = region_r[1:].ne(0).any(-1)
-            gs_t = gs_t.ne(0).any(-1)
-            gs_r = gs_r.ne(0).any(-1)
-            result.update(region_translation_active_blocks=region_t.sum(),
-                          region_rotation_active_blocks=region_r.sum(),
-                          region_active_nodes=(region_t | region_r).sum(),
-                          gs_translation_active_blocks=gs_t.sum(),
-                          gs_rotation_active_blocks=gs_r.sum(),
-                          gs_active_rows=(gs_t | gs_r).sum())
-        return result
+    def _make_optimizer(self):
+        self.optimizer = torch.optim.Adam([
+            dict(params=[self.region_translation], lr=self.config.region_translation_lr),
+            dict(params=[self.region_rotation], lr=self.config.region_rotation_lr),
+            dict(params=[self.gs_translation], lr=self.config.gs_translation_lr),
+            dict(params=[self.gs_rotation], lr=self.config.gs_rotation_lr)],
+            betas=tuple(self.config.adam_betas), eps=self.config.adam_eps)
+
 
     @torch.no_grad()
-    def _global_regions(self):
-        rt = _quantized(self.region_translation, self.steps[:3])
-        rr = _quantized(self.region_rotation, self.steps[3:])
-        rt = torch.cat((torch.zeros_like(rt[:1]), rt[1:]))
-        rr = torch.cat((torch.zeros_like(rr[:1]), rr[1:]))
-        return region_transforms(self.base_xyz, self.parents, self.pivots, rt, rr)
+    def mark_observed(self, visible):
+        if self.observations is not None:
+            visible = torch.as_tensor(visible, device=self.observations.device, dtype=torch.bool)
+            if visible.shape != self.observations.shape:
+                raise ValueError('Motion visibility must match old GS rows')
+            self.observations.add_(visible.long())
 
-    def _relative_motion(self):
-        if self.config.online_flat_clustering and self.config.post_partition_steps > 0:
-            # Encourage the per-GS correction to shrink after sharing is fitted;
-            # do not charge the desired regional shared transform toward zero.
-            if self.last_step <= self.config.motion_steps:
-                return self.gs_translation.sum() * 0
-            return relative_motion_magnitude(self.gs_translation, self.gs_rotation,
-                                             self.extent).mean()
-        if len(self.parents) == 1:
-            return self.gs_translation.sum() * 0
-        return relative_motion_magnitude(
-            self.region_translation[1:], self.region_rotation[1:],
-            self.extent).mean()
-
-    def _tree_child_relative_motion(self):
-        """Shrink child corrections without shrinking root-level shared motion."""
-        children = self.parents > 0
-        if self.last_step <= self.config.motion_steps or not bool(children.any()):
-            return self.gs_translation.sum() * 0
-        return relative_motion_magnitude(self.region_translation[children],
-            self.region_rotation[children], self.extent).mean()
-
-    @torch.no_grad()
-    def _residual_for_target(self, target_xyz, target_rotation, candidate_owner,
-                             q_global=None, b_global=None):
-        if q_global is None:
-            q_global, b_global = self._global_regions()
-        q = q_global[candidate_owner]
-        predicted_xyz = quaternion_rotate(q, self.base_xyz) + b_global[candidate_owner]
-        predicted_rotation = F.normalize(quaternion_multiply(q, self.base_rotation), dim=-1)
-        t = target_xyz - predicted_xyz
-        r = quaternion_rotvec(quaternion_multiply(F.normalize(target_rotation, dim=-1),
-                                                   quaternion_inverse(predicted_rotation)))
-        ts = _integer(t, self.gs_steps[:3])
-        rs = _integer(r, self.gs_steps[3:])
-        return ts, rs
-
-    @torch.no_grad()
-    def update_topology(self, step):
-        """Greedy sparse owner edits using full rigid-pose fit and edit bytes.
-
-        Tree reparenting is considered after owner edits. Every proposal is
-        checked against the current decoded target and a cycle-free hierarchy.
-        """
-        if self.config.online_flat_clustering:
-            if self.config.persistent_regions.enabled:
-                return self._update_persistent_regions(step) if self.stage(step) == 'flat_partition' else []
-            return self._update_online_flat_partition(step) if self.stage(step) == 'flat_partition' else []
-        if self.config.residual_hierarchy:
-            if self.stage(step) == 'tree_edit':
-                return self._build_residual_regions(step)
-            if self.stage(step) == 'tree_finalize':
-                return self._finalize_heir_tree(step)
-            if self.stage(step) == 'tree_validate':
-                return self._validate_se3_parents(step)
-            return []
-        if self.stage(step) != 'tree_edit':
-            return []
-        if self.config.adaptive_clustering:
-            return self._update_motion_clusters(step)
-        self._topology_updated = True
-        before_bytes = float(self._hard_motion_bytes()) + self._metadata_bytes()
-        target_xyz, target_q = (value.detach() for value in self.forward(step))
-        q_global, b_global = self._global_regions()
-        _, _, current_t, current_r = self._values(hard=True)
-        current_t_active = current_t.ne(0).any(-1)
-        current_r_active = current_r.ne(0).any(-1)
-        current_cost = (6 * (current_t_active.to(self.base_xyz) +
-                             current_r_active.to(self.base_xyz)) +
-                        (self._gs_id_lengths + 1) *
-                        (current_t_active | current_r_active).to(self.base_xyz))
-        count = len(self.base_xyz)
-        edits = []
-        nearest = min(self.config.tree_edit_neighbors, len(self.parents) - 1)
-        for start in range(0, count, 4096):
-            end = min(count, start + 4096)
-            distance = torch.cdist(self.base_xyz[start:end], self.pivots[1:])
-            near = distance.topk(nearest, largest=False).indices + 1
-            # Do not materialize a full N x R pose tensor.
-            best_owner = self.owner[start:end].clone()
-            best_t, best_r = current_t[start:end].clone(), current_r[start:end].clone()
-            best_cost = current_cost[start:end].clone()
-            for col in range(nearest + 1):
-                owner = (torch.zeros_like(best_owner) if col == 0 else near[:, col - 1])
-                region_q = q_global[owner]
-                predicted_xyz = quaternion_rotate(region_q, self.base_xyz[start:end]) + b_global[owner]
-                predicted_q = F.normalize(quaternion_multiply(
-                    region_q, self.base_rotation[start:end]), dim=-1)
-                t = _integer(target_xyz[start:end] - predicted_xyz, self.gs_steps[:3])
-                r = _integer(quaternion_rotvec(quaternion_multiply(
-                    F.normalize(target_q[start:end], dim=-1), quaternion_inverse(predicted_q))), self.gs_steps[3:])
-                overflow = (((target_xyz[start:end] - predicted_xyz) / self.gs_steps[:3]).abs() > 32767.5).any(-1)
-                overflow |= (quaternion_rotvec(quaternion_multiply(
-                    F.normalize(target_q[start:end], dim=-1), quaternion_inverse(predicted_q))) /
-                             self.gs_steps[3:]).abs().gt(32767.5).any(-1)
-                recovered_xyz = predicted_xyz + t.to(predicted_xyz) * self.gs_steps[:3]
-                recovered_q = quaternion_multiply(
-                    rotation_vector_quaternion(r.to(predicted_xyz) * self.gs_steps[3:]),
-                    quaternion_multiply(region_q, self.base_rotation[start:end]))
-                pose_ok = ((recovered_xyz - target_xyz[start:end]).norm(dim=-1) <=
-                           math.sqrt(3) * float(self.gs_steps[0]) / 2 + 1e-6)
-                angle_error = quaternion_angle_error(recovered_q, target_q[start:end])
-                pose_ok &= angle_error <= math.sqrt(3) * float(self.gs_steps[3]) / 2
-                active_t, active_r = t.ne(0).any(-1), r.ne(0).any(-1)
-                row_id_bytes = self._gs_id_lengths[start:end]
-                cost = (6 * (active_t.to(self.base_xyz) +
-                             active_r.to(self.base_xyz)) +
-                        (row_id_bytes + 1) * (active_t | active_r).to(self.base_xyz))
-                # The edit stores an absolute GS row ID and new region ID.
-                owner_id_bytes = torch.ones_like(row_id_bytes)
-                for threshold in (128, 16384, 2097152):
-                    owner_id_bytes += (owner >= threshold).to(owner_id_bytes)
-                cost += (owner != self.owner[start:end]).to(self.base_xyz) * (
-                    row_id_bytes + owner_id_bytes)
-                better = (cost < best_cost) & ~overflow & pose_ok
-                best_cost = torch.where(better, cost, best_cost)
-                best_owner = torch.where(better, owner, best_owner)
-                best_t = torch.where(better[:, None], t, best_t)
-                best_r = torch.where(better[:, None], r, best_r)
-            changed = best_owner != self.owner[start:end]
-            rows = torch.arange(start, end, device=self.owner.device)[changed]
-            for row in rows.tolist():
-                edits.append(dict(kind='owner', row=row, owner=int(best_owner[row - start])))
-            self.owner[start:end] = best_owner
-            self.gs_translation[start:end] = best_t.to(self.gs_translation) * self.gs_steps[:3]
-            self.gs_rotation[start:end] = best_r.to(self.gs_rotation) * self.gs_steps[3:]
-        # Quantization after rerouting may differ by at most half a step.
-        changed_rows = [edit['row'] for edit in edits if edit['kind'] == 'owner']
-        self._reset_adam_rows(self.gs_translation, changed_rows)
-        self._reset_adam_rows(self.gs_rotation, changed_rows)
-        edits.extend(self._try_reparent(target_xyz, target_q))
-        self.topology_edits.extend(edits)
-        self._metadata_cache = None
-        after_bytes = float(self._hard_motion_bytes()) + self._metadata_bytes()
-        final_xyz, final_q = self.forward(step)
-        position_error = float((final_xyz - target_xyz).norm(dim=-1).amax())
-        rotation_error = float(quaternion_angle_error(final_q, target_q).amax())
-        self.last_metrics.update({
-            'tree_edit/uncompressed_bytes_before': before_bytes,
-            'tree_edit/uncompressed_bytes_after': after_bytes,
-            'tree_edit/uncompressed_bytes_delta': after_bytes - before_bytes,
-            'tree_edit/owner_edits': sum(edit['kind'] == 'owner' for edit in edits),
-            'tree_edit/parent_edits': sum(edit['kind'] == 'parent' for edit in edits),
-            'tree_edit/pose_max_xyz_error_world': position_error,
-            'tree_edit/pose_max_rotation_error_rad': rotation_error})
-        return edits
-
-    @torch.no_grad()
-    def _try_reparent(self, target_xyz, target_q):
-        """Bounded full-pose proposals; a valid edit must save weighted cost."""
-        active = torch.where(self.owner.bincount(minlength=len(self.parents))[1:] > 0)[0] + 1
-        if not len(active):
-            return []
-        rt, rr, _, _ = self._values()
-        strength = relative_motion_magnitude(rt[active], rr[active], self.extent)
-        selected = active[strength.topk(min(self.config.tree_edit_region_trials,
-                                             len(active))).indices]
-        edits = []
-        raw_bytes = self.rate_normalization_bytes
-        for node_tensor in selected:
-            node = int(node_tensor)
-            original_parent = int(self.parents[node])
-            q_global, b_global = self._global_regions()
-            q_target, b_target = q_global[node].clone(), b_global[node].clone()
-            original_rt = self.region_translation[node].clone()
-            original_rr = self.region_rotation[node].clone()
-            original_gt = self.gs_translation.detach().clone()
-            original_gr = self.gs_rotation.detach().clone()
-            baseline = (self.config.rate_loss_weight * float(self._hard_motion_bytes()) / raw_bytes +
-                        self.config.relative_motion_loss_weight *
-                        float(self._relative_motion()))
-            best = None
-            distances = (self.pivots - self.pivots[node]).norm(dim=-1)
-            near = distances.topk(min(len(self.parents), self.config.tree_edit_neighbors + 2),
-                                  largest=False).indices.tolist()
-            for parent in [0] + near:
-                if parent == node or parent == original_parent:
-                    continue
-                trial = self.parents.clone()
-                trial[node] = parent
-                try:
-                    order = _topological_order(trial)
-                except ValueError:
-                    continue
-                depth = [0] * len(trial)
-                for child in order:
-                    depth[child] = depth[int(trial[child])] + 1
-                if max(depth) > self.config.parent_max_depth:
-                    continue
-                q_parent, b_parent = q_global[parent], b_global[parent]
-                local_q = quaternion_multiply(q_target, quaternion_inverse(q_parent))
-                local_r = quaternion_rotvec(local_q[None])[0]
-                inherited_pivot = quaternion_rotate(q_parent, self.pivots[node])
-                local_t = (b_target - b_parent -
-                           rotation_delta(local_q, -inherited_pivot))
-                if bool((local_t / self.steps[:3]).abs().gt(32767.5).any()) or bool((local_r / self.steps[3:]).abs().gt(32767.5).any()):
-                    continue
-                self.parents[node] = parent
-                self.region_translation[node] = _integer(local_t, self.steps[:3]).to(local_t) * self.steps[:3]
-                self.region_rotation[node] = _integer(local_r, self.steps[3:]).to(local_r) * self.steps[3:]
-                candidate_gt, candidate_gr = self._residual_for_target(
-                    target_xyz, target_q, self.owner)
-                self.gs_translation.copy_(candidate_gt.to(self.gs_translation) * self.gs_steps[:3])
-                self.gs_rotation.copy_(candidate_gr.to(self.gs_rotation) * self.gs_steps[3:])
-                decoded_xyz, decoded_q = self.forward(self.config.motion_steps)
-                xyz_error = (decoded_xyz - target_xyz).norm(dim=-1).amax()
-                angle_error = quaternion_angle_error(decoded_q, target_q)
-                if (xyz_error <= math.sqrt(3) * float(self.gs_steps[0]) / 2 + 1e-6 and
-                        bool((angle_error <= math.sqrt(3) * float(self.gs_steps[3]) / 2).all())):
-                    edit_bytes = _varint_length(node) + _varint_length(parent)
-                    relative = float(self._relative_motion())
-                    score = (self.config.rate_loss_weight *
-                             (float(self._hard_motion_bytes()) + edit_bytes) / raw_bytes +
-                             self.config.relative_motion_loss_weight * relative)
-                    if score < baseline and (best is None or score < best[0]):
-                        best = (score, parent, self.region_translation[node].clone(),
-                                self.region_rotation[node].clone(),
-                                self.gs_translation.detach().clone(),
-                                self.gs_rotation.detach().clone())
-                self.parents[node] = original_parent
-                self.region_translation[node] = original_rt
-                self.region_rotation[node] = original_rr
-                self.gs_translation.copy_(original_gt)
-                self.gs_rotation.copy_(original_gr)
-            if best is not None:
-                _, parent, new_rt, new_rr, new_gt, new_gr = best
-                self.parents[node] = parent
-                self.region_translation[node] = new_rt
-                self.region_rotation[node] = new_rr
-                self.gs_translation.copy_(new_gt)
-                self.gs_rotation.copy_(new_gr)
-                self._reset_adam_rows(self.region_translation, [node])
-                self._reset_adam_rows(self.region_rotation, [node])
-                changed = torch.where((new_gt != original_gt).any(-1) |
-                                      (new_gr != original_gr).any(-1))[0]
-                self._reset_adam_rows(self.gs_translation, changed)
-                self._reset_adam_rows(self.gs_rotation, changed)
-                edits.append(dict(kind='parent', node=node, parent=parent))
-        return edits
 
     @torch.no_grad()
     def register_materialized_layout(self, xyz, rotation, birth_source_rows=None):
         """Carry ownership into the next frame, including each new GS source."""
-        if (self.config.online_flat_clustering and self.config.post_partition_steps and
-                not self.flat_region_diagnostics.get('refinement', {}).get('finalized', False)):
-            raise ValueError('Finalize post-partition motion refinement before committing the frame')
         if xyz.ndim != 2 or xyz.shape[1] != 3 or rotation.shape != (len(xyz), 4):
             raise ValueError('Materialized pose shape mismatch')
         old_count = len(self.owner)
@@ -1258,72 +472,19 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
         if not torch.allclose(expected_xyz, xyz[:old_count], atol=1e-6, rtol=1e-5) or not bool((dot > 1 - 1e-5).all()):
             raise ValueError('Materialized old-GS pose differs from quantized renderer pose')
         self.pending_birth_sources = sources.detach().cpu().clone()
-        self._metadata_cache = None
-        self.materialized_owner = torch.cat((self.owner, self.owner[sources])).detach().clone()
         self.materialized_xyz = xyz.detach().clone()
         self.materialized_rotation = rotation.detach().clone()
         self.committed = True
-        if self.config.online_flat_clustering:
-            newborn_ids = torch.arange(self.online_next_id, self.online_next_id + len(sources))
-            self.materialized_online_ids = torch.cat((self.online_ids.cpu(), newborn_ids))
-            self.online_next_id += len(sources)
         for parameter in self.parameters():
             parameter.requires_grad_(False)
 
-    def export_motion(self, path):
-        from .rigid_tree_codec import (compress_motion_packet, decode_motion,
-                                       encode_motion, motion_packet_info)
-        if not self.committed:
-            raise ValueError('Materialize the frame before exporting motion')
-        rt, rr, gt, gr = self._values(hard=True)
-        raw_packet = encode_motion(
-            self.frame_reference_state, self.frame_index, self.extent,
-            self.previous_rows.detach().cpu(), self.owner.detach().cpu(),
-            self.parents.detach().cpu(), rt.detach().cpu(), rr.detach().cpu(),
-            gt.detach().cpu(), gr.detach().cpu(),
-            self.pending_birth_sources,
-            self.materialized_xyz[len(self.owner):].detach().cpu(),
-            self.materialized_rotation[len(self.owner):].detach().cpu(),
-            self.config.motion_xyz_step_extent, self.config.motion_rotation_step_rad,
-            gs_translation_step_extent=self.config.gs_xyz_step_extent,
-            gs_rotation_step_rad=self.config.gs_rotation_step_rad,
-            **(dict(region_map=self.region_map, pivots=self.pivots)
-               if self.config.adaptive_clustering else {}))
-        packet = compress_motion_packet(raw_packet, mode='auto')
-        packet_info = motion_packet_info(packet)
-        decoded = decode_motion(packet, self.frame_reference_state)
-        if not torch.allclose(decoded.xyz, self.materialized_xyz.detach().cpu(), atol=1e-6, rtol=1e-5):
-            raise ValueError('Motion stream does not reconstruct materialized centers')
-        q_dot = (F.normalize(decoded.rotation, dim=-1) *
-                 F.normalize(self.materialized_rotation.detach().cpu(), dim=-1)).sum(-1).abs()
-        if not bool((q_dot > 1 - 1e-5).all()):
-            raise ValueError('Motion stream does not reconstruct materialized orientations')
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(packet)
-        self.codec_previous_state = decoded
-        if self.config.online_flat_clustering:
-            self._record_online_decoded_motion(decoded)
-        elif self.config.heir.geometry == 'se3':
-            relative = quaternion_multiply(F.normalize(decoded.rotation[:len(self.owner)].to(self.base_rotation), dim=-1),
-                quaternion_inverse(F.normalize(self.base_rotation, dim=-1)))
-            self.motion_history.record(self.frame_index, self.base_xyz,
-                decoded.xyz[:len(self.owner)].to(self.base_xyz), relative, self.observations)
-        return dict(path=str(path), bytes=path.stat().st_size,
-                    payload_bytes=path.stat().st_size, **packet_info,
-                    frame_index=self.frame_index, gs_count=len(decoded.xyz),
-                    region_count=len(self.parents),
-                    region_translation_step_world=float(self.steps[0]),
-                    region_rotation_step_rad=float(self.steps[3]),
-                    gs_translation_step_world=float(self.gs_steps[0]),
-                    gs_rotation_step_rad=float(self.gs_steps[3]))
 
     def capture(self):
         if self.owner is None:
             return None
-        names = ('owner', 'parents', 'pivots', 'base_xyz', 'base_rotation',
-                 'previous_rows', 'materialized_owner', 'materialized_xyz',
-                 'materialized_rotation', 'pending_birth_sources', 'observations', 'region_map', 'cluster_labels')
+        names = ('owner', 'parents', 'base_xyz', 'base_rotation',
+                 'previous_rows', 'materialized_xyz', 'materialized_rotation',
+                 'pending_birth_sources', 'observations')
         tensors = {name: getattr(self, name, None) for name in names}
         return dict(config=asdict(self.config), tensors=tensors,
                     rate_reference_count=self.rate_reference_count,
@@ -1336,30 +497,21 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
                     optimizer=self.optimizer.state_dict(), committed=self.committed,
                     last_step=self.last_step, topology_edits=list(self.topology_edits),
                     last_metrics=deepcopy(self.last_metrics),
-                    topology_updated=self._topology_updated,
-                    bootstrap_finalized=self.bootstrap_finalized,
-                    bootstrap_seconds=self.bootstrap_seconds,
-                    heir_features=self.heir_features,
-                    heir_past=self.heir_past, previous_partition=self.previous_partition,
-                    motion_history=self.motion_history.capture(),
-                    online_history=self.online_history.state_dict(),
-                    online_ids=self.online_ids, materialized_online_ids=self.materialized_online_ids,
-                    online_next_id=self.online_next_id, flat_region_diagnostics=deepcopy(self.flat_region_diagnostics),
-                    persistent_state=self.persistent_state.capture(),
-                    causal_translation_prediction=self._capture_causal_translation_prediction(),
-                    heir_finalized=self.heir_finalized,
-                    heir_state=(None if self.heir_hierarchy is None else self.heir_hierarchy.state_dict()),
-                    heir_optimizer=(None if self.heir_optimizer is None else self.heir_optimizer.state_dict()),
+                    flat_region_diagnostics=deepcopy(self.flat_region_diagnostics),
                     codec_previous_state=(None if self.codec_previous_state is None else
                                           self.codec_previous_state.capture()),
                     frame_reference_state=(None if self.frame_reference_state is None else
                                            self.frame_reference_state.capture()))
 
+
     def restore(self, packet):
         if packet is None:
             return
+        gate = packet['config'].get('spatial_gate', {})
+        if not gate.get('enabled') or gate.get('learn_region_motion', True):
+            raise ValueError('Retired motion checkpoints can be replayed, but cannot resume spatial training')
         if saved_config_with_default_motion_lr(packet['config']) != asdict(self.config):
-            raise ValueError('Rigid tree checkpoint configuration differs')
+            raise ValueError('Spatial motion checkpoint configuration differs')
         from .rigid_tree_codec import DecodedState
         state = packet['codec_previous_state']
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
@@ -1367,8 +519,12 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
         tensors = packet['tensors']
         # Restore the saved variable-sized layout directly. Re-running setup
         # would spatially repartition it and lose appended/merged node rows.
+        state_names = {'owner', 'parents', 'base_xyz', 'base_rotation', 'previous_rows',
+                       'materialized_xyz', 'materialized_rotation', 'pending_birth_sources',
+                       'observations', 'spatial_paths', 'opened', 'node_counts', 'split_eligible'}
         for name, value in tensors.items():
-            setattr(self, name, value)
+            if name in state_names:
+                setattr(self, name, value)
         reference_count = packet.get('rate_reference_count')
         if reference_count is None and self.config.rate_normalization == 'frame':
             reference_count = len(self.base_xyz)
@@ -1386,46 +542,11 @@ class RigidResidualTree(CausalTranslationInitializationMixin, PersistentLocalMot
         self.last_step = packet['last_step']
         self.topology_edits = list(packet['topology_edits'])
         self.last_metrics = deepcopy(packet.get('last_metrics', {}))
-        self._topology_updated = bool(packet.get('topology_updated', False))
-        self._metadata_cache = None
-        self.bootstrap_finalized = bool(packet.get('bootstrap_finalized', not self.config.adaptive_clustering))
-        self.bootstrap_seconds = float(packet.get('bootstrap_seconds', 0.))
-        self.heir_features = packet.get('heir_features')
-        self.heir_past = packet.get('heir_past')
-        self.previous_partition = packet.get('previous_partition')
-        self.motion_history = MotionHistory(self.config.heir.history_frames)
-        self.motion_history.restore(packet.get('motion_history', []))
-        self.online_history = OnlineMotionHistory(self.config.online_clustering.history_frames)
-        self.online_history.load_state_dict(packet.get('online_history', {}))
-        self.online_ids = packet.get('online_ids')
-        self.materialized_online_ids = packet.get('materialized_online_ids')
-        if self.online_ids is not None:
-            self.online_ids = self.online_ids.detach().cpu().long()
-        if self.materialized_online_ids is not None:
-            self.materialized_online_ids = self.materialized_online_ids.detach().cpu().long()
-        self.online_next_id = int(packet.get('online_next_id', 0))
         self.flat_region_diagnostics = deepcopy(packet.get('flat_region_diagnostics', {}))
-        self.persistent_state.restore(packet.get('persistent_state', {}))
-        self._restore_causal_translation_prediction(packet.get('causal_translation_prediction'))
-        self.heir_finalized = bool(packet.get('heir_finalized', False))
-        self.heir_hierarchy = None
-        self.heir_optimizer = None
-        if packet.get('heir_state') is not None:
-            input_dim = self.heir_features.shape[-1] if self.heir_features is not None else 6
-            self.heir_hierarchy = HeirMotionHierarchy(input_dim, self.config.heir).to(self.base_xyz)
-            self.heir_hierarchy.load_state_dict(packet['heir_state'])
-            self.heir_optimizer = self.heir_hierarchy.make_optimizer()
-            self.heir_optimizer.load_state_dict(packet['heir_optimizer'])
-            if self.heir_finalized:
-                for parameter in self.heir_hierarchy.parameters():
-                    parameter.requires_grad_(False)
         if self.observations is None:
             self.observations = torch.zeros(len(self.base_xyz), dtype=torch.long, device=self.base_xyz.device)
-        if self.region_map is None:
-            self.region_map = torch.arange(len(self.parents), device=self.base_xyz.device)
         self._region_id_lengths = _id_lengths(len(self.parents) - 1, self.base_xyz)
         self._gs_id_lengths = _id_lengths(len(self.base_xyz), self.base_xyz)
-        self._protected_regions = set()
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
         self.frame_reference_state = (None if reference is None else
                                       DecodedState.restore(reference))

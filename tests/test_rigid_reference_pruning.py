@@ -127,6 +127,7 @@ class NativeReferencePruningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             worker = SimpleNamespace(output_dir=Path(directory), module=active,
                 datamodule=SimpleNamespace(cameras_extent=1.))
+            active.motion = importlib.import_module('pipeline.ReCon-GS.model.spatial_gated_motion').SpatialGatedMotion(config.rigid_tree)
             trainer.Trainer._write_reference(worker, frame_index=0)
             with np.load(worker.decoder_reference_path, allow_pickle=False) as packet:
                 self.assertEqual(int(packet['initial_original_count']), 4)
@@ -139,8 +140,7 @@ class NativeReferencePruningTests(unittest.TestCase):
             self.assertEqual(len(state.xyz), active.reference_count)
             torch.testing.assert_close(raw['xyz'][:, 0], torch.tensor([1., 3.]),
                                        rtol=0, atol=0)
-            rebuilt = codec.bootstrap_state(raw['xyz'], raw['rotation'],
-                                            config.rigid_tree.region_count)
+            rebuilt = active.motion.codec_previous_state
             torch.testing.assert_close(state.owner, rebuilt.owner, rtol=0, atol=0)
             torch.testing.assert_close(state.parents, rebuilt.parents, rtol=0, atol=0)
 
