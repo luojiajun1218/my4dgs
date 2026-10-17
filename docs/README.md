@@ -4,6 +4,8 @@
 
 最新完整序列为[所有旋转增量关闭＋直接α量化](experiment/20261017_all_rotation_off_full300.md)：**300帧34.054672dB，动态帧完整更新38.194930KB，纯渲染233.014FPS**。全部顺序解码、画质与实际文件大小独立核验通过；一次性参考帧另计。存储/FPS达标，PSNR尚未达到34.2，learnable gate的实际细分收益仍未体现。复现入口是`config/fs_alpha_norot_quant6_rate003_full300_20261017.yaml`，当前最完整的已验证候选，以新实验名从共享首帧开始。
 
+最新短测为[gate与区域颜色联合学习](experiment/20261018_joint_regional_dc_first3.md)：210–212帧33.898441dB/31.460667KB/243.000FPS，相比原提案监督配方小幅提高0.016340dB、增加0.129KB。306项检查与三帧独立回放通过，接下来验证共享首帧起步的早期前缀；尚不是新的完整300帧结果。
+
 最新完成[个体提案图像监督的原生前30帧核验](experiment/20261018_proposal_image_native_first30.md)：34.171395dB/21.346828KB/216.483FPS，相比无辅助监督提高0.022999dB，仍低于同范围基线34.276890dB/38.130724KB。全部29个动态帧独立回放通过，未进入完整300帧。随后[区域候选拟合短测](experiment/20261018_proposal_region_fit_first3.md)和[首动态帧校准诊断](experiment/20261018_bootstrap1_early_first3.md)均未显示足够收益；[固定gate后允许所有GS例外](experiment/20261018_fixed_gate_all_residuals_first3.md)三帧33.896425dB/77.638KB，存储显著回归，原型撤回。下一步检查区域颜色与gate的联合学习时序。
 
 此前[未选中提案的图像监督短测](experiment/20261018_proposal_image_first3.md)：210–212帧33.882102dB/31.331667KB/243.097FPS，优于匹配完整基线33.826224dB/39.609333KB；相对原区域颜色配方提高0.018742dB、增加3.548333KB。297项检查与三帧独立回放通过，其原生前缀结果见上。
