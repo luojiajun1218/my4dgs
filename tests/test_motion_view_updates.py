@@ -6,8 +6,8 @@ from unittest.mock import Mock
 
 import torch
 
-TRAINER = importlib.import_module('pipeline.ReCon-GS.trainer')
-MODULE = importlib.import_module('pipeline.ReCon-GS.module')
+TRAINER = importlib.import_module('pipeline.trainer')
+MODULE = importlib.import_module('pipeline.module')
 
 
 class MotionViewUpdates(unittest.TestCase):
@@ -27,8 +27,10 @@ class MotionViewUpdates(unittest.TestCase):
         received = []
         targets = [-3., 1., 2., 4.]
         fetcher = SimpleNamespace(next=iter(targets).__next__)
-        def train(target, step):
-            loss = (parameter - target).square() + .3 * parameter.square()
+        regularizer_calls = []
+        def train(target, step, regularization_weight=1.):
+            regularizer_calls.append(regularization_weight)
+            loss = (parameter - target).square() + regularization_weight * .3 * parameter.square()
             return loss, dict(image_loss=float(loss.detach()), psnr=1., gs=2), {
                 'render': torch.zeros(5), 'visibility_filter': torch.tensor([True, False]),
                 'motion_contribution_filter': torch.tensor([False, True]),
@@ -47,6 +49,20 @@ class MotionViewUpdates(unittest.TestCase):
         self.assertEqual(len(received[0][1]), 4)
         self.assertNotIn('render', received[0][1][0])
         self.assertEqual(metrics['gs'], 2)
+        self.assertEqual(regularizer_calls, [0., 0., 0., 4])
+
+    def test_device_metrics_are_returned_as_python_values_after_all_views(self):
+        trainer = self.trainer(views=2)
+        targets = iter([1., 3.])
+        trainer.module.training_step = lambda target, step, **kwargs: (
+            torch.tensor(target), dict(image_loss=torch.tensor(target),
+                psnr=torch.tensor(target * 10), gs=7), {})
+        trainer.module.post_training_step = Mock()
+        loss, metrics = TRAINER.Trainer._fit_views(trainer,
+            SimpleNamespace(next=targets.__next__), 1)
+        self.assertEqual(loss, 2.)
+        self.assertEqual(metrics, dict(image_loss=2., psnr=20., gs=7))
+        self.assertIsInstance(metrics['image_loss'], float)
 
     def test_schedule_and_resume_replay_exact_view_consumption(self):
         trainer = self.trainer()

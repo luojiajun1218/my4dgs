@@ -10,23 +10,14 @@ import unittest
 from unittest import mock
 import zlib
 from pathlib import Path
-from types import ModuleType
 
 import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-if 'pipeline.ReCon-GS' not in sys.modules:
-    pipeline = ModuleType('pipeline')
-    pipeline.__path__ = [str(ROOT / 'pipeline')]
-    recon = ModuleType('pipeline.ReCon-GS')
-    recon.__path__ = [str(ROOT / 'pipeline' / 'ReCon-GS')]
-    sys.modules['pipeline'] = pipeline
-    sys.modules['pipeline.ReCon-GS'] = recon
-
-CODEC = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
-RIGID = importlib.import_module('pipeline.ReCon-GS.model.rigid_residual_tree')
+CODEC = importlib.import_module('pipeline.model.rigid_tree_codec')
+RIGID = importlib.import_module('pipeline.model.rigid_residual_tree')
 
 
 def packet_fixture(count=256):

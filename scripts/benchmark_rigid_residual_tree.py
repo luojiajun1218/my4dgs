@@ -121,9 +121,9 @@ def _load_config(run: Path):
     from libgs.pipeline.loader import load_pipeline
     from libgs.utils.config import to_structured
 
-    Config, _ = load_pipeline('ReCon-GS')
+    Config, _ = load_pipeline('my4dgs')
     from importlib import import_module
-    normalize = import_module('pipeline.ReCon-GS.model.rigid_residual_tree').saved_config_with_default_motion_lr
+    normalize = import_module('pipeline.model.rigid_residual_tree').saved_config_with_default_motion_lr
     saved = OmegaConf.to_container(OmegaConf.load(run / 'config.yaml'), resolve=True)
     saved['module']['rigid_tree'] = normalize(saved['module']['rigid_tree'])
     saved['module'].pop('old_opacity', None)
@@ -150,9 +150,9 @@ def _make_module(config, device):
     import torch
     from libgs.renderer import Renderer
 
-    data = importlib.import_module('pipeline.ReCon-GS.data')
-    module_source = importlib.import_module('pipeline.ReCon-GS.module')
-    gaussian_source = importlib.import_module('pipeline.ReCon-GS.model.gaussian')
+    data = importlib.import_module('pipeline.data')
+    module_source = importlib.import_module('pipeline.module')
+    gaussian_source = importlib.import_module('pipeline.model.gaussian')
     import libgs.data.dataset.base as dataset_base
 
     # The direct single-view load below has no DataLoader worker.
@@ -180,7 +180,7 @@ def _install_raw(module, raw, device):
     import torch
 
     model = module.gaussians
-    source = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
+    source = importlib.import_module('pipeline.model.birth_quantization')
     for name, attribute in zip(source.RAW_FIELDS, source.RAW_ATTRIBUTES):
         value = raw[name].detach().to(device=device, dtype=torch.float32)
         setattr(model, attribute, torch.nn.Parameter(value, requires_grad=False))
@@ -206,7 +206,7 @@ def _capture_raw(checkpoint: Path, frame: int, total_steps: int):
 
 def _load_reference(path: Path, region_count: int | None):
     import torch
-    codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
+    codec = importlib.import_module('pipeline.model.rigid_tree_codec')
 
     with np.load(path, allow_pickle=False) as packet:
         raw = {name: torch.from_numpy(packet[name].copy()) for name in RAW_FIELDS}
@@ -220,43 +220,8 @@ def _load_reference(path: Path, region_count: int | None):
 
 
 def _decode_frame(stream: Path, frame: int, state, raw):
-    import torch
-    codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
-    birth_codec = importlib.import_module(
-        'pipeline.ReCon-GS.model.rigid_tree_birth_codec')
-
-    decoded = codec.decode_motion((stream / f'motion_{frame:03d}.bin').read_bytes(), state)
-    old_count = len(state.xyz)
-    if len(decoded.xyz) < old_count:
-        raise ValueError('Active stream unexpectedly deleted old GS')
-    current = {name: value.clone() for name, value in raw.items()}
-    current['xyz'] = decoded.xyz[:old_count]
-    current['rotation'] = decoded.rotation[:old_count]
-    birth_count = len(decoded.xyz) - old_count
-    birth_file = stream / f'birth_{frame:03d}.bin'
-    if birth_count:
-        newborn = birth_codec.decode_birth_attributes(
-            birth_file.read_bytes(), current,
-            decoded.xyz[old_count:], decoded.rotation[old_count:],
-            decoded.birth_sources)
-        sources = decoded.birth_sources
-        if sources is None or len(sources) != birth_count:
-            raise ValueError('Newborn source lineage is missing')
-        expected_owner = decoded.owner[:old_count][sources]
-        if decoded.spatial_centers is not None:
-            spatial = importlib.import_module('pipeline.ReCon-GS.model.spatial_gate')
-            expected_paths = spatial.spatial_route(decoded.xyz[old_count:],
-                decoded.spatial_centers, decoded.spatial_paths.shape[1])
-            expected_owner = spatial.spatial_owner(expected_paths, decoded.spatial_open)
-        if not torch.equal(decoded.owner[old_count:], expected_owner):
-            raise ValueError('Newborn source lineage differs from decoded owners')
-        for name in RAW_FIELDS:
-            current[name] = torch.cat((current[name], newborn[name]))
-    elif birth_file.exists():
-        raise ValueError('Unexpected birth packet for empty birth frame')
-    from scripts.replay_rigid_tree import apply_stream_opacity_update
-    current = apply_stream_opacity_update(stream, frame, current, old_count)
-    return decoded, current
+    from scripts.replay_rigid_tree import decode_frame
+    return decode_frame(stream, frame, state, raw)
 
 
 def _render_checked(module, view):
@@ -486,7 +451,7 @@ def _sequence_groups(rows, segment_size):
 
 def _validate_stream_manifest(stream, frame, decoded, raw, reference):
     reference_digest = importlib.import_module(
-        'pipeline.ReCon-GS.model.birth_quantization').reference_digest
+        'pipeline.model.birth_quantization').reference_digest
     manifest_path = stream / f'frame_{frame:03d}.json'
     manifest = json.loads(manifest_path.read_text())
     if (manifest.get('frame') != frame or

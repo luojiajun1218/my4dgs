@@ -11,14 +11,14 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
-birth_codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_birth_codec')
-opacity_codec = importlib.import_module('pipeline.ReCon-GS.model.legacy_opacity_codec')
+codec = importlib.import_module('pipeline.model.rigid_tree_codec')
+birth_codec = importlib.import_module('pipeline.model.rigid_tree_birth_codec')
+opacity_codec = importlib.import_module('pipeline.model.legacy_opacity_codec')
 fields = ('xyz', 'rotation', 'logscale', 'opacity', 'sh_dc', 'sh_rest')
 
 
 def apply_stream_opacity_update(directory, frame, current, old_count, manifest=None):
-    """Apply optional old-row logits AFTER births used preceding appearance."""
+    """Apply optional old-row logits at the timing specified by the manifest."""
     if manifest is None:
         import json
         path = directory / f'frame_{frame:03d}.json'
@@ -37,6 +37,56 @@ def apply_stream_opacity_update(directory, frame, current, old_count, manifest=N
     return current
 
 
+def decode_frame(directory: Path, frame: int, state, raw):
+    """Materialize survivors first, then decode births using surviving sources."""
+    motion_file = directory / f'motion_{frame:03d}.bin'
+    decoded = codec.decode_motion(motion_file.read_bytes(), state)
+    rows = decoded.survivor_rows
+    if rows is None:
+        raise ValueError('Motion decoder lost previous-row survivor mapping')
+    old_count = len(rows)
+    birth_count = len(decoded.xyz) - old_count
+    if any(len(value) != len(state.xyz) for value in raw.values()):
+        raise ValueError('Previous raw attributes differ from decoded GS count')
+    current = {name: value[rows].clone() for name, value in raw.items()}
+    current['xyz'] = decoded.xyz[:old_count]
+    current['rotation'] = decoded.rotation[:old_count]
+    import json
+    manifest_path = directory / f'frame_{frame:03d}.json'
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    timing = manifest.get('opacity_update_timing', 'after_births')
+    if timing not in ('before_births', 'after_births'):
+        raise ValueError('Unknown opacity update timing')
+    if timing == 'before_births':
+        current = apply_stream_opacity_update(directory, frame, current, old_count, manifest)
+    birth_file = directory / f'birth_{frame:03d}.bin'
+    if birth_count:
+        newborn = birth_codec.decode_birth_attributes(
+            birth_file.read_bytes(), current, decoded.xyz[old_count:],
+            decoded.rotation[old_count:], decoded.birth_sources)
+        sources = decoded.birth_sources
+        if sources is None or len(sources) != birth_count:
+            raise ValueError('Motion stream lost birth attachment rows')
+        expected_owner = decoded.owner[:old_count][sources]
+        if decoded.spatial_centers is not None:
+            from importlib import import_module
+            spatial = import_module('pipeline.model.spatial_gate')
+            expected_paths = spatial.spatial_state_route(decoded.xyz[old_count:], decoded)
+            expected_owner = spatial.spatial_owner(expected_paths, decoded.spatial_open)
+        if not torch.equal(decoded.owner[old_count:], expected_owner):
+            raise ValueError('Birth owner differs from encoded source owner')
+        for name in fields:
+            current[name] = torch.cat((current[name], newborn[name]))
+        if (not torch.allclose(current['xyz'], decoded.xyz, rtol=1e-5, atol=1e-6) or
+                not torch.allclose(current['rotation'], decoded.rotation, rtol=1e-5, atol=1e-6)):
+            raise ValueError('Birth attributes disagree with decoded motion')
+    elif birth_file.exists():
+        raise ValueError('Unexpected birth stream for empty birth frame')
+    if timing == 'after_births':
+        current = apply_stream_opacity_update(directory, frame, current, old_count, manifest)
+    return decoded, current
+
+
 def replay(directory: Path, reference: Path, through: int):
     with np.load(reference, allow_pickle=False) as packet:
         raw = {key: torch.from_numpy(packet[key].copy()) for key in fields}
@@ -44,42 +94,7 @@ def replay(directory: Path, reference: Path, through: int):
     if through < state.frame_index:
         raise ValueError('Requested frame precedes the decoder reference')
     for frame in range(state.frame_index + 1, through + 1):
-        motion_file = directory / f'motion_{frame:03d}.bin'
-        decoded = codec.decode_motion(motion_file.read_bytes(), state)
-        old_count = len(state.xyz)
-        if len(decoded.xyz) < old_count:
-            raise ValueError('This active stream does not delete old GS')
-        birth_count = len(decoded.xyz) - old_count
-        current = {name: value.clone() for name, value in raw.items()}
-        current['xyz'] = decoded.xyz[:old_count]
-        current['rotation'] = decoded.rotation[:old_count]
-        birth_file = directory / f'birth_{frame:03d}.bin'
-        if birth_count:
-            newborn = birth_codec.decode_birth_attributes(
-                birth_file.read_bytes(), current, decoded.xyz[old_count:],
-                decoded.rotation[old_count:], decoded.birth_sources)
-            sources = decoded.birth_sources
-            if sources is None or len(sources) != birth_count:
-                raise ValueError('Motion stream lost birth attachment rows')
-            expected_owner = decoded.owner[:old_count][sources]
-            if decoded.spatial_centers is not None:
-                from importlib import import_module
-                spatial = import_module('pipeline.ReCon-GS.model.spatial_gate')
-                expected_paths = spatial.spatial_route(decoded.xyz[old_count:],
-                    decoded.spatial_centers, decoded.spatial_paths.shape[1])
-                expected_owner = spatial.spatial_owner(expected_paths, decoded.spatial_open)
-            if not torch.equal(decoded.owner[old_count:], expected_owner):
-                raise ValueError('Birth owner differs from encoded source owner')
-            for name in fields:
-                current[name] = torch.cat((current[name], newborn[name]))
-            if (not torch.allclose(current['xyz'], decoded.xyz, rtol=1e-5,
-                                   atol=1e-6) or
-                    not torch.allclose(current['rotation'], decoded.rotation,
-                                       rtol=1e-5, atol=1e-6)):
-                raise ValueError('Birth attributes disagree with decoded motion')
-        elif birth_file.exists():
-            raise ValueError('Unexpected birth stream for empty birth frame')
-        current = apply_stream_opacity_update(directory, frame, current, old_count)
+        decoded, current = decode_frame(directory, frame, state, raw)
         manifest_path = directory / f'frame_{frame:03d}.json'
         if manifest_path.exists():
             import json

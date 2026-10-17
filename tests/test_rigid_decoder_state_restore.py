@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 DecodedState = importlib.import_module(
-    'pipeline.ReCon-GS.model.rigid_tree_codec').DecodedState
+    'pipeline.model.rigid_tree_codec').DecodedState
 
 
 def _state(frame):
@@ -21,7 +21,8 @@ def _state(frame):
         owner=torch.tensor([1], dtype=torch.int64),
         parents=torch.tensor([-1, 0], dtype=torch.int64),
         frame_index=frame,
-        birth_sources=torch.tensor([0], dtype=torch.int32) if frame else None)
+        birth_sources=torch.tensor([0], dtype=torch.int32) if frame else None,
+        survivor_rows=torch.tensor([2], dtype=torch.int64) if frame else None)
 
 
 class DecodedStateRestoreTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class DecodedStateRestoreTests(unittest.TestCase):
                 original = _state(frame)
                 restored = DecodedState.restore(original.capture())
                 self.assertEqual(restored.frame_index, frame)
-                for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources'):
+                for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources', 'survivor_rows'):
                     before, after = getattr(original, field), getattr(restored, field)
                     if before is None:
                         self.assertIsNone(after)
@@ -54,7 +55,7 @@ class DecodedStateRestoreTests(unittest.TestCase):
             restored = DecodedState.restore(packet)
             self.assertEqual(restored.frame_index,
                              49 if name == 'codec_previous_state' else 48)
-            for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources'):
+            for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources', 'survivor_rows'):
                 value = getattr(restored, field)
                 if value is not None:
                     self.assertEqual(value.device.type, 'cpu')

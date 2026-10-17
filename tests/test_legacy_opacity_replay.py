@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import torch
 
-CODEC = importlib.import_module('pipeline.ReCon-GS.model.legacy_opacity_codec')
+CODEC = importlib.import_module('pipeline.model.legacy_opacity_codec')
 # Frozen OPD1/2/3 packets and their exact float32 logits from the prior codec.
 FIXTURES = [('logit', '4f5044310200000004000000030000000ad7233c0900000094861248bea0a68b72d66d0206c86a4ccebab4bc903ef00efc8aba755b3fea852a2cd91e785e63646460faf79f9199010009210206', '0ad7233c0000803f295c9f407b147ec0'), ('alpha', '4f5044320200000004000000030000000ad7233c09000000b5712892bea0a68b72d66d0206c86a4ccebab4bc903ef00efc8aba755b3fea852a2cd91e785e63646460faf79f9199010009210206', '98dc233d0000803fdf296640eb353fc0'), ('saturated_alpha', '4f5044330200000004000000030000000ad7233c09000000aadcc1dbbea0a68b72d66d0206c86a4ccebab4bc903ef00efc8aba755b3fea852a2cd91e785e63646460faf79f9199010009210206', '0ad7233c0000803f0efc8d407b147ec0')]
 

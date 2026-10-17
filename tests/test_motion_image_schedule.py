@@ -7,7 +7,7 @@ import unittest
 import torch
 from torch.nn.functional import l1_loss
 
-MODULE = importlib.import_module('pipeline.ReCon-GS.module')
+MODULE = importlib.import_module('pipeline.module')
 
 
 class MotionImageScheduleTests(unittest.TestCase):

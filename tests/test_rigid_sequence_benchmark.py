@@ -188,7 +188,7 @@ class SequenceAggregationTests(unittest.TestCase):
 
     def test_manifest_checks_decoded_and_full_raw_digests(self):
         from importlib import import_module
-        digest = import_module('pipeline.ReCon-GS.model.birth_quantization').reference_digest
+        digest = import_module('pipeline.model.birth_quantization').reference_digest
         raw = dict(xyz=torch.zeros(1, 3), rotation=torch.tensor([[1., 0., 0., 0.]]),
                    logscale=torch.zeros(1, 3), opacity=torch.zeros(1, 1),
                    sh_dc=torch.zeros(1, 1, 3), sh_rest=torch.zeros(1, 0, 3))

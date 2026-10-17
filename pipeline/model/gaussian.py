@@ -57,6 +57,13 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_opacity(self):
+        alpha = getattr(self, 'rigid_alpha', None)
+        if alpha is not None:
+            return alpha
+        override = getattr(self, 'rigid_opacity', None)
+        if override is not None:
+            return self._render_cached('opacity_override', (override,),
+                                      lambda: self.opacity_activation(override))
         return self._render_cached('opacity', (self._opacity,),
                                    lambda: self.opacity_activation(self._opacity))
 

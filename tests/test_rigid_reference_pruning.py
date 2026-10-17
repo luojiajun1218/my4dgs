@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -14,19 +14,10 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-if 'pipeline.ReCon-GS' not in sys.modules:
-    pipeline_package = ModuleType('pipeline')
-    pipeline_package.__path__ = [str(ROOT / 'pipeline')]
-    recon_package = ModuleType('pipeline.ReCon-GS')
-    recon_package.__path__ = [str(ROOT / 'pipeline' / 'ReCon-GS')]
-    pipeline_package.__dict__['ReCon-GS'] = recon_package
-    sys.modules['pipeline'] = pipeline_package
-    sys.modules['pipeline.ReCon-GS'] = recon_package
-
-module = importlib.import_module('pipeline.ReCon-GS.module')
-trainer = importlib.import_module('pipeline.ReCon-GS.trainer')
-gaussian = importlib.import_module('pipeline.ReCon-GS.model.gaussian')
-codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
+module = importlib.import_module('pipeline.module')
+trainer = importlib.import_module('pipeline.trainer')
+gaussian = importlib.import_module('pipeline.model.gaussian')
+codec = importlib.import_module('pipeline.model.rigid_tree_codec')
 replay = importlib.import_module('scripts.replay_rigid_tree')
 
 
@@ -127,7 +118,7 @@ class NativeReferencePruningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             worker = SimpleNamespace(output_dir=Path(directory), module=active,
                 datamodule=SimpleNamespace(cameras_extent=1.))
-            active.motion = importlib.import_module('pipeline.ReCon-GS.model.spatial_gated_motion').SpatialGatedMotion(config.rigid_tree)
+            active.motion = importlib.import_module('pipeline.model.spatial_gated_motion').SpatialGatedMotion(config.rigid_tree)
             trainer.Trainer._write_reference(worker, frame_index=0)
             with np.load(worker.decoder_reference_path, allow_pickle=False) as packet:
                 self.assertEqual(int(packet['initial_original_count']), 4)
@@ -213,7 +204,7 @@ class ActiveRenderCacheTests(unittest.TestCase):
 
 class TerminalBirthTests(unittest.TestCase):
     def test_final_optimizer_update_precedes_prune_without_new_split(self):
-        quantization = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
+        quantization = importlib.import_module('pipeline.model.birth_quantization')
         events = []
         births = gaussian.BirthGaussianModel(0)
         fields = dict(_xyz=torch.zeros(2, 3),

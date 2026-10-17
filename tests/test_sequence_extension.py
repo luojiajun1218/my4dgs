@@ -24,15 +24,15 @@ import torch
 class SequenceExtensionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.extension = importlib.import_module('pipeline.ReCon-GS.sequence_extension')
-        cls.rigid = importlib.import_module('pipeline.ReCon-GS.model.rigid_residual_tree')
-        cls.spatial = importlib.import_module('pipeline.ReCon-GS.model.spatial_gated_motion')
-        cls.codec = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
-        cls.birth = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
+        cls.extension = importlib.import_module('pipeline.sequence_extension')
+        cls.rigid = importlib.import_module('pipeline.model.rigid_residual_tree')
+        cls.spatial = importlib.import_module('pipeline.model.spatial_gated_motion')
+        cls.codec = importlib.import_module('pipeline.model.rigid_tree_codec')
+        cls.birth = importlib.import_module('pipeline.model.birth_quantization')
         cls.replay = importlib.import_module('scripts.replay_rigid_tree')
-        cls.data_module = importlib.import_module('pipeline.ReCon-GS.data')
-        cls.trainer_module = importlib.import_module('pipeline.ReCon-GS.trainer')
-        cls.module = importlib.import_module('pipeline.ReCon-GS.module')
+        cls.data_module = importlib.import_module('pipeline.data')
+        cls.trainer_module = importlib.import_module('pipeline.trainer')
+        cls.module = importlib.import_module('pipeline.module')
         cls.work = tempfile.TemporaryDirectory()
         cls.base = Path(cls.work.name)
         cls.dataset = cls.base / 'dataset'

@@ -19,7 +19,7 @@ import functools
 @functools.lru_cache(maxsize=1)
 def _backend():
     from torch.utils.cpp_extension import load
-    root = Path(__file__).resolve().parents[3] / 'extensions' / 'observed_rasterizer'
+    root = (Path(__file__).resolve().parents[2] / 'extensions' / 'observed_rasterizer').resolve()
     return load(name='my4dgs_observed_rasterizer',
         sources=[str(root / p) for p in ('cuda_rasterizer/rasterizer_impl.cu',
             'cuda_rasterizer/forward.cu', 'cuda_rasterizer/backward.cu',

@@ -8,14 +8,14 @@ from unittest.mock import Mock
 import torch
 
 import test_spatial_gated_motion as spatial_tests
-OBSERVED = importlib.import_module('pipeline.ReCon-GS.model.contribution_rasterizer')
+OBSERVED = importlib.import_module('pipeline.model.contribution_rasterizer')
 
 
 class MotionEvidenceHookTests(unittest.TestCase):
 
 
     def test_actual_motion_counter_uses_compositing_not_frustum(self):
-        source = importlib.import_module('pipeline.ReCon-GS.module')
+        source = importlib.import_module('pipeline.module')
         motion = spatial_tests.SpatialGatedMotionTests().model()
         motion.observations.zero_()
         config = source.ModuleConfig(effective_motion_observations=True)
@@ -37,7 +37,7 @@ class MotionEvidenceHookTests(unittest.TestCase):
         self.assertTrue(torch.equal(before, motion.observations))
 
     def test_old_configuration_still_uses_frustum(self):
-        source = importlib.import_module('pipeline.ReCon-GS.module')
+        source = importlib.import_module('pipeline.module')
         config = source.ModuleConfig()
         mark = Mock()
         module = SimpleNamespace(trainer=SimpleNamespace(global_step=1), motion_committed=False,

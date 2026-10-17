@@ -19,6 +19,7 @@ from libgs.pipeline import TrainerConfig as BaseTrainerConfig
 
 from .data import PairedFetcher
 from .model.birth_quantization import RAW_FIELDS, model_raw
+from .module import restore_retired_reference
 from libgs.metric import psnr
 
 
@@ -115,8 +116,18 @@ class Trainer(BaseTrainer):
         if state is None:
             state = self.module.motion.initialize_reference(raw['xyz'], raw['rotation'],
                 self.datamodule.cameras_extent, frame_index)
+        elif (not self.module.frame_finalized and
+              getattr(self.module, 'retired_reference', None) is not None):
+            raw = restore_retired_reference(raw, state,
+                self.module.motion.previous_rows, self.module.retired_reference)
         if len(raw['xyz']) != len(state.xyz):
             raise ValueError('Checkpoint GS count differs from decoder bootstrap')
+        opacity_update = getattr(self.module, 'opacity_update', None)
+        if (not getattr(self.module, 'frame_finalized', False) and opacity_update is not None and
+                opacity_update.reference is not None):
+            if len(opacity_update.reference) != len(state.xyz):
+                raise ValueError('Opacity checkpoint lost preceding reference logits')
+            raw['opacity'] = opacity_update.reference.detach().cpu()
         raw['xyz'], raw['rotation'] = state.xyz, state.rotation
         owner, parents = state.owner, state.parents
         fields = {name: raw[name].detach().cpu().numpy() for name in RAW_FIELDS}
@@ -131,6 +142,10 @@ class Trainer(BaseTrainer):
                           spatial_open=state.spatial_open.cpu().numpy())
             if state.spatial_centers is not None:
                 fields['spatial_centers'] = state.spatial_centers.cpu().numpy()
+            from .model.spatial_gate import SPATIAL_ROUTING_FIELDS
+            fields.update({name: getattr(state, name).cpu().numpy()
+                           for name in SPATIAL_ROUTING_FIELDS
+                           if getattr(state, name) is not None})
         initial = self.module.initial_reference
         if initial is None:
             raise ValueError('Decoder bootstrap lost initial reference metadata')
@@ -222,11 +237,15 @@ class Trainer(BaseTrainer):
         """Average image objectives before one shared-motion optimizer update."""
         count = self._views_per_step(step)
         packages, metrics, loss_value = [], {}, 0.
-        for _ in range(count):
-            loss, values, package = self.module.training_step(fetcher.next(), step)
+        for index in range(count):
+            # The regularizer does not depend on the camera. Charging it on
+            # the last view with weight=count preserves the averaged objective
+            # and avoids rebuilding the same graph once per camera.
+            loss, values, package = self.module.training_step(fetcher.next(), step,
+                regularization_weight=count if index == count - 1 else 0.)
             if loss.requires_grad:
                 (loss / count).backward()
-            loss_value += float(loss.detach()) / count
+            loss_value = loss_value + loss.detach() / count
             for name, value in values.items():
                 metrics[name] = metrics.get(name, 0.) + value / count
             if count > 1:
@@ -237,7 +256,12 @@ class Trainer(BaseTrainer):
             packages.append(package)
         metrics['gs'] = values['gs']
         self.module.post_training_step(packages[0] if count == 1 else packages)
-        return loss_value, metrics
+        names = [name for name, value in metrics.items() if torch.is_tensor(value)]
+        # One device-to-host transfer instead of three scalar synchronizations
+        # for every view. JSON reports and callers still receive Python values.
+        scalars = torch.stack([loss_value] + [metrics[name] for name in names]).tolist()
+        metrics.update(zip(names, scalars[1:]))
+        return scalars[0], metrics
 
     def training_loop(self):
         if self.is_first_frame:

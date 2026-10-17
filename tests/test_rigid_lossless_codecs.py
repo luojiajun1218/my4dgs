@@ -10,7 +10,6 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
-from types import ModuleType
 
 import numpy as np
 import torch
@@ -18,17 +17,9 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-if 'pipeline.ReCon-GS' not in sys.modules:
-    pipeline = ModuleType('pipeline')
-    pipeline.__path__ = [str(ROOT / 'pipeline')]
-    recon = ModuleType('pipeline.ReCon-GS')
-    recon.__path__ = [str(ROOT / 'pipeline' / 'ReCon-GS')]
-    sys.modules['pipeline'] = pipeline
-    sys.modules['pipeline.ReCon-GS'] = recon
-
-BIRTH = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_birth_codec')
-MOTION = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
-QUANT = importlib.import_module('pipeline.ReCon-GS.model.birth_quantization')
+BIRTH = importlib.import_module('pipeline.model.rigid_tree_birth_codec')
+MOTION = importlib.import_module('pipeline.model.rigid_tree_codec')
+QUANT = importlib.import_module('pipeline.model.birth_quantization')
 REPLAY = importlib.import_module('scripts.replay_rigid_tree')
 
 

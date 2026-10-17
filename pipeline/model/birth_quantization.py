@@ -47,16 +47,23 @@ class QuantizedNewGaussianView:
                 bool(((self.source < 0) | (self.source >= len(reference['xyz']))).any())):
             raise ValueError('Birth source rows must match the actual clone/split lineage')
         self.predictor = {name: value[self.source].detach() for name, value in reference.items()}
-        self.predictor['rotation'] = F.normalize(self.predictor['rotation'], dim=-1)
+        self.rotation_updates = getattr(config, 'rotation_updates', True)
+        if self.rotation_updates:
+            self.predictor['rotation'] = F.normalize(self.predictor['rotation'], dim=-1)
         self.symbols = {}
         for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
             value = getattr(model, attr)
             if name == 'rotation':
+                if not self.rotation_updates:
+                    self.symbols[name] = torch.zeros_like(value, requires_grad=False)
+                    continue
                 value = F.normalize(value, dim=-1)
                 value = torch.where((value * self.predictor[name]).sum(-1, keepdim=True) < 0, -value, value)
             self.symbols[name] = quantized_symbols(value - self.predictor[name], self.steps[name])
 
     def raw_value(self, name):
+        if name == 'rotation' and not self.rotation_updates:
+            return self.predictor[name]
         return self.predictor[name] + self.symbols[name] * self.steps[name]
 
     def __getattr__(self, name):
@@ -104,7 +111,7 @@ def materialize_quantized_gaussians(base_raw, new_view=None):
         raise ValueError('Retained birth source index is out of bounds')
     for name in RAW_FIELDS:
         birth = new_view.raw_value(name).detach()
-        if name == 'rotation':
+        if name == 'rotation' and getattr(new_view, 'rotation_updates', True):
             birth = F.normalize(birth, dim=-1)
         if birth.shape[1:] != raw[name].shape[1:] or len(birth) != len(sources):
             raise ValueError(f'Retained birth {name} shape disagrees with base')

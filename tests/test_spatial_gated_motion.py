@@ -6,15 +6,16 @@ import itertools
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 import numpy as np
 
 
-RIGID = importlib.import_module('pipeline.ReCon-GS.model.rigid_residual_tree')
-SPATIAL = importlib.import_module('pipeline.ReCon-GS.model.spatial_gated_motion')
-CODEC = importlib.import_module('pipeline.ReCon-GS.model.rigid_tree_codec')
-LAYOUT = importlib.import_module('pipeline.ReCon-GS.model.spatial_gate')
+RIGID = importlib.import_module('pipeline.model.rigid_residual_tree')
+SPATIAL = importlib.import_module('pipeline.model.spatial_gated_motion')
+CODEC = importlib.import_module('pipeline.model.rigid_tree_codec')
+LAYOUT = importlib.import_module('pipeline.model.spatial_gate')
 
 
 class SpatialGatedMotionTests(unittest.TestCase):
@@ -33,6 +34,7 @@ class SpatialGatedMotionTests(unittest.TestCase):
             motion_rotation_step_rad=.001, gs_rotation_step_rad=.001,
             rate_loss_weight=.015, relative_motion_loss_weight=0.)
         cfg.spatial_gate.enabled = True
+        cfg.spatial_gate.max_depth = 3
         cfg.spatial_gate.min_region_size = 8
         model = SPATIAL.SpatialGatedMotion(cfg)
         model.setup(xyz, q, extent, frame_index=1)
@@ -447,6 +449,45 @@ class SpatialGatedMotionTests(unittest.TestCase):
         self.assertEqual(float(model.loss_terms(30,False)['relative_motion_loss']), 0.)
         model._initialize_candidates()
         self.assertGreater(float(model.loss_terms(30,False)['relative_motion_loss']), 0.)
+
+    def test_free_motion_training_skips_zero_weight_regularizer_graph(self):
+        model = self.model()
+        with patch.object(model, 'loss_terms', side_effect=AssertionError('unused objective')):
+            self.assertEqual(float(model.regularization_loss(30)), 0.)
+
+    def test_frozen_regularizer_matches_all_levels_in_value_and_gradient(self):
+        model = self.model(repetitions=2)
+        model.config.relative_motion_loss_weight = .7
+        model.observations.fill_(1)
+        model._initialize_candidates()
+        with torch.no_grad():
+            model.gate_logits[1:9] = 4
+            for parameter in (model.region_translation, model.region_rotation,
+                              model.gs_translation, model.gs_rotation):
+                parameter.uniform_(-.01, .01)
+        model._select_frontier(freeze=True)
+        parameters = (model.region_translation, model.region_rotation,
+                      model.gs_translation, model.gs_rotation)
+        fast = model.loss_terms(80, diagnostics=False)
+        fast_grad = torch.autograd.grad(fast['relative_motion_loss'], parameters)
+        model._hard_gate_frozen = False
+        with patch.object(model, '_frontier_probabilities',
+                          return_value=model.opened.to(model.gate_logits)):
+            full = model.loss_terms(80, diagnostics=False)
+            full_grad = torch.autograd.grad(full['relative_motion_loss'], parameters)
+        for name in fast:
+            torch.testing.assert_close(fast[name], full[name])
+        for actual, expected in zip(fast_grad, full_grad):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_shared_field_regularizer_does_not_build_unused_point_motion(self):
+        model = self.model()
+        model.observations.fill_(1)
+        model._begin_shared_field_fit()
+        with patch.object(model, '_shared_motion', side_effect=AssertionError('unused point motion')):
+            terms = model.loss_terms(50, diagnostics=False)
+        self.assertEqual(float(terms['relative_motion_loss']), 0.)
+        self.assertTrue(terms['rate_loss'].requires_grad)
 
     def test_mode_refresh_preserves_motion_moments_and_tree_and_absorbs_common_residual(self):
         model = self.model()

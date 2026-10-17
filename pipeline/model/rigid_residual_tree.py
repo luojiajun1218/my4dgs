@@ -27,10 +27,17 @@ class RigidTreeConfig:
     region_rotation_lr: float = 1e-3
     gs_translation_lr: float = 1e-3
     gs_rotation_lr: float = 1e-3
+    rotation_updates: bool = True
     motion_lr_final_ratio: float = 1.0
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
+    differentiable_rate_support: bool = False
+    sparse_rate_width_bins: float = 1.0
+    proximal_gs_regularization: bool = False
+    rate_model: str = 'raw_blocks'
+    codec_rate_interval: int = 20
+    codec_rate_initial_steps: int = 20
     rate_normalization: str = 'frame'
     relative_motion_loss_weight: float = 0.001
     relative_motion_units: str = 'extent_radians'
@@ -47,7 +54,28 @@ class RigidTreeConfig:
 
     def validate(self):
         self.spatial_gate.validate(self.motion_steps)
-        if not self.spatial_gate.enabled or self.spatial_gate.learn_region_motion:
+        if not isinstance(self.rotation_updates, bool):
+            raise ValueError('rotation_updates must be boolean')
+        if not isinstance(self.differentiable_rate_support, bool):
+            raise ValueError('differentiable_rate_support must be boolean')
+        if not isinstance(self.proximal_gs_regularization, bool):
+            raise ValueError('proximal_gs_regularization must be boolean')
+        if self.rate_model not in ('raw_blocks', 'codec'):
+            raise ValueError('Unknown motion rate model')
+        if self.rate_model == 'codec' and self.spatial_gate.training_schedule != 'joint':
+            raise ValueError('Codec rate modeling requires the joint schedule')
+        if isinstance(self.codec_rate_interval, bool) or not isinstance(self.codec_rate_interval, int) or self.codec_rate_interval < 1:
+            raise ValueError('codec_rate_interval must be a positive integer')
+        if (isinstance(self.codec_rate_initial_steps, bool) or not isinstance(self.codec_rate_initial_steps, int)
+                or not 0 <= self.codec_rate_initial_steps <= self.motion_steps):
+            raise ValueError('codec_rate_initial_steps must fit the motion stage')
+        if self.proximal_gs_regularization and self.spatial_gate.training_schedule != 'joint':
+            raise ValueError('Proximal GS regularization requires the joint schedule')
+        if (isinstance(self.sparse_rate_width_bins, bool) or
+                not math.isfinite(self.sparse_rate_width_bins) or self.sparse_rate_width_bins <= 0):
+            raise ValueError('sparse_rate_width_bins must be positive')
+        if (not self.spatial_gate.enabled or
+                (self.spatial_gate.training_schedule == 'staged' and self.spatial_gate.learn_region_motion)):
             raise ValueError('Use statistically initialized motion and learnable subdivision gates')
         for name in ('region_count', 'motion_steps', 'birth_steps', 'rate_ramp_steps'):
             value = getattr(self, name)
@@ -61,7 +89,8 @@ class RigidTreeConfig:
             raise ValueError('Use eight initial regions and at most 300 steps per frame')
         if self.rate_warmup_steps >= self.motion_steps:
             raise ValueError('Rate warmup must fit the motion phase')
-        if self.rate_loss_weight and self.spatial_gate.start_step <= self.rate_warmup_steps:
+        if (self.spatial_gate.training_schedule == 'staged' and self.rate_loss_weight and
+                self.spatial_gate.start_step <= self.rate_warmup_steps):
             raise ValueError('Fit complete GS motion proposals before region initialization')
         window = self.motion_fit_window_steps
         if window is not None and (isinstance(window, bool) or
@@ -102,10 +131,17 @@ def saved_config_with_default_motion_lr(saved_config):
     normalized = {**asdict(RigidTreeConfig()), **{
         name: value for name, value in saved_config.items()
         if name not in RETIRED_TREE_CONFIG_FIELDS}}
-    normalized['spatial_gate'] = {**asdict(SpatialGateConfig()), **saved_config.get('spatial_gate', {})}
+    # Older implicit-depth checkpoints used three levels; a new training
+    # default must not reinterpret their saved layout.
+    normalized['spatial_gate'] = {**asdict(SpatialGateConfig()), 'max_depth': 3,
+                                **saved_config.get('spatial_gate', {})}
     normalized['spatial_gate']['image_fit_during_gate'] = saved_config.get('spatial_gate', {}).get('image_fit_during_gate', False)
     normalized['spatial_gate']['learn_region_motion'] = saved_config.get('spatial_gate', {}).get('learn_region_motion', True)
     normalized['relative_motion_units'] = saved_config.get('relative_motion_units', 'extent_radians')
+    if saved_config.get('rate_model') == 'codec' and 'codec_rate_interval' not in saved_config:
+        normalized['codec_rate_interval'] = 1
+    if saved_config.get('rate_model') == 'codec' and 'codec_rate_initial_steps' not in saved_config:
+        normalized['codec_rate_initial_steps'] = 0
     return normalized
 
 
@@ -359,7 +395,7 @@ class MotionBase(nn.Module):
 
     @torch.no_grad()
     def _proximal_blocks(self, translation, rotation, step_t, step_r,
-                         id_lengths, lr_t, lr_r, first_row):
+                         id_lengths, lr_t, lr_r, first_row, block_bytes=None):
         """Choose both, translation, rotation, or zero by Adam-metric L0 cost.
 
         The local quadratic uses Adam's bias-corrected second moment as its
@@ -392,10 +428,15 @@ class MotionBase(nn.Module):
         active_r = _integer(values_r, step_r).ne(0).any(-1)
         index_cost = id_lengths + 1
         price = self.config.rate_loss_weight * ramp / self.rate_normalization_bytes
-        cost_both = price * ((active_t | active_r).to(index_cost) * index_cost +
-                             6 * (active_t.to(index_cost) + active_r.to(index_cost)))
-        cost_t = gain_r + price * active_t.to(index_cost) * (index_cost + 6)
-        cost_r = gain_t + price * active_r.to(index_cost) * (index_cost + 6)
+        if block_bytes is None:
+            both = (active_t | active_r).to(index_cost) * index_cost + 6 * (active_t.to(index_cost) + active_r.to(index_cost))
+            only_t = active_t.to(index_cost) * (index_cost + 6)
+            only_r = active_r.to(index_cost) * (index_cost + 6)
+        else:
+            both, only_t, only_r = block_bytes
+        cost_both = price * both
+        cost_t = gain_r + price * only_t
+        cost_r = gain_t + price * only_r
         cost_none = gain_t + gain_r
         choice = torch.stack((cost_both, cost_t, cost_r, cost_none)).argmin(0)
         prune_t = (choice == 2) | (choice == 3)
@@ -508,7 +549,8 @@ class MotionBase(nn.Module):
         if packet is None:
             return
         gate = packet['config'].get('spatial_gate', {})
-        if not gate.get('enabled') or gate.get('learn_region_motion', True):
+        if (not gate.get('enabled') or
+                (gate.get('training_schedule', 'staged') == 'staged' and gate.get('learn_region_motion', True))):
             raise ValueError('Retired motion checkpoints can be replayed, but cannot resume spatial training')
         if saved_config_with_default_motion_lr(packet['config']) != asdict(self.config):
             raise ValueError('Spatial motion checkpoint configuration differs')

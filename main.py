@@ -14,7 +14,7 @@ from libgs.utils.config import to_structured, to_yaml
 from libgs.utils.git import get_git_commit_hash
 
 #默认启动环境从base改成了ReConGS
-flags.DEFINE_string("pipeline", "ReCon-GS", "pipeline name")
+flags.DEFINE_string("pipeline", "my4dgs", "pipeline name")
 flags.DEFINE_string("config", "", "config file path")
 flags.DEFINE_bool("print", False, "print config to stdout and exit")
 flags.set_default(logging.ALSOLOGTOSTDERR, True)
