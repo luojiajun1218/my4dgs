@@ -131,6 +131,33 @@ class SpatialGatedMotion(MotionBase):
         return getattr(self, '_frame_hierarchical_private', self.config.spatial_gate.hierarchical_private)
 
     @property
+    def private_full_motion(self):
+        return getattr(self, '_frame_private_full_motion', self.config.spatial_gate.private_full_motion)
+
+    def _private_origins(self):
+        leaf = self.spatial_paths[:, -1]
+        return tuple(value[leaf].detach() for value in self._regional_predictions())
+
+    def _private_residuals(self, detach_proposal=False):
+        """Coding error of an independent complete-motion proposal."""
+        leaf = self.spatial_paths[:, -1]
+        values = (self.gs_translation, self.gs_rotation)
+        return tuple(_quantized(value.detach() if detach_proposal else value, grid) - prediction[leaf]
+                     for value, grid, prediction in zip(values,
+                         (self.gs_steps[:3], self.gs_steps[3:]), self._regional_predictions()))
+
+    def _private_symbols(self):
+        leaf, support = self.spatial_paths[:, -1], self._private_support()[:, None]
+        result = []
+        for proposal, prediction, grid in zip((self.gs_translation, self.gs_rotation),
+                self._regional_predictions(hard=True), (self.gs_steps[:3], self.gs_steps[3:])):
+            symbols = (_integer(proposal, grid).to(torch.int32) - prediction[leaf].to(torch.int32)) * support
+            if bool(((symbols < -32768) | (symbols > 32767)).any()):
+                raise ValueError('Private coding residual exceeds int16 range')
+            result.append(symbols.to(torch.int16))
+        return tuple(result)
+
+    @property
     def soft_image_gates(self):
         return self.config.spatial_gate.image_relaxation == 'soft_anneal'
 
@@ -148,6 +175,19 @@ class SpatialGatedMotion(MotionBase):
         return self._gate_probabilities()[self.spatial_paths[:, :-1]].prod(-1)
 
     def _gs_motion(self, hard=False, relaxed=False):
+        if self.private_full_motion:
+            symbols = self._private_symbols()
+            if hard:
+                return symbols
+            values = (_quantized(self.gs_translation, self.gs_steps[:3]),
+                      _quantized(self.gs_rotation, self.gs_steps[3:]))
+            probability = self._private_probabilities()[:, None]
+            soft = tuple(value * probability for value in values)
+            if relaxed:
+                return soft
+            return tuple(_hard_value_soft_gradient(symbol.to(value) * grid, value)
+                         for symbol, value, grid in zip(symbols, soft,
+                             (self.gs_steps[:3], self.gs_steps[3:])))
         quantize = _integer if hard else _quantized
         values = (quantize(self.gs_translation, self.gs_steps[:3]),
                   quantize(self.gs_rotation, self.gs_steps[3:]))
@@ -336,6 +376,7 @@ class SpatialGatedMotion(MotionBase):
         # A frame-boundary migration must read the preceding frame's applied
         # motion under its original policy before enabling the new capacity.
         self._frame_hierarchical_private = self.config.spatial_gate.hierarchical_private
+        self._frame_private_full_motion = self.config.spatial_gate.private_full_motion
         self.base_xyz, self.base_rotation = prior.xyz[rows].to(xyz), prior.rotation[rows].to(rotation)
         self.extent, self.frame_index = float(extent), int(frame_index)
         self.previous_rows = rows.to(xyz.device)
@@ -436,7 +477,8 @@ class SpatialGatedMotion(MotionBase):
                 parameter.copy_(previous.to(parameter))
         if proposal is not None:
             rt, rr = (value.to(self.gs_translation) for value in self._regional_predictions(hard=True))
-            residuals = (proposal[0].to(rt) - rt[self.owner], proposal[1].to(rr) - rr[self.owner])
+            residuals = (proposal if self.private_full_motion else
+                         (proposal[0].to(rt) - rt[self.owner], proposal[1].to(rr) - rr[self.owner]))
             for parameter, symbols, remainder, step in zip(
                     (self.gs_translation, self.gs_rotation), residuals,
                     previous_residuals, (self.gs_steps[:3], self.gs_steps[3:])):
@@ -544,8 +586,16 @@ class SpatialGatedMotion(MotionBase):
             return rt[self.owner], rr[self.owner]
         if self.joint_image_gradients:
             if self._hard_gate_frozen:
+                if self.private_full_motion:
+                    coarse = ~self._private_support()[:, None]
+                    return tuple(_hard_value_soft_gradient(value[self.owner], value[self.owner] * coarse)
+                                 for value in (rt, rr))
                 return rt[self.owner], rr[self.owner]
             soft = self._path_weights(self._gate_probabilities())
+            if self.private_full_motion:
+                # The last alternative is the independent full GS proposal.
+                # Leaf region vectors fit coding residuals, not image error.
+                soft = torch.cat((soft[:, :-1], torch.zeros_like(soft[:, -1:])), -1)
             if relaxed:
                 # Each candidate now affects the image used to train it.
                 # Materialization/encoding always use the discrete field.
@@ -593,6 +643,10 @@ class SpatialGatedMotion(MotionBase):
 
     def _full_motion_symbols(self):
         shared_t, shared_r = self._shared_motion()
+        if self.private_full_motion:
+            gt, gr = self._private_symbols()
+            return (torch.round(shared_t / self.steps[:3]) + gt.to(torch.int32),
+                    torch.round(shared_r / self.steps[3:]) + gr.to(torch.int32))
         gt = torch.round(self.gs_translation / self.gs_steps[:3])
         gr = torch.round(self.gs_rotation / self.gs_steps[3:])
         if self.hierarchical_private:
@@ -755,20 +809,35 @@ class SpatialGatedMotion(MotionBase):
             # Point residuals are actual jointly optimized parameters, not
             # hypothetically rebased residuals for every alternative gate.
             # Their current transmitted rate is independent of a gate switch.
-            pt = point_t.detach() if self.proximal_gs_regularization else point_t
-            pr = point_r.detach() if self.proximal_gs_regularization else point_r
-            ct = self.gs_translation.detach() if self.proximal_gs_regularization else self.gs_translation
-            cr = self.gs_rotation.detach() if self.proximal_gs_regularization else self.gs_rotation
+            if self.private_full_motion:
+                pt, pr = self._private_residuals(detach_proposal=True)
+                leaf_t, leaf_r = self._regional_predictions()
+                leaf = self.spatial_paths[:, -1]
+                ct, cr = self.gs_translation.detach() - leaf_t[leaf], self.gs_rotation.detach() - leaf_r[leaf]
+            else:
+                pt = point_t.detach() if self.proximal_gs_regularization else point_t
+                pr = point_r.detach() if self.proximal_gs_regularization else point_r
+                ct = self.gs_translation.detach() if self.proximal_gs_regularization else self.gs_translation
+                cr = self.gs_rotation.detach() if self.proximal_gs_regularization else self.gs_rotation
             st, sr = support(pt, gs_steps[:3], continuous=ct), support(pr, gs_steps[3:], continuous=cr)
             cost = (self._codec_rate.costs(pt / gs_steps[:3], pr / gs_steps[3:], st, sr, 1)
                     if codec else (st + sr - st * sr) * (self._gs_id_lengths + 1) + (st + sr) * 6)
             residual_bytes = cost.sum()
             relative = ((ct / self.extent).abs().sum(-1) + cr.abs().sum(-1)).mean()
             if self.hierarchical_private:
-                permission = (self._private_probabilities() if self.soft_image_active else
-                    _hard_value_soft_gradient(self._private_support().to(cost), self._private_probabilities()))
-                residual_bytes = (permission * cost).sum()
-                relative = (permission * ((ct / self.extent).abs().sum(-1) + cr.abs().sum(-1))).mean()
+                magnitude = (ct / self.extent).abs().sum(-1) + cr.abs().sum(-1)
+                if self.private_full_motion:
+                    probability = self._private_probabilities()
+                    residual_bytes, relative = (probability * cost).sum(), (probability * magnitude).mean()
+                    if not self.soft_image_active:
+                        permission = self._private_support().to(cost)
+                        residual_bytes = _hard_value_soft_gradient((permission * cost).sum(), residual_bytes)
+                        relative = _hard_value_soft_gradient((permission * magnitude).mean(), relative)
+                else:
+                    permission = (self._private_probabilities() if self.soft_image_active else
+                        _hard_value_soft_gradient(self._private_support().to(cost), self._private_probabilities()))
+                    residual_bytes = (permission * cost).sum()
+                    relative = (permission * magnitude).mean()
             if self._hard_gate_frozen:
                 nodes = ()
         for level, node in enumerate(nodes):
@@ -848,7 +917,7 @@ class SpatialGatedMotion(MotionBase):
                     (error_t / self.extent).abs().sum(-1) + error_r.abs().sum(-1))).mean() / self.spatial_paths.shape[1]
         regional_weight = self._region_selection_probabilities(probabilities,
             include_ancestors=self.relative_regions)
-        if self.joint_image_gradients and not self.soft_image_active:
+        if self.joint_image_gradients and not self.soft_image_active and not self.private_full_motion:
             selected = torch.bincount(self.owner, minlength=len(self.parents)).gt(0).to(rt)
             regional_weight = _hard_value_soft_gradient(selected, regional_weight)
         st = support(local_rt, steps[:3], continuous=self.region_translation)
@@ -858,6 +927,9 @@ class SpatialGatedMotion(MotionBase):
                          if codec else (st + sr - st * sr) * (rid + 1) + (st + sr) * 6)
         region_bytes = (regional_weight * (regional_cost.detach() if self.shared_image_recode or
                         (gate_only_soft_cost and not self.joint_image_gradients) else regional_cost)).sum()
+        if self.private_full_motion and not self.soft_image_active and not self._hard_gate_frozen:
+            selected = torch.bincount(self.owner, minlength=len(self.parents)).gt(0).to(rt)
+            region_bytes = _hard_value_soft_gradient((selected * regional_cost).sum(), region_bytes)
         soft_bytes = residual_bytes + region_bytes + self._metadata_bytes()
         if discrete_joint and not self.joint_image_gradients:
             selected = self._stored_region_support().to(rt)
@@ -1204,6 +1276,20 @@ class SpatialGatedMotion(MotionBase):
         elif not self._shared_field_active:
             self._recode_owner(new_owner, full_motion=full_motion,
                                preserve_remainder=preserve_remainder)
+        if freeze and not was_frozen and self.soft_image_gates:
+            soft_t = self._shared_motion(relaxed=True)[0] + self._gs_motion(relaxed=True)[0]
+            rt = self._regional_predictions()[0]
+            gt = _quantized(self.gs_translation, self.gs_steps[:3])
+            if self.private_full_motion:
+                gt = gt - rt[self.spatial_paths[:, -1]]
+            if self.hierarchical_private:
+                gt = gt * new_owner.eq(self.spatial_paths[:, -1])[:, None]
+            jump = (rt[new_owner] + gt - soft_t).norm(dim=-1)
+            self.flat_region_diagnostics['gate_hardening'] = dict(step=self.last_step,
+                mean_translation_jump=float(jump.mean()),
+                p95_translation_jump=float(torch.quantile(jump, .95)),
+                maximum_translation_jump=float(jump.max()),
+                gs_quantization_step=float(self.gs_steps[0]))
         self._hard_gate_frozen = freeze
         edits = [dict(kind='spatial_gate', node=int(node), opened=bool(new_open[node]),
                       step=self.last_step) for node in gate_changes]
@@ -1260,9 +1346,10 @@ class SpatialGatedMotion(MotionBase):
         coefficient = self.config.relative_motion_loss_weight * ramp / len(self.owner)
         if self.hierarchical_private:
             coefficient = coefficient * self._private_probabilities()[:, None]
-        for parameter, group, scale in (
+        origins = self._private_origins() if self.private_full_motion else (None, None)
+        for (parameter, group, scale), origin in zip((
                 (self.gs_translation, self.optimizer.param_groups[2], self.extent),
-                (self.gs_rotation, self.optimizer.param_groups[3], 1.)):
+                (self.gs_rotation, self.optimizer.param_groups[3], 1.)), origins):
             state = self.optimizer.state.get(parameter, {})
             if 'exp_avg_sq' not in state:
                 continue
@@ -1270,7 +1357,9 @@ class SpatialGatedMotion(MotionBase):
             variance = state['exp_avg_sq'] / (1 - self.config.adam_betas[1] ** t)
             threshold = (group['lr'] * coefficient / scale /
                          (variance.sqrt() + self.config.adam_eps))
-            parameter.copy_(parameter.sign() * (parameter.abs() - threshold).clamp_min(0))
+            residual = parameter if origin is None else parameter - origin
+            shrunk = residual.sign() * (residual.abs() - threshold).clamp_min(0)
+            parameter.copy_(shrunk if origin is None else origin + shrunk)
         if self._motion_fit_window_due():
             self.last_metrics['motion/prox_l1_zero_translation_components'] = int(self.gs_translation.eq(0).sum())
             self.last_metrics['motion/prox_l1_zero_rotation_components'] = int(self.gs_rotation.eq(0).sum())
@@ -1366,27 +1455,32 @@ class SpatialGatedMotion(MotionBase):
         if not self.gs_sparsity_active:
             return
         weight = self._private_probabilities().detach() if self.hierarchical_private else None
+        origins = self._private_origins() if self.private_full_motion else None
+        residuals = ((self.gs_translation, self.gs_rotation) if origins is None else
+                     tuple(value - origin for value, origin in
+                           zip((self.gs_translation, self.gs_rotation), origins)))
         if self.hierarchical_private and 'exp_avg_sq' not in self.optimizer.state.get(self.gs_translation, {}):
             # Fresh photo moments are built on the first fixed-gate step.
             return
         if self.config.rate_model != 'codec':
             if not self.hierarchical_private:
                 return super()._proximal_gs_blocks()
-            t, r = self.gs_translation, self.gs_rotation
+            t, r = residuals
             at = _integer(t, self.gs_steps[:3]).ne(0).any(-1).to(t)
             ar = _integer(r, self.gs_steps[3:]).ne(0).any(-1).to(r)
             ids = self._gs_id_lengths + 1
             prices = [(at + ar - at * ar) * ids + 6 * (at + ar),
                       at * (ids + 6), ar * (ids + 6)]
             groups = self.optimizer.param_groups
-            pt, pr = self._proximal_blocks(t, r, self.gs_steps[:3], self.gs_steps[3:],
+            pt, pr = self._proximal_blocks(self.gs_translation, self.gs_rotation,
+                self.gs_steps[:3], self.gs_steps[3:],
                 self._gs_id_lengths, groups[2]['lr'], groups[3]['lr'], 0,
-                block_bytes=[value * weight for value in prices])
+                block_bytes=[value * weight for value in prices], origins=origins)
             self.last_metrics.update({'motion/prox_zero_translation_blocks': pt,
                                      'motion/prox_zero_rotation_blocks': pr})
             return
         self._measure_codec_rate(self.last_step, force=True)
-        t, r = self.gs_translation / self.gs_steps[:3], self.gs_rotation / self.gs_steps[3:]
+        t, r = residuals[0] / self.gs_steps[:3], residuals[1] / self.gs_steps[3:]
         st, sr = t.round().ne(0).any(-1).to(t), r.round().ne(0).any(-1).to(r)
         zero_t, zero_r = torch.zeros_like(t), torch.zeros_like(r)
         rate = self._codec_rate
@@ -1399,7 +1493,7 @@ class SpatialGatedMotion(MotionBase):
         groups = self.optimizer.param_groups
         pt, pr = self._proximal_blocks(self.gs_translation, self.gs_rotation,
             self.gs_steps[:3], self.gs_steps[3:], self._gs_id_lengths,
-            groups[2]['lr'], groups[3]['lr'], 0, block_bytes=prices)
+            groups[2]['lr'], groups[3]['lr'], 0, block_bytes=prices, origins=origins)
         self.last_metrics.update({'motion/prox_zero_translation_blocks': pt,
                                  'motion/prox_zero_rotation_blocks': pr})
 
@@ -1437,8 +1531,8 @@ class SpatialGatedMotion(MotionBase):
         active = torch.where(counts > 0)[0]
         # A small residual count alone does not establish correct motion. Keep
         # its distribution beside support and region size for image-error audits.
-        gt = _integer(self.gs_translation, self.gs_steps[:3])
-        gr = _integer(self.gs_rotation, self.gs_steps[3:])
+        gt, gr = (self._private_symbols() if self.private_full_motion else
+                  (_integer(self.gs_translation, self.gs_steps[:3]), _integer(self.gs_rotation, self.gs_steps[3:])))
         residual = gt.ne(0).any(-1) | gr.ne(0).any(-1)
         residual_counts = torch.bincount(self.owner[residual], minlength=len(self.parents))
         observed_counts = torch.bincount(self.owner[self.observations.gt(0)],
@@ -1472,6 +1566,7 @@ class SpatialGatedMotion(MotionBase):
             joint_image_gradients=self.joint_image_gradients,
             image_relaxation=self.config.spatial_gate.image_relaxation,
             hierarchical_private=self.hierarchical_private,
+            private_full_motion=self.private_full_motion,
             predictor_objective=self.config.spatial_gate.predictor_objective,
             shared_image_recode=self.shared_image_recode,
             rotation_updates=self.config.rotation_updates,
@@ -1531,7 +1626,10 @@ class SpatialGatedMotion(MotionBase):
         if packet is not None:
             packet['representative_objective'] = 'rate_relative_v1'
             packet['gate_sparsification'] = 'fit_windows'
-            packet['regional_image_fitting'] = ('joint_image_soft_anneal_private_v1'
+            packet['regional_image_fitting'] = ('joint_image_private_proposal_soft_v1'
+                                                if self.private_full_motion and self.soft_image_gates else
+                                                'joint_image_private_proposal_v1' if self.private_full_motion else
+                                                'joint_image_soft_anneal_private_v1'
                                                 if self.soft_image_gates and self.hierarchical_private else
                                                 'joint_image_soft_anneal_v1' if self.soft_image_gates else
                                                 'joint_image_hierarchical_private_v1' if self.hierarchical_private else
@@ -1568,6 +1666,7 @@ class SpatialGatedMotion(MotionBase):
 
     def restore(self, packet):
         self._frame_hierarchical_private = self.config.spatial_gate.hierarchical_private
+        self._frame_private_full_motion = self.config.spatial_gate.private_full_motion
         if packet is not None and packet.get('spatial_assignment') != 'previous_decoded_position_v1':
             raise ValueError('Fixed-membership spatial checkpoints are replay-only')
         initialization = 'previous_full_increment_v2' if self.joint_training else 'previous_increment_v1'
@@ -1580,7 +1679,9 @@ class SpatialGatedMotion(MotionBase):
         estimator = 'soft_field_anneal_v1' if self.soft_image_gates else 'hard_value_soft_path_v1'
         if packet is not None and self.joint_training and packet.get('gate_estimator') != estimator:
             raise ValueError('Earlier joint gate estimators are replay-only')
-        fitting = ('joint_image_soft_anneal_private_v1' if self.soft_image_gates and self.hierarchical_private else
+        fitting = ('joint_image_private_proposal_soft_v1' if self.private_full_motion and self.soft_image_gates else
+                   'joint_image_private_proposal_v1' if self.private_full_motion else
+                   'joint_image_soft_anneal_private_v1' if self.soft_image_gates and self.hierarchical_private else
                    'joint_image_soft_anneal_v1' if self.soft_image_gates else
                    'joint_image_hierarchical_private_v1' if self.hierarchical_private else
                    'predictor_proposal_then_image_v1'

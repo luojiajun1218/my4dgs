@@ -35,10 +35,15 @@ class SpatialGateConfig:
     shared_image_recode: bool = False
     predictor_objective: str = 'residual_l1'
     hierarchical_private: bool = False
+    private_full_motion: bool = False
     image_relaxation: str = 'hard_ste'
     final_temperature: float = .3
 
     def validate(self, motion_steps):
+        if not isinstance(self.private_full_motion, bool):
+            raise ValueError('private_full_motion must be boolean')
+        if self.private_full_motion and (not self.hierarchical_private or self.candidate_refresh_interval):
+            raise ValueError('Private full-motion proposals require hierarchical permission without candidate refresh')
         if self.image_relaxation not in ('hard_ste', 'soft_anneal'):
             raise ValueError('Unknown image gate relaxation')
         if self.image_relaxation == 'soft_anneal':

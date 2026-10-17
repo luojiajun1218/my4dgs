@@ -79,6 +79,8 @@ class RigidTreeConfig:
             raise ValueError('Shared image recoding requires photometric GS Adam plus proximal sparsity')
         if self.spatial_gate.hierarchical_private and not self.proximal_gs_regularization:
             raise ValueError('Hierarchical private motion requires photometric GS Adam plus proximal sparsity')
+        if self.spatial_gate.private_full_motion and self.amplitude_refit_steps:
+            raise ValueError('Private full-motion proposals do not support amplitude refitting')
         if self.spatial_gate.predictor_objective == 'proximal_rd' and (
                 not self.proximal_gs_regularization or self.rate_model != 'raw_blocks' or
                 self.amplitude_refit_steps or self.defer_gs_sparsity_until_gate_freeze):
@@ -418,7 +420,7 @@ class MotionBase(nn.Module):
 
     @torch.no_grad()
     def _proximal_blocks(self, translation, rotation, step_t, step_r,
-                         id_lengths, lr_t, lr_r, first_row, block_bytes=None):
+                         id_lengths, lr_t, lr_r, first_row, block_bytes=None, origins=None):
         """Choose both, translation, rotation, or zero by Adam-metric L0 cost.
 
         The local quadratic uses Adam's bias-corrected second moment as its
@@ -435,6 +437,10 @@ class MotionBase(nn.Module):
         state_t = self.optimizer.state.get(translation)
         state_r = self.optimizer.state.get(rotation)
         values_t, values_r = translation[first_row:], rotation[first_row:]
+        origin_t, origin_r = ((None, None) if origins is None else
+                              tuple(value[first_row:] for value in origins))
+        residual_t = values_t if origin_t is None else values_t - origin_t
+        residual_r = values_r if origin_r is None else values_r - origin_r
         beta2 = self.config.adam_betas[1]
 
         def zero_gain(parameter, state, lr):
@@ -445,10 +451,10 @@ class MotionBase(nn.Module):
             metric = (variance.sqrt() + self.config.adam_eps) / lr
             return 0.5 * (metric * parameter.square()).sum(-1)
 
-        gain_t = zero_gain(values_t, state_t, lr_t)
-        gain_r = zero_gain(values_r, state_r, lr_r)
-        active_t = _integer(values_t, step_t).ne(0).any(-1)
-        active_r = _integer(values_r, step_r).ne(0).any(-1)
+        gain_t = zero_gain(residual_t, state_t, lr_t)
+        gain_r = zero_gain(residual_r, state_r, lr_r)
+        active_t = _integer(residual_t, step_t).ne(0).any(-1)
+        active_r = _integer(residual_r, step_r).ne(0).any(-1)
         index_cost = id_lengths + 1
         price = self.config.rate_loss_weight * ramp / self.rate_normalization_bytes
         if block_bytes is None:
@@ -464,8 +470,8 @@ class MotionBase(nn.Module):
         choice = torch.stack((cost_both, cost_t, cost_r, cost_none)).argmin(0)
         prune_t = (choice == 2) | (choice == 3)
         prune_r = (choice == 1) | (choice == 3)
-        values_t[prune_t] = 0
-        values_r[prune_r] = 0
+        values_t[prune_t] = 0 if origin_t is None else origin_t[prune_t]
+        values_r[prune_r] = 0 if origin_r is None else origin_r[prune_r]
         return int(prune_t.sum()), int(prune_r.sum())
 
 
