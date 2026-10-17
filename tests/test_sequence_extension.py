@@ -230,6 +230,48 @@ class SequenceExtensionTests(unittest.TestCase):
                                  for p in self.source.rglob('*') if p.is_file()})
         self.assertEqual((self.destination / 'config.yaml').read_text(), 'new run config must stay intact\n')
 
+    def test_extension_retains_shared_color_packets_and_replays_the_same_attributes(self):
+        features = importlib.import_module('pipeline.model.sparse_features')
+        stream = self.source / 'frame_storage/rigid_tree'
+        _, previous = self.replay.replay(stream, stream / 'reference_frame0.npz', through=1)
+        motion = self.spatial.SpatialGatedMotion(copy.deepcopy(self.template.config))
+        motion.restore(copy.deepcopy(self.saved_motion))
+        config = features.FeatureDCUpdateConfig(enabled=True, sharing='spatial_region')
+        update = features.QuantizedFeatureDCUpdate(config, motion=motion)
+        update.setup(previous['sh_dc'])
+        with torch.no_grad():
+            update.scalar.delta.reshape(-1, 3)[motion.owner.unique()] = .02
+        update.commit(torch.arange(len(motion.owner)))
+        update.finish()
+        packet_path = stream / 'shdc_002.bin'
+        info = update.export(packet_path, 2)
+        raw = {**self.final_raw, 'sh_dc': update.canonical_features()}
+        digest = self.birth.reference_digest(raw)
+        index = stream / 'frame_002.json'
+        manifest = json.loads(index.read_text())
+        manifest.update(feature_dc_update=packet_path.name,
+                        feature_dc_update_timing='before_births', raw_state_sha256=digest)
+        index.write_text(json.dumps(manifest))
+        report_path = self.source / 'frame_summary/frame_002.json'
+        report = json.loads(report_path.read_text())
+        report.update(feature_dc_update=info, materialized_sha256=digest,
+                      encoded_bytes=report['encoded_bytes'] + info['archive_bytes'])
+        report_path.write_text(json.dumps(report))
+        gaussian = list(self.checkpoint['gaussians'])
+        gaussian[2] = raw['sh_dc'].clone()
+        self.checkpoint['gaussians'] = tuple(gaussian)
+        self.checkpoint['rigid_tree_frame']['report'] = report
+        self.checkpoint['rigid_tree_module_config']['feature_dc_update'] = asdict(config)
+        self.checkpoint['quantized_feature_dc_update'] = update.capture()
+        plan = self.plan()
+        self.assertIn('frame_storage/rigid_tree/shdc_002.bin',
+                      {self.entry_path(entry) for entry in plan.files})
+        self.extension.copy_verified_prefix(plan)
+        target = self.destination / 'frame_storage/rigid_tree'
+        self.assertEqual((target / packet_path.name).read_bytes(), packet_path.read_bytes())
+        _, restored = self.replay.replay(target, target / 'reference_frame0.npz', through=2)
+        self.assertEqual(self.birth.reference_digest(restored), digest)
+
     def test_explicit_completed_prefix_from_interrupted_longer_plan_is_verified(self):
         # Three completed frames, with an original four-frame plan. Never
         # rewrite the checkpoint to pretend the old run had another config.

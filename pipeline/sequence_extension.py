@@ -202,7 +202,8 @@ def validate_sequence_extension(checkpoint, current_data_config,
             raise ValueError('Prefix frame references a different bootstrap or packet')
         relative_files.update((index, f'frame_storage/rigid_tree/motion_{frame:03d}.bin',
                                f'frame_summary/frame_{frame:03d}.json'))
-        for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity')):
+        for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity'),
+                            ('feature_dc_update', 'shdc')):
             name = manifest.get(field)
             if name is not None:
                 if name != f'{stem}_{frame:03d}.bin':

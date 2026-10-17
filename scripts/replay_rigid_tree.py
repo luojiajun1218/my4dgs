@@ -69,7 +69,8 @@ def decode_frame(directory: Path, frame: int, state, raw):
     if feature_name is not None:
         feature_codec = importlib.import_module('pipeline.model.sparse_features')
         current['sh_dc'] = feature_codec.decode_feature_dc_delta(
-            feature_path.read_bytes(), current['sh_dc'], frame_index=frame)
+            feature_path.read_bytes(), current['sh_dc'], frame_index=frame,
+            owner=decoded.owner[:old_count], node_count=len(decoded.parents))
     elif feature_path.exists():
         raise ValueError('Unexpected DC feature packet absent from frame manifest')
     birth_file = directory / f'birth_{frame:03d}.bin'

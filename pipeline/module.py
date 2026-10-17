@@ -275,7 +275,7 @@ class Module(BaseModule):
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = SpatialGatedMotion(cfg.rigid_tree)
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
-        self.feature_dc_update = (QuantizedFeatureDCUpdate(cfg.feature_dc_update)
+        self.feature_dc_update = (QuantizedFeatureDCUpdate(cfg.feature_dc_update, motion=self.motion)
                                   if cfg.feature_dc_update.enabled else None)
         self.frame_prepared = False
         self.frame_finalized = False
