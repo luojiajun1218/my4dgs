@@ -103,6 +103,7 @@ class ModuleConfig(BaseModuleConfig):
     motion_coarse_to_fine: bool = False
     initial_opacity_threshold: float = 0.0
     lambda_dssim: float = 0.2
+    photometric_loss: str = 'l1'
     num_saving_images: int = 5
     lpips_required: bool = True
     gaussian: GaussianConfig = field(default_factory=GaussianConfig)
@@ -136,12 +137,22 @@ def motion_image_factor(step, motion_steps, enabled=False, fitting_motion=False,
     return 1
 
 
-def motion_photometric_loss(image, target, lambda_dssim, factor=1):
+def motion_photometric_loss(image, target, lambda_dssim, factor=1, *, metric='l1'):
+    if metric not in ('l1', 'rmse'):
+        raise ValueError('Photometric pixel loss must be l1 or rmse')
     if factor > 1:
         size = tuple(max(1, value // factor) for value in image.shape[-2:])
         image = interpolate(image[None], size=size, mode='area')[0]
         target = interpolate(target[None], size=size, mode='area')[0]
-    return ((1 - lambda_dssim) * l1_loss(image, target) +
+    # Global RMS keeps pixel-scale loss units while giving small errors small
+    # gradients. The offset makes an exact match have zero finite loss/gradient.
+    if metric == 'l1':
+        pixel = l1_loss(image, target)
+    else:
+        mse = (image - target).square().mean()
+        # Rationalize sqrt(mse+eps)-sqrt(eps) to keep exact zero in float32.
+        pixel = mse / ((mse + 1e-8).sqrt() + 1e-4)
+    return ((1 - lambda_dssim) * pixel +
             lambda_dssim * (1 - ssim(image, target)))
 
 
@@ -264,6 +275,8 @@ class Module(BaseModule):
             raise ValueError('motion_coarse_to_fine must be boolean')
         if not 0 <= cfg.lambda_dssim <= 1:
             raise ValueError('module.lambda_dssim must be in [0, 1]')
+        if cfg.photometric_loss not in ('l1', 'rmse'):
+            raise ValueError('module.photometric_loss must be l1 or rmse')
         bg = torch.ones if self.datamodule.config.white_background else torch.zeros
         self.register_buffer('background', bg(3, device=self.device))
         self.gaussians = GaussianModel(cfg.sh_degree)
@@ -360,6 +373,7 @@ class Module(BaseModule):
         if isinstance(saved_config, dict):
             saved_config = dict(saved_config)
             saved_config.setdefault('motion_coarse_to_fine', False)
+            saved_config.setdefault('photometric_loss', 'l1')
             saved_config.setdefault('opacity_update', asdict(OpacityUpdateConfig()))
             saved_config['opacity_update'] = {**asdict(OpacityUpdateConfig()), **saved_config['opacity_update']}
             saved_config['feature_dc_update'] = {
@@ -535,8 +549,9 @@ class Module(BaseModule):
             enabled=self.config.motion_coarse_to_fine,
             fitting_motion=self.frame_prepared and not self.motion_committed,
             bootstrap_steps=self.config.rigid_tree.spatial_gate.start_step)
+        metric = getattr(self.config, 'photometric_loss', 'l1')
         image_loss = motion_photometric_loss(image, viewpoint.image,
-                                             self.config.lambda_dssim, factor)
+                                             self.config.lambda_dssim, factor, metric=metric)
         loss = image_loss
         # Leave scalar diagnostics on device until all views have finished.
         # Converting each one to float would synchronize CUDA before backward.
@@ -549,7 +564,7 @@ class Module(BaseModule):
         if proposal_weight:
             proposal = self.forward(viewpoint, training=True, proposal_only=True)['render']
             proposal_loss = motion_photometric_loss(proposal, viewpoint.image,
-                                                    self.config.lambda_dssim, factor)
+                                                    self.config.lambda_dssim, factor, metric=metric)
             loss = loss + proposal_weight * proposal_loss
             metrics['proposal_image_loss'] = proposal_loss.detach()
         if not self.motion_committed and regularization_weight:

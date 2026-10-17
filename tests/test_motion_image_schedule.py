@@ -2,15 +2,62 @@
 
 import importlib
 import math
+from types import SimpleNamespace
 import unittest
 
 import torch
 from torch.nn.functional import l1_loss
+import test_proposal_image_supervision as proposal_fixtures
 
 MODULE = importlib.import_module('pipeline.module')
 
 
 class MotionImageScheduleTests(unittest.TestCase):
+    def test_rmse_follows_psnr_error_order_when_l1_prefers_a_large_outlier(self):
+        target = torch.zeros(3, 24, 24)
+        outlier = target.clone()
+        outlier[:, 12, 12] = .3
+        diffuse = target + .005
+        self.assertLess(float(l1_loss(outlier, target)), float(l1_loss(diffuse, target)))
+        self.assertGreater(float((outlier - target).square().mean()),
+                           float((diffuse - target).square().mean()))
+        self.assertGreater(float(MODULE.motion_photometric_loss(outlier, target, 0., metric='rmse')),
+                           float(MODULE.motion_photometric_loss(diffuse, target, 0., metric='rmse')))
+
+    def test_rmse_gives_weak_pixel_errors_less_gradient_than_large_errors(self):
+        image = torch.full((3, 24, 24), .001)
+        image[:, 0, 0] = .1
+        image.requires_grad_()
+        target = torch.zeros_like(image)
+        loss = MODULE.motion_photometric_loss(image, target, 0., metric='rmse')
+        grad = torch.autograd.grad(loss, image)[0]
+        self.assertAlmostEqual(float(grad[0, 0, 0] / grad[0, 1, 1]), 100., places=4)
+        l1_grad = torch.autograd.grad(l1_loss(image, target), image)[0]
+        self.assertEqual(float(l1_grad[0, 0, 0]), float(l1_grad[0, 1, 1]))
+
+    def test_rmse_exact_match_has_zero_finite_gradient_and_rejects_unknown_metric(self):
+        image = torch.full((3, 24, 24), .37, requires_grad=True)
+        loss = MODULE.motion_photometric_loss(image, image.detach(), 0., metric='rmse')
+        self.assertEqual(float(loss), 0.)
+        loss.backward()
+        self.assertTrue(bool(torch.isfinite(image.grad).all()))
+        self.assertTrue(bool(image.grad.eq(0).all()))
+        with self.assertRaises(ValueError):
+            MODULE.motion_photometric_loss(image, image.detach(), .2, metric='unknown')
+
+    def test_module_uses_rmse_for_both_main_and_auxiliary_proposal_images(self):
+        helper = proposal_fixtures.ProposalImageSupervisionTests()
+        module, _, _ = helper.module(helper.model())
+        module.config.photometric_loss = 'rmse'
+        module.config.lambda_dssim = 0.
+        target = torch.linspace(0., 1., 3 * 20 * 20).reshape(3, 20, 20)
+        loss, metrics, package = MODULE.Module.training_step(module,
+            SimpleNamespace(image=target), 1, regularization_weight=0.)
+        expected = ((package['render'].double() - target.double()).square().mean() + 1e-8).sqrt() - 1e-4
+        torch.testing.assert_close(metrics['image_loss'].double(), expected.detach(), rtol=1e-6, atol=1e-8)
+        torch.testing.assert_close(loss.double(), expected * 2, rtol=1e-6, atol=1e-8)
+        self.assertEqual(MODULE.ModuleConfig().photometric_loss, 'l1')
+
     def test_coarse_tracking_ends_before_coding_and_birth_statistics(self):
         for step, factor in ((1, 4), (20, 4), (21, 2), (40, 2), (41, 1),
                              (60, 1), (71, 1), (100, 1)):
