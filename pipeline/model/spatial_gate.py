@@ -52,8 +52,9 @@ class SpatialGateConfig:
             raise ValueError('Private full-motion proposals require hierarchical permission without candidate refresh')
         if self.image_relaxation not in ('hard_ste', 'soft_anneal', 'stochastic_ste'):
             raise ValueError('Unknown image gate relaxation')
-        if self.image_relaxation == 'stochastic_ste' and not self.private_full_motion:
-            raise ValueError('Stochastic image gates currently require private full-motion proposals')
+        if (self.image_relaxation == 'stochastic_ste' and self.hierarchical_private and
+                not self.private_full_motion):
+            raise ValueError('Stochastic hierarchical capacity requires private full-motion proposals')
         if self.image_relaxation != 'hard_ste':
             if (self.training_schedule != 'joint' or not self.joint_image_gradients or
                     self.region_motion != 'absolute'):

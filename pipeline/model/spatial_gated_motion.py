@@ -184,11 +184,15 @@ class SpatialGatedMotion(MotionBase):
         result = []
         for region, proposal, grid in zip(self._regional_predictions(),
                 (self.gs_translation, self.gs_rotation), (self.gs_steps[:3], self.gs_steps[3:])):
-            experts = torch.cat((region[self.spatial_paths[:, :-1]],
-                                 _quantized(proposal, grid)[:, None]), 1)
+            private = _quantized(proposal, grid)
+            experts = (torch.cat((region[self.spatial_paths[:, :-1]], private[:, None]), 1)
+                       if self.private_full_motion else region[self.spatial_paths])
             # Parameter gradients use the actually sampled expert; only the
             # discrete selection uses the relaxed path derivative.
-            result.append((weights[..., None] * experts).sum(1))
+            field = (weights[..., None] * experts).sum(1)
+            if not self.private_full_motion:
+                field = field + (weights[:, -1:] * private if self.hierarchical_private else private)
+            result.append(field)
         return tuple(result)
 
     @property
@@ -1350,7 +1354,7 @@ class SpatialGatedMotion(MotionBase):
             self._finalize_private_support()
             if self.config.spatial_gate.reparameterize_after_gate_freeze:
                 self._begin_fixed_gate_residuals()
-        elif freeze and not was_frozen and self.soft_image_gates:
+        elif freeze and not was_frozen and (self.soft_image_gates or self.stochastic_image_gates):
             # The last 30 steps fit the actual discrete field. Its physical
             # Jacobian differs from the soft mixture used during exploration.
             for parameter in (self.region_translation, self.region_rotation,
@@ -1684,6 +1688,8 @@ class SpatialGatedMotion(MotionBase):
             packet['gate_sparsification'] = 'fit_windows'
             packet['regional_image_fitting'] = ('stochastic_proposals_fixed_residuals_v1'
                                                 if self.config.spatial_gate.reparameterize_after_gate_freeze else
+                                                'joint_image_residual_stochastic_v1'
+                                                if self.stochastic_image_gates and not self.config.spatial_gate.private_full_motion else
                                                 'joint_image_private_proposal_stochastic_v1'
                                                 if self.stochastic_image_gates else
                                                 'joint_image_private_proposal_soft_v1'
@@ -1749,6 +1755,8 @@ class SpatialGatedMotion(MotionBase):
             raise ValueError('Earlier joint gate estimators are replay-only')
         fitting = ('stochastic_proposals_fixed_residuals_v1'
                    if self.config.spatial_gate.reparameterize_after_gate_freeze else
+                   'joint_image_residual_stochastic_v1'
+                   if self.stochastic_image_gates and not self.config.spatial_gate.private_full_motion else
                    'joint_image_private_proposal_stochastic_v1' if self.stochastic_image_gates else
                    'joint_image_private_proposal_soft_v1' if self.private_full_motion and self.soft_image_gates else
                    'joint_image_private_proposal_v1' if self.private_full_motion else
