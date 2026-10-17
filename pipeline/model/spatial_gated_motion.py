@@ -146,8 +146,9 @@ class SpatialGatedMotion(MotionBase):
                      for value, grid, prediction in zip(values,
                          (self.gs_steps[:3], self.gs_steps[3:]), self._regional_predictions()))
 
-    def _private_symbols(self):
-        leaf, support = self.spatial_paths[:, -1], self._private_support()[:, None]
+    def _private_symbols(self, support=None):
+        support = self._private_support() if support is None else support
+        leaf, support = self.spatial_paths[:, -1], support[:, None]
         result = []
         for proposal, prediction, grid in zip((self.gs_translation, self.gs_rotation),
                 self._regional_predictions(hard=True), (self.gs_steps[:3], self.gs_steps[3:])):
@@ -200,7 +201,9 @@ class SpatialGatedMotion(MotionBase):
         return self.soft_image_gates and not self._hard_gate_frozen
 
     def _private_support(self):
-        """A private correction is available only at the finest spatial leaf."""
+        """Select fine-path proposals, optionally allow all fixed-gate residuals."""
+        if self._hard_gate_frozen and self.config.spatial_gate.fixed_gate_all_gs_residuals:
+            return torch.ones_like(self.owner, dtype=torch.bool)
         return self.owner.eq(self.spatial_paths[:, -1])
 
     def _private_probabilities(self):
@@ -237,8 +240,8 @@ class SpatialGatedMotion(MotionBase):
 
     @torch.no_grad()
     def _finalize_private_support(self):
-        """Freeze physical capacity and start moments for its new image Jacobian."""
-        support = self._private_support()
+        """Retain the rendered proposals before enabling additional residuals."""
+        support = self.owner.eq(self.spatial_paths[:, -1])
         for parameter in (self.gs_translation, self.gs_rotation):
             parameter[~support] = 0
         # Before freezing, GS/candidate image gradients had soft path weights.
@@ -252,15 +255,19 @@ class SpatialGatedMotion(MotionBase):
         """Retain encoded motion while making shared leaf fields physical again."""
         if not self._hard_gate_frozen or not self.private_full_motion:
             raise ValueError('Residual coordinates require newly frozen full-motion proposals')
-        support = self._private_support()
-        symbols = self._private_symbols()
+        # Coarse-owner proposals were absent from the rendered field. Start
+        # their optional residuals at zero, preserving the freeze-step packet.
+        support = self.owner.eq(self.spatial_paths[:, -1])
+        symbols = self._private_symbols(support=support)
         for parameter, integer, grid in zip((self.gs_translation, self.gs_rotation),
                 symbols, (self.gs_steps[:3], self.gs_steps[3:])):
             parameter.copy_(_retain_bin_remainder(integer.to(parameter), parameter, grid))
             parameter[~support] = 0
         self._frame_private_full_motion = False
         self.flat_region_diagnostics['post_gate_parameterization'] = dict(
-            step=self.last_step, mode='shared_plus_private_residual', preserves_encoded_motion=True)
+            step=self.last_step, mode='shared_plus_private_residual', preserves_encoded_motion=True,
+            residual_scope=('all_gs' if self.config.spatial_gate.fixed_gate_all_gs_residuals else
+                            'finest_owner_only'))
 
     @property
     def shared_image_recode(self):
@@ -1647,6 +1654,7 @@ class SpatialGatedMotion(MotionBase):
             private_full_motion=self.private_full_motion,
             private_full_motion_configured=self.config.spatial_gate.private_full_motion,
             reparameterize_after_gate_freeze=self.config.spatial_gate.reparameterize_after_gate_freeze,
+            fixed_gate_all_gs_residuals=self.config.spatial_gate.fixed_gate_all_gs_residuals,
             predictor_objective=self.config.spatial_gate.predictor_objective,
             shared_image_recode=self.shared_image_recode,
             rotation_updates=self.config.rotation_updates,

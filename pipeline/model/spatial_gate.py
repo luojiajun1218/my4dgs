@@ -37,11 +37,16 @@ class SpatialGateConfig:
     hierarchical_private: bool = False
     private_full_motion: bool = False
     reparameterize_after_gate_freeze: bool = False
+    fixed_gate_all_gs_residuals: bool = False
     image_relaxation: str = 'hard_ste'
     final_temperature: float = .3
     proposal_image_weight: float = 0.
 
     def validate(self, motion_steps):
+        if not isinstance(self.fixed_gate_all_gs_residuals, bool):
+            raise ValueError('fixed_gate_all_gs_residuals must be boolean')
+        if self.fixed_gate_all_gs_residuals and not self.reparameterize_after_gate_freeze:
+            raise ValueError('All-GS fixed-gate residuals require post-gate residual coordinates')
         if (isinstance(self.proposal_image_weight, bool) or
                 not math.isfinite(self.proposal_image_weight) or self.proposal_image_weight < 0):
             raise ValueError('Proposal image weight must be finite and nonnegative')
