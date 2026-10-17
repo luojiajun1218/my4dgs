@@ -79,7 +79,8 @@ class RigidTreeConfig:
             raise ValueError('Shared image recoding requires photometric GS Adam plus proximal sparsity')
         if self.spatial_gate.hierarchical_private and not self.proximal_gs_regularization:
             raise ValueError('Hierarchical private motion requires photometric GS Adam plus proximal sparsity')
-        if self.spatial_gate.private_full_motion and self.amplitude_refit_steps:
+        if (self.spatial_gate.private_full_motion and self.amplitude_refit_steps and
+                not self.spatial_gate.reparameterize_after_gate_freeze):
             raise ValueError('Private full-motion proposals do not support amplitude refitting')
         if self.spatial_gate.predictor_objective == 'proximal_rd' and (
                 not self.proximal_gs_regularization or self.rate_model != 'raw_blocks' or

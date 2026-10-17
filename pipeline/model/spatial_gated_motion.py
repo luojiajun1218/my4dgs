@@ -243,6 +243,21 @@ class SpatialGatedMotion(MotionBase):
                           self.gs_translation, self.gs_rotation):
             self.optimizer.state.pop(parameter, None)
 
+    @torch.no_grad()
+    def _begin_fixed_gate_residuals(self):
+        """Retain encoded motion while making shared leaf fields physical again."""
+        if not self._hard_gate_frozen or not self.private_full_motion:
+            raise ValueError('Residual coordinates require newly frozen full-motion proposals')
+        support = self._private_support()
+        symbols = self._private_symbols()
+        for parameter, integer, grid in zip((self.gs_translation, self.gs_rotation),
+                symbols, (self.gs_steps[:3], self.gs_steps[3:])):
+            parameter.copy_(_retain_bin_remainder(integer.to(parameter), parameter, grid))
+            parameter[~support] = 0
+        self._frame_private_full_motion = False
+        self.flat_region_diagnostics['post_gate_parameterization'] = dict(
+            step=self.last_step, mode='shared_plus_private_residual', preserves_encoded_motion=True)
+
     @property
     def shared_image_recode(self):
         return self.joint_training and self.config.spatial_gate.shared_image_recode
@@ -1333,6 +1348,8 @@ class SpatialGatedMotion(MotionBase):
         self.opened, self.owner = new_open, new_owner
         if freeze and not was_frozen and self.hierarchical_private:
             self._finalize_private_support()
+            if self.config.spatial_gate.reparameterize_after_gate_freeze:
+                self._begin_fixed_gate_residuals()
         elif freeze and not was_frozen and self.soft_image_gates:
             # The last 30 steps fit the actual discrete field. Its physical
             # Jacobian differs from the soft mixture used during exploration.
@@ -1604,6 +1621,8 @@ class SpatialGatedMotion(MotionBase):
             image_relaxation=self.config.spatial_gate.image_relaxation,
             hierarchical_private=self.hierarchical_private,
             private_full_motion=self.private_full_motion,
+            private_full_motion_configured=self.config.spatial_gate.private_full_motion,
+            reparameterize_after_gate_freeze=self.config.spatial_gate.reparameterize_after_gate_freeze,
             predictor_objective=self.config.spatial_gate.predictor_objective,
             shared_image_recode=self.shared_image_recode,
             rotation_updates=self.config.rotation_updates,
@@ -1663,7 +1682,9 @@ class SpatialGatedMotion(MotionBase):
         if packet is not None:
             packet['representative_objective'] = 'rate_relative_v1'
             packet['gate_sparsification'] = 'fit_windows'
-            packet['regional_image_fitting'] = ('joint_image_private_proposal_stochastic_v1'
+            packet['regional_image_fitting'] = ('stochastic_proposals_fixed_residuals_v1'
+                                                if self.config.spatial_gate.reparameterize_after_gate_freeze else
+                                                'joint_image_private_proposal_stochastic_v1'
                                                 if self.stochastic_image_gates else
                                                 'joint_image_private_proposal_soft_v1'
                                                 if self.private_full_motion and self.soft_image_gates else
@@ -1690,6 +1711,8 @@ class SpatialGatedMotion(MotionBase):
                 packet['image_gate_sampler'] = dict(rng_state=self._gate_rng.get_state().clone(),
                     step=self._sampled_gate_step,
                     noise=(None if self._sampled_gate_noise is None else self._sampled_gate_noise.detach().cpu().clone()))
+            if self.config.spatial_gate.reparameterize_after_gate_freeze:
+                packet['private_full_motion_active'] = self.private_full_motion
             packet['motion_initialization'] = ('previous_full_increment_v2' if self.joint_training
                                                 else 'previous_increment_v1')
             packet['spatial_assignment'] = 'previous_decoded_position_v1'
@@ -1724,7 +1747,9 @@ class SpatialGatedMotion(MotionBase):
                      'soft_field_anneal_v1' if self.soft_image_gates else 'hard_value_soft_path_v1')
         if packet is not None and self.joint_training and packet.get('gate_estimator') != estimator:
             raise ValueError('Earlier joint gate estimators are replay-only')
-        fitting = ('joint_image_private_proposal_stochastic_v1' if self.stochastic_image_gates else
+        fitting = ('stochastic_proposals_fixed_residuals_v1'
+                   if self.config.spatial_gate.reparameterize_after_gate_freeze else
+                   'joint_image_private_proposal_stochastic_v1' if self.stochastic_image_gates else
                    'joint_image_private_proposal_soft_v1' if self.private_full_motion and self.soft_image_gates else
                    'joint_image_private_proposal_v1' if self.private_full_motion else
                    'joint_image_soft_anneal_private_v1' if self.soft_image_gates and self.hierarchical_private else
@@ -1754,6 +1779,11 @@ class SpatialGatedMotion(MotionBase):
         self._regional_fit_support = None if packet is None else packet['regional_fit_support']
         self._coding_initialized = bool(packet and packet.get('coding_initialized', packet.get('hard_gate_frozen', False)))
         self._hard_gate_frozen = bool(packet and packet.get('hard_gate_frozen', False))
+        if packet is not None and self.config.spatial_gate.reparameterize_after_gate_freeze:
+            active = packet.get('private_full_motion_active')
+            if not isinstance(active, bool) or active == self._hard_gate_frozen:
+                raise ValueError('Checkpoint private coordinates disagree with its gate stage')
+            self._frame_private_full_motion = active
         self._amplitude_refit_support = None if packet is None else packet.get('amplitude_refit_support')
         self._predictor_fit_state = None if packet is None else packet.get('predictor_fit_state')
         if self._predictor_fit_state is not None:

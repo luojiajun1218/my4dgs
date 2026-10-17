@@ -36,10 +36,16 @@ class SpatialGateConfig:
     predictor_objective: str = 'residual_l1'
     hierarchical_private: bool = False
     private_full_motion: bool = False
+    reparameterize_after_gate_freeze: bool = False
     image_relaxation: str = 'hard_ste'
     final_temperature: float = .3
 
     def validate(self, motion_steps):
+        if not isinstance(self.reparameterize_after_gate_freeze, bool):
+            raise ValueError('reparameterize_after_gate_freeze must be boolean')
+        if self.reparameterize_after_gate_freeze and (
+                not self.private_full_motion or self.image_relaxation != 'stochastic_ste'):
+            raise ValueError('Post-gate residual coordinates require stochastic full-motion proposals')
         if not isinstance(self.private_full_motion, bool):
             raise ValueError('private_full_motion must be boolean')
         if self.private_full_motion and (not self.hierarchical_private or self.candidate_refresh_interval):
