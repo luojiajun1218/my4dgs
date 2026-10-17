@@ -470,16 +470,19 @@ class Module(BaseModule):
             self.datamodule.cameras_extent, reference,
             source_rows=self.births.source_rows)
 
-    def forward(self, viewpoint, training=False, old_only=False):
+    def forward(self, viewpoint, training=False, old_only=False, proposal_only=False):
+        if proposal_only and (not training or not self.frame_prepared or self.motion_committed):
+            raise ValueError('Proposal render is only available during motion training')
         old_model = self.renderer.gaussians
         effective = getattr(self.config, 'effective_motion_observations', False)
         previous_collection = getattr(self.renderer, 'collect_contributions', False)
         if effective:
-            self.renderer.collect_contributions = bool(training and self.frame_prepared and
+            self.renderer.collect_contributions = bool(training and not proposal_only and self.frame_prepared and
                                                        not self.motion_committed)
         try:
             if self.frame_prepared and not self.motion_committed:
-                xyz, rotation = self.motion(self.trainer.global_step, training=training)
+                xyz, rotation = (self.motion.proposal_pose() if proposal_only else
+                                 self.motion(self.trainer.global_step, training=training))
                 self.gaussians.rigid_xyz = xyz
                 self.gaussians.rigid_rotation = rotation
                 if getattr(self, 'opacity_update', None) is not None:
@@ -487,6 +490,13 @@ class Module(BaseModule):
                         self.gaussians.rigid_alpha = self.opacity_update.alphas()
                     else:
                         self.gaussians.rigid_opacity = self.opacity_update()
+                    if proposal_only:
+                        # The auxiliary image fits proposals, not a second
+                        # opacity solution or the region/gate parameters.
+                        for field in ('rigid_alpha', 'rigid_opacity'):
+                            value = getattr(self.gaussians, field, None)
+                            if value is not None:
+                                setattr(self.gaussians, field, value.detach())
             elif (self.motion_committed and not self.frame_finalized and
                     getattr(self, 'opacity_update', None) is not None and
                     self.config.opacity_update.joint_with_birth):
@@ -498,6 +508,8 @@ class Module(BaseModule):
                     getattr(self, 'feature_dc_update', None) is not None and
                     (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
                 self.gaussians.rigid_sh_dc = self.feature_dc_update()
+                if proposal_only:
+                    self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
             if self.motion_committed and not self.frame_finalized and not old_only:
                 birth_view = self.make_birth_view()
                 if birth_view is not None:
@@ -529,6 +541,14 @@ class Module(BaseModule):
                        psnr=psnr(image.detach(), viewpoint.image).detach(),
                        gs=len(self.gaussians._xyz) +
                        (len(self.births._xyz) if self.motion_committed else 0))
+        proposal_weight = (getattr(self.motion, 'proposal_image_weight', 0.)
+                           if not self.motion_committed else 0.)
+        if proposal_weight:
+            proposal = self.forward(viewpoint, training=True, proposal_only=True)['render']
+            proposal_loss = motion_photometric_loss(proposal, viewpoint.image,
+                                                    self.config.lambda_dssim, factor)
+            loss = loss + proposal_weight * proposal_loss
+            metrics['proposal_image_loss'] = proposal_loss.detach()
         if not self.motion_committed and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
         if (regularization_weight and getattr(self, 'opacity_update', None) is not None and

@@ -39,8 +39,15 @@ class SpatialGateConfig:
     reparameterize_after_gate_freeze: bool = False
     image_relaxation: str = 'hard_ste'
     final_temperature: float = .3
+    proposal_image_weight: float = 0.
 
     def validate(self, motion_steps):
+        if (isinstance(self.proposal_image_weight, bool) or
+                not math.isfinite(self.proposal_image_weight) or self.proposal_image_weight < 0):
+            raise ValueError('Proposal image weight must be finite and nonnegative')
+        if self.proposal_image_weight and (
+                not self.private_full_motion or self.image_relaxation != 'stochastic_ste'):
+            raise ValueError('Proposal image supervision requires stochastic full-motion proposals')
         if not isinstance(self.reparameterize_after_gate_freeze, bool):
             raise ValueError('reparameterize_after_gate_freeze must be boolean')
         if self.reparameterize_after_gate_freeze and (

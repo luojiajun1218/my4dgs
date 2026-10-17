@@ -679,6 +679,25 @@ class SpatialGatedMotion(MotionBase):
                     (weights[..., None] * rr[self.spatial_paths]).sum(1))
         return rt[self.owner], rr[self.owner]
 
+    @property
+    def proposal_image_weight(self):
+        return (self.config.spatial_gate.proposal_image_weight
+                if self.private_full_motion and not self._hard_gate_frozen else 0.)
+
+    def proposal_pose(self):
+        """Fit complete proposals even when the sampled gate chooses sharing.
+
+        This training-only field has no regional or gate dependence. The
+        final pose and wire packet always use the learned discrete frontier.
+        """
+        if not self.private_full_motion or self._hard_gate_frozen:
+            raise ValueError('Proposal images require unfrozen complete-motion coordinates')
+        xyz = self.base_xyz + _quantized(self.gs_translation, self.gs_steps[:3])
+        if not self.config.rotation_updates:
+            return xyz, self.base_rotation
+        vector = _quantized(self.gs_rotation, self.gs_steps[3:])
+        return xyz, quaternion_multiply(rotation_vector_quaternion(vector), self.base_rotation)
+
     def forward(self, step, training=False):
         if training:
             self.last_step = int(step)
@@ -1624,6 +1643,7 @@ class SpatialGatedMotion(MotionBase):
             joint_image_gradients=self.joint_image_gradients,
             image_relaxation=self.config.spatial_gate.image_relaxation,
             hierarchical_private=self.hierarchical_private,
+            proposal_image_weight=self.config.spatial_gate.proposal_image_weight,
             private_full_motion=self.private_full_motion,
             private_full_motion_configured=self.config.spatial_gate.private_full_motion,
             reparameterize_after_gate_freeze=self.config.spatial_gate.reparameterize_after_gate_freeze,
