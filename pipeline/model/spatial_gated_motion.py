@@ -698,30 +698,6 @@ class SpatialGatedMotion(MotionBase):
         vector = _quantized(self.gs_rotation, self.gs_steps[3:])
         return xyz, quaternion_multiply(rotation_vector_quaternion(vector), self.base_rotation)
 
-    def proposal_region_fit_loss(self):
-        """Ready every candidate before its gate decides whether to use it.
-
-        Proposals supply detached targets; neither proposals nor gates can
-        reduce this loss by copying the current shared field. Balance observed
-        members per region and then levels, so large background cells do not
-        drown out smaller moving regions. Stop after the frontier is fixed.
-        """
-        if not self.proposal_image_weight or not self.config.spatial_gate.proposal_region_fit_weight:
-            return self.base_xyz.new_zeros(())
-        target_t = _quantized(self.gs_translation.detach(), self.gs_steps[:3])
-        target_r = _quantized(self.gs_rotation.detach(), self.gs_steps[3:])
-        rt, rr = self._regional_predictions()
-        observed = self.observations.gt(0)
-        loss = self.base_xyz.new_zeros(())
-        for node in self.spatial_paths.unbind(1):
-            counts = torch.bincount(node[observed], minlength=len(self.parents))
-            weight = observed.to(rt) / counts[node].clamp_min(1)
-            error = ((rt[node] - target_t) / self.extent).abs().sum(-1)
-            if self.config.rotation_updates:
-                error = error + (rr[node] - target_r).abs().sum(-1)
-            loss = loss + (weight * error).sum() / counts.gt(0).sum().clamp_min(1)
-        return loss / self.spatial_paths.shape[1]
-
     def forward(self, step, training=False):
         if training:
             self.last_step = int(step)
@@ -834,8 +810,7 @@ class SpatialGatedMotion(MotionBase):
         if not self._candidate_initialized or self.amplitude_refit_active:
             return self.base_xyz.new_zeros(())
         terms = self.loss_terms(step, diagnostics=False)
-        return (terms['rate_loss'] + terms['relative_motion_loss'] + terms.get('candidate_motion_loss', 0.) +
-                terms.get('proposal_region_fit_loss', 0.))
+        return terms['rate_loss'] + terms['relative_motion_loss'] + terms.get('candidate_motion_loss', 0.)
 
     @torch.no_grad()
     def _measure_codec_rate(self, step, force=False):
@@ -1072,9 +1047,6 @@ class SpatialGatedMotion(MotionBase):
             rate_bytes_surrogate=soft_bytes, rate_fraction=rate, relative_motion=relative)
         if self.joint_image_gradients or self.relative_regions or self.shared_image_recode:
             result['candidate_motion_loss'] = candidate_relative * self.config.relative_motion_loss_weight * ramp
-        if self.config.spatial_gate.proposal_region_fit_weight:
-            result['proposal_region_fit_loss'] = (self.proposal_region_fit_loss() *
-                self.config.spatial_gate.proposal_region_fit_weight)
         if codec:
             result['rate_codec_measured'] = self.base_xyz.new_tensor(codec_bytes is not None)
         if diagnostics:
@@ -1672,7 +1644,6 @@ class SpatialGatedMotion(MotionBase):
             image_relaxation=self.config.spatial_gate.image_relaxation,
             hierarchical_private=self.hierarchical_private,
             proposal_image_weight=self.config.spatial_gate.proposal_image_weight,
-            proposal_region_fit_weight=self.config.spatial_gate.proposal_region_fit_weight,
             private_full_motion=self.private_full_motion,
             private_full_motion_configured=self.config.spatial_gate.private_full_motion,
             reparameterize_after_gate_freeze=self.config.spatial_gate.reparameterize_after_gate_freeze,
