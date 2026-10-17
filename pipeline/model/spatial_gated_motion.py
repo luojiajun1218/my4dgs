@@ -162,6 +162,36 @@ class SpatialGatedMotion(MotionBase):
         return self.config.spatial_gate.image_relaxation == 'soft_anneal'
 
     @property
+    def stochastic_image_gates(self):
+        return self.config.spatial_gate.image_relaxation == 'stochastic_ste'
+
+    def _initialize_gate_sampler(self):
+        # An independent CPU generator keeps data sampling/birth RNG unchanged,
+        # makes the state portable, and transfers only one small noise vector.
+        self._gate_rng = torch.Generator(device='cpu')
+        self._gate_rng.manual_seed((torch.initial_seed() + self.frame_index * 1000003) % (2 ** 63 - 1))
+        self._sampled_gate_step, self._sampled_gate_noise = 0, None
+
+    def _stochastic_image_motion(self):
+        if self._sampled_gate_noise is None or self._sampled_gate_step != self.last_step:
+            uniform = torch.rand(self.gate_logits.shape, generator=self._gate_rng).clamp_(1e-6, 1 - 1e-6)
+            self._sampled_gate_noise = (uniform.log() - torch.log1p(-uniform)).to(self.gate_logits)
+            self._sampled_gate_step = self.last_step
+        draw = self.gate_logits / self._gate_temperature() + self._sampled_gate_noise
+        soft = self._path_weights(draw.sigmoid() * self.split_eligible)
+        hard = self._path_weights((draw.ge(0) & self.split_eligible).to(self.gate_logits))
+        weights = hard.detach() + (soft - soft.detach())
+        result = []
+        for region, proposal, grid in zip(self._regional_predictions(),
+                (self.gs_translation, self.gs_rotation), (self.gs_steps[:3], self.gs_steps[3:])):
+            experts = torch.cat((region[self.spatial_paths[:, :-1]],
+                                 _quantized(proposal, grid)[:, None]), 1)
+            # Parameter gradients use the actually sampled expert; only the
+            # discrete selection uses the relaxed path derivative.
+            result.append((weights[..., None] * experts).sum(1))
+        return tuple(result)
+
+    @property
     def soft_image_active(self):
         return self.soft_image_gates and not self._hard_gate_frozen
 
@@ -432,6 +462,8 @@ class SpatialGatedMotion(MotionBase):
         self._codec_rate = None
         self.committed = False
         self.last_step = 0
+        if self.stochastic_image_gates:
+            self._initialize_gate_sampler()
         self._candidate_initialized = False
         self._shared_field_active = False
         self._regional_fit_support = None
@@ -530,7 +562,7 @@ class SpatialGatedMotion(MotionBase):
 
     def _gate_temperature(self):
         cfg = self.config.spatial_gate
-        if not self.soft_image_gates:
+        if not (self.soft_image_gates or self.stochastic_image_gates):
             return cfg.temperature
         progress = min(max((self.last_step - 1) / max(cfg.freeze_step - 1, 1), 0.), 1.)
         return cfg.temperature * (cfg.final_temperature / cfg.temperature) ** progress
@@ -632,13 +664,18 @@ class SpatialGatedMotion(MotionBase):
         if training:
             self.last_step = int(step)
             self._prepare_amplitude_refit(step)
-        relaxed = training and self.soft_image_active
-        shared_t, shared_r = self._shared_motion(relaxed=relaxed)
-        gt, gr = self._gs_motion(relaxed=relaxed)
-        xyz = self.base_xyz + shared_t + gt
+        if training and self.stochastic_image_gates and not self._hard_gate_frozen:
+            translation, rotation_vector = self._stochastic_image_motion()
+            xyz = self.base_xyz + translation
+        else:
+            relaxed = training and self.soft_image_active
+            shared_t, shared_r = self._shared_motion(relaxed=relaxed)
+            gt, gr = self._gs_motion(relaxed=relaxed)
+            xyz = self.base_xyz + shared_t + gt
+            rotation_vector = shared_r + gr
         if not self.config.rotation_updates:
             return xyz, self.base_rotation
-        rotation = quaternion_multiply(rotation_vector_quaternion(shared_r + gr), self.base_rotation)
+        rotation = quaternion_multiply(rotation_vector_quaternion(rotation_vector), self.base_rotation)
         return xyz, rotation
 
     def _full_motion_symbols(self):
@@ -1626,7 +1663,9 @@ class SpatialGatedMotion(MotionBase):
         if packet is not None:
             packet['representative_objective'] = 'rate_relative_v1'
             packet['gate_sparsification'] = 'fit_windows'
-            packet['regional_image_fitting'] = ('joint_image_private_proposal_soft_v1'
+            packet['regional_image_fitting'] = ('joint_image_private_proposal_stochastic_v1'
+                                                if self.stochastic_image_gates else
+                                                'joint_image_private_proposal_soft_v1'
                                                 if self.private_full_motion and self.soft_image_gates else
                                                 'joint_image_private_proposal_v1' if self.private_full_motion else
                                                 'joint_image_soft_anneal_private_v1'
@@ -1644,8 +1683,13 @@ class SpatialGatedMotion(MotionBase):
             packet['motion_schedule'] = ('joint_motion_v2' if self.joint_training
                                           else 'shared_field_zero_residual_v2')
             if self.joint_training:
-                packet['gate_estimator'] = ('soft_field_anneal_v1' if self.soft_image_gates else
+                packet['gate_estimator'] = ('stochastic_binary_path_v1' if self.stochastic_image_gates else
+                                            'soft_field_anneal_v1' if self.soft_image_gates else
                                             'hard_value_soft_path_v1')
+            if self.stochastic_image_gates:
+                packet['image_gate_sampler'] = dict(rng_state=self._gate_rng.get_state().clone(),
+                    step=self._sampled_gate_step,
+                    noise=(None if self._sampled_gate_noise is None else self._sampled_gate_noise.detach().cpu().clone()))
             packet['motion_initialization'] = ('previous_full_increment_v2' if self.joint_training
                                                 else 'previous_increment_v1')
             packet['spatial_assignment'] = 'previous_decoded_position_v1'
@@ -1676,10 +1720,12 @@ class SpatialGatedMotion(MotionBase):
             raise ValueError('Earlier zero-initialized motion checkpoints are replay-only')
         if packet is not None and packet.get('motion_schedule') != schedule:
             raise ValueError('Earlier point-first motion schedules are replay-only')
-        estimator = 'soft_field_anneal_v1' if self.soft_image_gates else 'hard_value_soft_path_v1'
+        estimator = ('stochastic_binary_path_v1' if self.stochastic_image_gates else
+                     'soft_field_anneal_v1' if self.soft_image_gates else 'hard_value_soft_path_v1')
         if packet is not None and self.joint_training and packet.get('gate_estimator') != estimator:
             raise ValueError('Earlier joint gate estimators are replay-only')
-        fitting = ('joint_image_private_proposal_soft_v1' if self.private_full_motion and self.soft_image_gates else
+        fitting = ('joint_image_private_proposal_stochastic_v1' if self.stochastic_image_gates else
+                   'joint_image_private_proposal_soft_v1' if self.private_full_motion and self.soft_image_gates else
                    'joint_image_private_proposal_v1' if self.private_full_motion else
                    'joint_image_soft_anneal_private_v1' if self.soft_image_gates and self.hierarchical_private else
                    'joint_image_soft_anneal_v1' if self.soft_image_gates else
@@ -1737,3 +1783,22 @@ class SpatialGatedMotion(MotionBase):
                 parameter.requires_grad_(False)
         if packet is not None:
             self._enforce_rotation_policy()
+            if self.stochastic_image_gates:
+                self._initialize_gate_sampler()
+                sampler = packet.get('image_gate_sampler')
+                if not isinstance(sampler, dict) or set(sampler) != {'rng_state', 'step', 'noise'}:
+                    raise ValueError('Stochastic gate checkpoint lacks its sampler state')
+                step, noise, rng = sampler['step'], sampler['noise'], sampler['rng_state']
+                if (isinstance(step, bool) or not isinstance(step, int) or not 0 <= step <= self.last_step or
+                        not torch.is_tensor(rng) or rng.dtype != torch.uint8 or rng.ndim != 1 or
+                        (noise is None and step != 0) or
+                        (noise is not None and (not torch.is_tensor(noise) or
+                         noise.shape != self.gate_logits.shape or not noise.is_floating_point() or
+                         not bool(torch.isfinite(noise).all())))):
+                    raise ValueError('Invalid stochastic gate sampler state')
+                try:
+                    self._gate_rng.set_state(rng.cpu())
+                except RuntimeError as error:
+                    raise ValueError('Invalid stochastic gate RNG state') from error
+                self._sampled_gate_step = step
+                self._sampled_gate_noise = None if noise is None else noise.to(self.gate_logits).clone()
