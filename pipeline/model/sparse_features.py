@@ -8,7 +8,7 @@ import weakref
 import torch
 from torch import nn
 
-from .legacy_opacity_codec import decode_opacity_delta
+from .legacy_opacity_codec import HEADER, decode_opacity_delta
 from .sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate, _QuantizedLogits
 
 
@@ -25,6 +25,7 @@ class FeatureDCUpdateConfig:
     decay_with_motion: bool = True
     joint_with_birth: bool = True
     sharing: str = 'per_gs'
+    gate_joint: bool = False
 
     def scalar_config(self):
         return OpacityUpdateConfig(enabled=self.enabled, step=self.step,
@@ -33,6 +34,10 @@ class FeatureDCUpdateConfig:
             joint_with_birth=self.enabled and self.joint_with_birth, mode='logit', prune_threshold=0.)
 
     def validate(self):
+        if not isinstance(self.gate_joint, bool):
+            raise ValueError('feature_dc_update.gate_joint must be boolean')
+        if self.gate_joint and self.sharing != 'spatial_region':
+            raise ValueError('Joint gate colors require spatial region sharing')
         if self.sharing not in ('per_gs', 'spatial_region'):
             raise ValueError('Unknown DC feature sharing mode')
         if not isinstance(self.joint_with_birth, bool):
@@ -103,10 +108,12 @@ class QuantizedFeatureDCUpdate(nn.Module):
         motion = None if self._motion_ref is None else self._motion_ref()
         if motion is None or not hasattr(motion, 'parents'):
             raise ValueError('Regional DC requires a prepared spatial motion model')
+        if self.config.gate_joint and not (motion.stochastic_image_gates and motion.joint_image_gradients):
+            raise ValueError('Joint regional DC requires stochastic joint image gates')
         return motion
 
     def _ready(self):
-        return not self.regional or self._motion()._hard_gate_frozen
+        return not self.regional or self._motion()._hard_gate_frozen or self.config.gate_joint
 
     def setup(self, reference):
         if reference.ndim != 3 or reference.shape[1:] != (1, 3):
@@ -120,11 +127,17 @@ class QuantizedFeatureDCUpdate(nn.Module):
         else:
             self.scalar.setup(reference.reshape(-1, 1))
 
-    def forward(self):
+    def forward(self, training=False):
         if self.regional:
             if not self._ready():
                 return self.reference
-            delta = self.scalar.delta.reshape(-1, 1, 3)[self._motion().owner]
+            motion = self._motion()
+            if self.config.gate_joint and training and not motion._hard_gate_frozen:
+                weights = motion._sampled_path_weights(sample_if_needed=False)
+                table = self.scalar().reshape(-1, 3)
+                delta = (weights[..., None] * table[motion.spatial_paths]).sum(1)[:, None]
+            else:
+                delta = self.scalar.delta.reshape(-1, 1, 3)[motion.owner]
             return _QuantizedLogits.apply(self.reference, delta, self.scalar.step)
         return self.scalar().reshape(-1, 1, 3)
 
@@ -138,6 +151,8 @@ class QuantizedFeatureDCUpdate(nn.Module):
         return self.scalar.canonical_logits().reshape(-1, 1, 3)
 
     def rate_terms(self, byte_price, width=1.):
+        if self.config.gate_joint:
+            return self._joint_rate_terms(byte_price)
         terms = self.scalar.rate_terms(byte_price, width)
         if not self._ready():
             return {name: value * 0 for name, value in terms.items()}
@@ -146,10 +161,51 @@ class QuantizedFeatureDCUpdate(nn.Module):
         return {**terms, 'loss': terms['loss'] + tag * byte_price,
                 'raw_bytes_surrogate': terms['raw_bytes_surrogate'] + tag}
 
+    def _selected_regions(self):
+        motion = self._motion()
+        return torch.bincount(motion.owner, minlength=len(motion.parents)).gt(0)
+
+    def _joint_rate_terms(self, byte_price):
+        """Price selected color rows; STE probabilities train only the gates.
+
+        Three raw bytes per scalar is the existing scalar coder's typical-row
+        proxy. Final compressed archive sizes are measured independently.
+        Color parameters retain photo Adam plus the existing scalar proximal.
+        """
+        motion = self._motion()
+        delta = self.scalar.delta.detach().reshape(-1, 3)
+        channels = self.scalar.symbols().reshape(-1, 3).ne(0).sum(-1).to(delta)
+        selected = self._selected_regions().to(delta)
+        probabilities = (selected if motion._hard_gate_frozen else
+                         motion._region_selection_probabilities())
+        hard_rows = (selected * channels).sum()
+        soft_rows = (probabilities * channels).sum()
+        raw = 3 * (hard_rows + (soft_rows - soft_rows.detach()))
+        raw = raw + hard_rows.gt(0).to(raw) * (HEADER.size + 36)
+        per_node_l1 = self.config.l1_weight * delta.abs().sum(-1) / delta.numel()
+        hard_l1 = (selected * per_node_l1).sum()
+        soft_l1 = (probabilities * per_node_l1).sum()
+        l1 = hard_l1 + (soft_l1 - soft_l1.detach())
+        return dict(loss=raw * byte_price + l1, l1_loss=l1,
+                    raw_bytes_surrogate=raw, active_rows=hard_rows)
+
+    @torch.no_grad()
+    def _mask_unused_regions(self):
+        used = self._selected_regions()
+        self.scalar.delta.reshape(-1, 3)[~used] = 0
+        if self.scalar.delta.grad is not None:
+            self.scalar.delta.grad.reshape(-1, 3)[~used] = 0
+        state = self.scalar.optimizer.state.get(self.scalar.delta, {})
+        for key in ('exp_avg', 'exp_avg_sq'):
+            if key in state:
+                state[key].reshape(-1, 3)[~used] = 0
+
     def optimizer_step(self, *args, **kwargs):
         if not self._ready():
             self.scalar.optimizer.zero_grad(set_to_none=True)
             return
+        if self.config.gate_joint and self._motion()._hard_gate_frozen:
+            self._mask_unused_regions()
         self.scalar.optimizer_step(*args, **kwargs)
 
     def commit(self, rows):
@@ -158,13 +214,7 @@ class QuantizedFeatureDCUpdate(nn.Module):
             motion = self._motion()
             if len(self.reference) != len(motion.owner):
                 raise ValueError('Regional DC retirement must follow motion retirement')
-            used = torch.bincount(motion.owner, minlength=len(motion.parents)).gt(0)
-            with torch.no_grad():
-                self.scalar.delta.reshape(-1, 3)[~used] = 0
-                state = self.scalar.optimizer.state.get(self.scalar.delta, {})
-                for key in ('exp_avg', 'exp_avg_sq'):
-                    if key in state:
-                        state[key].reshape(-1, 3)[~used] = 0
+            self._mask_unused_regions()
             self.scalar.commit(torch.arange(len(self.scalar.reference), device=rows.device))
             return
         channels = torch.arange(3, device=rows.device)
@@ -209,6 +259,10 @@ class QuantizedFeatureDCUpdate(nn.Module):
         path = Path(path)
         if not self._ready():
             return None
+        if self.regional:
+            if not self._motion()._hard_gate_frozen:
+                return None
+            self._mask_unused_regions()
         info = self.scalar.export(path, frame_index)
         if info is None:
             return None

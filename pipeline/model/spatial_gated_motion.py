@@ -172,15 +172,21 @@ class SpatialGatedMotion(MotionBase):
         self._gate_rng.manual_seed((torch.initial_seed() + self.frame_index * 1000003) % (2 ** 63 - 1))
         self._sampled_gate_step, self._sampled_gate_noise = 0, None
 
-    def _stochastic_image_motion(self):
+    def _sampled_path_weights(self, *, sample_if_needed=True):
+        """Reuse one discrete path for every attribute and view of a step."""
         if self._sampled_gate_noise is None or self._sampled_gate_step != self.last_step:
+            if not sample_if_needed:
+                raise ValueError('Render sampled motion before its joint regional attributes')
             uniform = torch.rand(self.gate_logits.shape, generator=self._gate_rng).clamp_(1e-6, 1 - 1e-6)
             self._sampled_gate_noise = (uniform.log() - torch.log1p(-uniform)).to(self.gate_logits)
             self._sampled_gate_step = self.last_step
         draw = self.gate_logits / self._gate_temperature() + self._sampled_gate_noise
         soft = self._path_weights(draw.sigmoid() * self.split_eligible)
         hard = self._path_weights((draw.ge(0) & self.split_eligible).to(self.gate_logits))
-        weights = hard.detach() + (soft - soft.detach())
+        return hard.detach() + (soft - soft.detach())
+
+    def _stochastic_image_motion(self):
+        weights = self._sampled_path_weights()
         result = []
         for region, proposal, grid in zip(self._regional_predictions(),
                 (self.gs_translation, self.gs_rotation), (self.gs_steps[:3], self.gs_steps[3:])):

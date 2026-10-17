@@ -507,7 +507,10 @@ class Module(BaseModule):
             if (self.frame_prepared and not self.frame_finalized and
                     getattr(self, 'feature_dc_update', None) is not None and
                     (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
-                self.gaussians.rigid_sh_dc = self.feature_dc_update()
+                self.gaussians.rigid_sh_dc = (
+                    self.feature_dc_update(training=training)
+                    if getattr(self.config.feature_dc_update, 'gate_joint', False) else
+                    self.feature_dc_update())
                 if proposal_only:
                     self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
             if self.motion_committed and not self.frame_finalized and not old_only:
