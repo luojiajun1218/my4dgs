@@ -30,10 +30,39 @@ class SpatialGateConfig:
     image_fit_during_gate: bool = True
     joint_image_gradients: bool = False
     region_motion: str = 'absolute'
+    candidate_refresh_interval: int = 0
+    temporal_logit_decay: float = 1.0
+    shared_image_recode: bool = False
+    predictor_objective: str = 'residual_l1'
+    hierarchical_private: bool = False
 
     def validate(self, motion_steps):
+        if not isinstance(self.hierarchical_private, bool):
+            raise ValueError('hierarchical_private must be boolean')
+        if self.hierarchical_private and (not self.joint_image_gradients or
+                self.training_schedule != 'joint' or self.region_motion != 'absolute'):
+            raise ValueError('Hierarchical private motion requires absolute joint image fitting')
+        if self.predictor_objective not in ('residual_l1', 'proximal_rd'):
+            raise ValueError('Unknown shared predictor objective')
+        if self.predictor_objective == 'proximal_rd' and (
+                self.training_schedule != 'joint' or self.region_motion != 'absolute' or
+                not self.learn_region_motion or self.joint_image_gradients or self.shared_image_recode):
+            raise ValueError('Local proximal RD requires absolute joint full-motion coordinates')
         if self.region_motion not in ('absolute', 'relative'):
             raise ValueError('Unknown spatial region motion representation')
+        if not isinstance(self.shared_image_recode, bool):
+            raise ValueError('shared_image_recode must be boolean')
+        if self.shared_image_recode and (self.training_schedule != 'joint' or
+                not self.learn_region_motion or self.joint_image_gradients or self.region_motion != 'absolute'):
+            raise ValueError('Shared image recoding requires absolute joint region learning')
+        if (isinstance(self.candidate_refresh_interval, bool) or
+                not isinstance(self.candidate_refresh_interval, int) or self.candidate_refresh_interval < 0):
+            raise ValueError('candidate_refresh_interval must be a nonnegative integer')
+        if self.candidate_refresh_interval and (self.training_schedule != 'joint' or self.region_motion != 'absolute'):
+            raise ValueError('Candidate refresh requires absolute joint motion')
+        if (isinstance(self.temporal_logit_decay, bool) or not math.isfinite(self.temporal_logit_decay) or
+                not 0 < self.temporal_logit_decay <= 1):
+            raise ValueError('temporal_logit_decay must be in (0, 1]')
         if self.region_motion == 'relative' and (self.training_schedule != 'joint' or self.joint_image_gradients):
             raise ValueError('Relative regions currently use joint full-motion coordinates')
         if not isinstance(self.enabled, bool):

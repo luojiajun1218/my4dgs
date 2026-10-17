@@ -47,8 +47,10 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_features(self):
-        return self._render_cached('features', (self._features_dc, self._features_rest),
-            lambda: torch.cat((self._features_dc, self._features_rest), dim=1))
+        dc = getattr(self, 'rigid_sh_dc', None)
+        dc = self._features_dc if dc is None else dc
+        return self._render_cached('features', (dc, self._features_rest),
+            lambda: torch.cat((dc, self._features_rest), dim=1))
 
     @property
     def get_scaling(self):
@@ -156,27 +158,31 @@ class GaussianModel(BaseGaussianModel):
         *,
         max_new_gaussians: Optional[int] = None,
         source_covariance_init: bool = False,
+        return_source_rows: bool = False,
     ):
+        """Clone selected sources, optionally returning their exact row indices."""
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(
-            torch.norm(grads, dim=-1) >= grad_threshold, True, False
-        )
+        scores = torch.norm(grads, dim=-1)
+        scaling = self.get_scaling
+        selected_pts_mask = scores >= grad_threshold
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
-            torch.max(self.get_scaling, dim=1).values
+            torch.max(scaling, dim=1).values
             <= self.percent_dense * scene_extent,
         )
         eligible = int(selected_pts_mask.sum().item())
         if max_new_gaussians is not None:
             selected_pts_mask = select_budget_mask(
-                selected_pts_mask, torch.norm(grads, dim=-1), max_new_gaussians)
+                selected_pts_mask, scores, max_new_gaussians)
         added = int(selected_pts_mask.sum().item())
+        source_rows = (selected_pts_mask.nonzero(as_tuple=True)[0]
+                       if return_source_rows else None)
 
         means = self._xyz[selected_pts_mask]
-        stds = self.get_scaling[selected_pts_mask]
+        stds = scaling[selected_pts_mask]
         source_rotation = self._rotation[selected_pts_mask]
         if source_covariance_init:
             from .rigid_residual_tree import quaternion_rotate
@@ -204,7 +210,8 @@ class GaussianModel(BaseGaussianModel):
             new_scaling,
             new_rotation,
         )
-        return dict(eligible=eligible, added=added, blocked=eligible - added)
+        report = dict(eligible=eligible, added=added, blocked=eligible - added)
+        return (report, source_rows) if return_source_rows else report
 
     def adaptive_densify_and_split(
         self,
@@ -217,7 +224,7 @@ class GaussianModel(BaseGaussianModel):
     ):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad = torch.zeros(n_init_points, device="cuda")
         padded_grad[: grads.shape[0]] = grads.reshape(-1)
 
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
@@ -232,7 +239,12 @@ class GaussianModel(BaseGaussianModel):
             available = max(0, (max_points - n_init_points) // (N - 1))
             selected_pts_mask = select_budget_mask(selected_pts_mask, padded_grad, available)
         selected = int(selected_pts_mask.sum().item())
+        self._split_selected_points(selected_pts_mask, N, selected)
+        return dict(eligible=eligible, added=selected * (N - 1),
+                    blocked=eligible - selected)
 
+    def _split_selected_points(self, selected_pts_mask, N, selected):
+        """Materialize a single selection shared by geometry and birth lineage."""
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
         samples = torch.normal(mean=means, std=stds)
@@ -242,7 +254,7 @@ class GaussianModel(BaseGaussianModel):
             selected_pts_mask
         ].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(
-            self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+            stds / (0.8 * N)
         )
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
@@ -262,12 +274,10 @@ class GaussianModel(BaseGaussianModel):
         prune_filter = torch.cat(
             (
                 selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), **options),
+                torch.zeros(N * selected, **options),
             )
         )
         self.prune_points(prune_filter)
-        return dict(eligible=eligible, added=selected * (N - 1),
-                    blocked=eligible - selected)
 
     @torch.no_grad()
     def apply_selected_motion(self, xyz: Tensor, raw_rotation: Tensor):
@@ -308,19 +318,6 @@ class BirthGaussianModel(GaussianModel):
                                    N=2, *, max_points=None):
         if self.source_rows is None:
             raise ValueError('Birth lineage must be set before candidate splitting')
-        count = len(self._xyz)
-        padded_grad = torch.zeros(count, device=self._xyz.device,
-                                  dtype=grads.dtype)
-        padded_grad[:len(grads)] = grads.reshape(-1)
-        selected = ((padded_grad >= grad_threshold) &
-                    (self.get_scaling.max(dim=1).values >
-                     self.percent_dense * scene_extent))
-        if max_points is not None:
-            available = max(0, (max_points - count) // (N - 1))
-            selected = select_budget_mask(selected, padded_grad, available)
-        # GaussianModel appends N children, then removes each selected parent.
-        self.source_rows = torch.cat((self.source_rows,
-                                      self.source_rows[selected].repeat(N)))
         try:
             return super().adaptive_densify_and_split(
                 grads, grad_threshold, scene_extent, N, max_points=max_points)
@@ -328,3 +325,9 @@ class BirthGaussianModel(GaussianModel):
             # The caller must abandon this candidate model on a failed split.
             self.source_rows = None
             raise
+
+    def _split_selected_points(self, selected_pts_mask, N, selected):
+        # Append N children in exactly the order used by the geometry below.
+        self.source_rows = torch.cat((self.source_rows,
+                                      self.source_rows[selected_pts_mask].repeat(N)))
+        super()._split_selected_points(selected_pts_mask, N, selected)

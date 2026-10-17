@@ -80,12 +80,14 @@
 
 启动本实验前已有完整117项unittest通过，本轮未改变生产训练方法，不宣称再次运行整套测试。新增诊断只读；`git diff --check`通过。
 
-主要文件：
+2026-10-16 清理后，主要证据集中保存在本 run 的 `verification_evidence/`：
 
-- `/tmp/my4dgs_worldroute200_stopped200_benchmark_20261015.json`
-- `/tmp/my4dgs_worldroute_stopped200_source_scope_20261015.json`
-- `/tmp/my4dgs_worldroute_late_stage_audit_20261015.json`
-- `/tmp/my4dgs_worldroute179_exact_transition_v2_20261015.json`
-- `/tmp/my4dgs_worldroute_motion_birth_stage_report_20261015.json`
+- `my4dgs_worldroute200_stopped200_benchmark_20261015.json`：原始 200 帧码流核验、画质、码量和渲染计时。
+- `my4dgs_worldroute_late_stage_audit_20261015.json`：后段阶段损失分析。
+- `my4dgs_worldroute179_exact_transition_v2_20261015.json`：第 179 帧共享切换检查。
 
-阶段诊断入口：`/tmp/my4dgs_audit_late_motion_stages_20261015.py`。回放入口：`/tmp/my4dgs_audit_motion_transitions_partialprefix_20261015.py`；相对旧入口仅在单帧恢复时同时清除已不适用的`resume_prefix_dir`及`resume_completed_prefix_frames`，没有修改历史配置或运动规则。最初旧入口被前缀配置校验拒绝，未执行训练更新；修正后的回放才计入以上结果。
+以上文件由持久化的 `output/recovery_bundles/` 移入，内容未改写。原 `/tmp/` 下的 source-scope、motion-birth report 和临时诊断脚本在本次清理前已不存在，不再将这些临时路径作为可用入口。原始实验记录全文收入 `docs/archive/history_before_20261016_cleanup.tar.gz`。
+
+历史 `run/config.yaml` 保持原样，记录当时从前 80 帧继续的来源；这些旧源 run 已清理。本 run 自带完整 0–199 帧码流、首帧参考与 `rigid-ckpt-199-200.pth`。根目录的 `config/fs_spatial_gate_worldroute_200_full300_20261015.yaml` 已改成从本 run 的第 199 帧继续、显式 `resume_completed_prefix_frames: 200`，并使用新的 experiment_name，避免依赖已删除的旧前缀。
+
+原阶段回放在单帧恢复时同时清除已不适用的 `resume_prefix_dir` 及 `resume_completed_prefix_frames`，没有修改历史配置或运动规则。最初旧入口被前缀配置校验拒绝，未执行训练更新；修正后的回放才计入以上结果。

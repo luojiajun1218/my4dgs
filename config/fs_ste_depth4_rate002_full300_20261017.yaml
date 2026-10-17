@@ -1,0 +1,147 @@
+ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
+data:
+  canonical_training_view_order: true
+  eval_test: true
+  eval_train: false
+  expected_image_size:
+  - 1600
+  - 1199
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+  extra_dataset_kwargs:
+    num_frames: 300
+  first_frame_eval_train: false
+  resolution: -1
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak
+  shuffle: true
+  split_train_test: true
+  training_camera_names: null
+  training_view_seed: 0
+  validation_camera_names: null
+  white_background: false
+detect_anomaly: false
+experiment_name: fs_ste_depth4_rate002_full300_20261017
+gui_enabled: false
+gui_ip: 127.0.0.1
+gui_port: 6009
+mode: train
+module:
+  birth:
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    densify_grad_threshold: 0.00015
+    densify_interval: 40
+    max_new_gaussians: null
+    new_logscale_step: 0.001
+    new_max_screen_size: 20.0
+    new_opacity_step: 0.01
+    new_rotation_step: 0.001
+    new_sh_step: 0.001
+    new_xyz_step_extent: 1.0e-05
+    opacity_threshold: 0.01
+    source_covariance_init: true
+  effective_motion_observations: true
+  gaussian:
+    feature_lr: 0.0025
+    opacity_lr: 0.05
+    percent_dense: 0.01
+    position_lr_delay_mult: 0.01
+    position_lr_final: 1.6e-06
+    position_lr_init: 0.00016
+    position_lr_max_steps: 15000
+    rotation_lr: 0.001
+    scaling_lr: 0.005
+  gaussian_stage2:
+    feature_lr: 0.075
+    opacity_lr: 0.75
+    percent_dense: 0.01
+    position_lr_delay_mult: 0.01
+    position_lr_final: 2.4e-05
+    position_lr_init: 0.0024
+    position_lr_max_steps: 15000
+    rotation_lr: 0.015
+    scaling_lr: 0.075
+  initial_opacity_threshold: 0.0075
+  lambda_dssim: 0.2
+  lpips_required: true
+  motion_coarse_to_fine: false
+  num_saving_images: 2
+  renderer:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug: false
+    debug_from: -1
+  rigid_tree:
+    adam_betas:
+    - 0.9
+    - 0.999
+    adam_eps: 1.0e-08
+    birth_steps: 100
+    gs_rotation_lr: 0.0001
+    gs_rotation_step_rad: 0.001
+    gs_translation_lr: 0.0006493635559082032
+    gs_xyz_step_extent: 3.0e-05
+    motion_fit_window_steps: 20
+    motion_lr_final_ratio: 0.2
+    motion_rotation_step_rad: 0.001
+    motion_steps: 100
+    motion_xyz_step_extent: 3.0e-05
+    rate_loss_weight: 0.002
+    rate_normalization: reference
+    rate_ramp_steps: 1
+    rate_warmup_steps: 0
+    region_count: 9
+    region_rotation_lr: 0.0003
+    region_translation_lr: 0.0003246817779541016
+    relative_motion_loss_weight: 1.0
+    relative_motion_units: extent_radians
+    spatial_gate:
+      enabled: true
+      freeze_step: 70
+      gate_start_step: 0
+      image_fit_during_gate: true
+      initial_logit: -2.0
+      initialization: robust_median
+      initialization_distance_quantile: 0.999
+      learn_region_motion: true
+      learning_rate: 0.15
+      max_depth: 4
+      min_region_size: 2
+      outlier_assignment: nearest_region
+      start_step: 0
+      temperature: 3.0
+      training_schedule: joint
+  sh_degree: 1
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+quiet: false
+random_seed: 0
+trainer:
+  cache_data_on_device: true
+  motion_views_per_step: 2
+  num_init_steps: 15000
+  saving_ckpt_every_n_frames: 1000
+  saving_ckpt_frames:
+  - 1
+  - 9
+  - 29
+  - 39
+  - 49
+  - 59
+  - 69
+  - 79
+  - 89
+  - 99
+  - 119
+  - 149
+  - 179
+  - 199
+  - 229
+  - 249
+  - 269
+  - 299
+  saving_ckpt_steps:
+  - 70
+  - 100
+  - 200
+  stage_image_camera: cam00.png

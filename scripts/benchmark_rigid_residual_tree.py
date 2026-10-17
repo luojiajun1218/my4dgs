@@ -363,9 +363,10 @@ def _summarize_storage(rows):
     opacity = sum(int(row.get('opacity_update_bytes', 0)) for row in dynamic)
     for row in dynamic:
         payload = (int(row['motion_bytes']) + int(row['birth_bytes']) +
-                   int(row.get('opacity_update_bytes', 0)))
+                   int(row.get('opacity_update_bytes', 0)) +
+                   int(row.get('feature_dc_update_bytes', 0)))
         if int(row['encoded_bytes']) != payload or int(row.get('payload_bytes', payload)) != payload:
-            raise ValueError('Dynamic payload bytes must equal actual motion, birth and optional opacity bytes')
+            raise ValueError('Dynamic payload bytes must equal all declared attribute and motion packets')
 
     def statistics_for(values):
         if not values:
@@ -384,6 +385,9 @@ def _summarize_storage(rows):
                   manifest_index_measured=all('manifest_index_bytes' in row for row in dynamic),
                   encoded_bytes_scope='payload only: motion, birth and optional old-opacity packet files',
                   complete_update_bytes_scope='payload plus necessary per-frame manifest JSON file')
+    if any('feature_dc_update_bytes' in row for row in dynamic):
+        result['feature_dc_update_bytes_total'] = sum(int(row.get('feature_dc_update_bytes', 0)) for row in dynamic)
+        result['encoded_bytes_scope'] = 'payload only: motion, births and optional opacity/DC packets'
     for name, value in payload_stats.items():
         result[f'encoded_bytes_{name}'] = value  # Preserve legacy payload names.
         result[f'payload_bytes_{name}'] = value
@@ -469,20 +473,27 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
     motion_name = f'motion_{frame:03d}.bin'
     birth_name = f'birth_{frame:03d}.bin'
     opacity_name = f'opacity_{frame:03d}.bin'
+    feature_name = f'shdc_{frame:03d}.bin'
     if (manifest.get('motion') != motion_name or manifest.get('birth') not in (None, birth_name) or
-            manifest.get('opacity_update') not in (None, opacity_name)):
+            manifest.get('opacity_update') not in (None, opacity_name) or
+            manifest.get('feature_dc_update') not in (None, feature_name)):
         raise ValueError(f'Frame {frame} manifest packet names differ from expected files')
     motion_bytes = (stream / motion_name).stat().st_size
     birth_bytes = (stream / birth_name).stat().st_size if manifest['birth'] else 0
     opacity_bytes = (stream / opacity_name).stat().st_size if manifest.get('opacity_update') else 0
+    feature_bytes = (stream / feature_name).stat().st_size if manifest.get('feature_dc_update') else 0
     if not manifest.get('opacity_update') and (stream / opacity_name).exists():
         raise ValueError('Opacity packet is not declared by frame manifest')
+    if not manifest.get('feature_dc_update') and (stream / feature_name).exists():
+        raise ValueError('DC feature packet is not declared by frame manifest')
     manifest_index_bytes = (stream / f'frame_{frame:03d}.json').stat().st_size
     saved_motion = summary['motion']['bytes']
     saved_birth = summary['birth']['archive_bytes'] if summary.get('birth') else 0
     saved_opacity = summary['opacity_update']['archive_bytes'] if summary.get('opacity_update') else 0
-    payload = motion_bytes + birth_bytes + opacity_bytes
+    saved_feature = summary['feature_dc_update']['archive_bytes'] if summary.get('feature_dc_update') else 0
+    payload = motion_bytes + birth_bytes + opacity_bytes + feature_bytes
     if (saved_motion != motion_bytes or saved_birth != birth_bytes or saved_opacity != opacity_bytes or
+            saved_feature != feature_bytes or
             summary['encoded_bytes'] != payload or
             summary['shared_reference_bytes'] != reference_bytes or
             summary['decoder_reference'] != relative_reference or
@@ -495,6 +506,8 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
                 complete_update_bytes=payload + manifest_index_bytes)
     if 'opacity_update' in manifest:
         result['opacity_update_bytes'] = opacity_bytes
+    if 'feature_dc_update' in manifest:
+        result['feature_dc_update_bytes'] = feature_bytes
     return result
 
 

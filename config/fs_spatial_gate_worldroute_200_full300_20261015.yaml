@@ -1,7 +1,8 @@
+# 从保留的 200 帧结果继续；原始启动配置保存在 run/config.yaml 与 docs/archive。
 output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
-experiment_name: fs_spatial_gate_worldroute_200_full300_20261015
+experiment_name: fs_spatial_gate_worldroute_200_resume300_20261016
 mode: train
-ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_spatial_gate_worldroute_200_first100_20261015/20261015T133131_d78c92/rigid-ckpt-79-200.pth
+ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_spatial_gate_worldroute_200_full300_20261015/20261015T180221_5e8236/rigid-ckpt-199-200.pth
 trainer:
   cache_data_on_device: true
   num_init_steps: 15000
@@ -138,11 +139,11 @@ module:
     new_logscale_step: 0.001
     new_opacity_step: 0.01
     new_sh_step: 0.001
-resume_prefix_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_spatial_gate_worldroute_200_first100_20261015/20261015T133131_d78c92
+resume_prefix_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_spatial_gate_worldroute_200_full300_20261015/20261015T180221_5e8236
 gui_ip: 127.0.0.1
 gui_port: 6009
 gui_enabled: false
 detect_anomaly: false
 quiet: false
 random_seed: 0
-resume_completed_prefix_frames: 80
+resume_completed_prefix_frames: 200

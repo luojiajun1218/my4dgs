@@ -16,7 +16,7 @@ from libgs.pipeline import Module as BaseModule
 from libgs.pipeline import ModuleConfig as BaseModuleConfig
 from libgs.renderer import Renderer, RendererConfig
 
-from .model.gaussian import BirthGaussianModel, GaussianModel, select_budget_mask
+from .model.gaussian import BirthGaussianModel, GaussianModel
 from .model.rigid_tree_birth_codec import export_birth_attributes
 from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     QuantizedNewGaussianView, materialize_quantized_gaussians, model_raw,
@@ -26,6 +26,7 @@ from .model.rigid_residual_tree import (RigidTreeConfig,
 from .model.contribution_renderer import ContributionRenderer
 from .model.spatial_gated_motion import SpatialGatedMotion
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
+from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpdate
 
 
 BIRTH_ALLOCATION = 'clone_small_v1'
@@ -110,6 +111,7 @@ class ModuleConfig(BaseModuleConfig):
     rigid_tree: RigidTreeConfig = field(default_factory=RigidTreeConfig)
     birth: BirthConfig = field(default_factory=BirthConfig)
     opacity_update: OpacityUpdateConfig = field(default_factory=OpacityUpdateConfig)
+    feature_dc_update: FeatureDCUpdateConfig = field(default_factory=FeatureDCUpdateConfig)
 
 
 MOTION_IMAGE_SCHEDULE = 'bootstrap_aligned_v1'
@@ -251,6 +253,9 @@ class Module(BaseModule):
         validate_initial_opacity_threshold(cfg.initial_opacity_threshold)
         cfg.birth.validate(cfg.rigid_tree.motion_steps)
         cfg.opacity_update.validate()
+        cfg.feature_dc_update.validate()
+        if cfg.opacity_update.amplitude_refit_steps >= cfg.rigid_tree.motion_steps:
+            raise ValueError('Opacity amplitude refitting must leave selection steps')
         if cfg.opacity_update.enabled and cfg.birth.replace_low_opacity:
             raise ValueError('Current-frame alpha pruning requires birth.replace_low_opacity=false')
         if not isinstance(cfg.effective_motion_observations, bool):
@@ -270,6 +275,8 @@ class Module(BaseModule):
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = SpatialGatedMotion(cfg.rigid_tree)
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
+        self.feature_dc_update = (QuantizedFeatureDCUpdate(cfg.feature_dc_update)
+                                  if cfg.feature_dc_update.enabled else None)
         self.frame_prepared = False
         self.frame_finalized = False
         self.motion_committed = False
@@ -314,6 +321,8 @@ class Module(BaseModule):
         ckpt['rigid_tree_retired_reference'] = self.retired_reference
         opacity_update = getattr(self, 'opacity_update', None)
         ckpt['quantized_opacity_update'] = opacity_update.capture() if opacity_update is not None else None
+        feature_update = getattr(self, 'feature_dc_update', None)
+        ckpt['quantized_feature_dc_update'] = feature_update.capture() if feature_update is not None else None
         ckpt['births'] = (self.births.capture() if self.motion_committed and
                           not self.frame_finalized and self.births.optimizer is not None else None)
         ckpt['birth_source_rows'] = (self.births.source_rows.detach().cpu()
@@ -353,6 +362,8 @@ class Module(BaseModule):
             saved_config.setdefault('motion_coarse_to_fine', False)
             saved_config.setdefault('opacity_update', asdict(OpacityUpdateConfig()))
             saved_config['opacity_update'] = {**asdict(OpacityUpdateConfig()), **saved_config['opacity_update']}
+            saved_config['feature_dc_update'] = {
+                **asdict(FeatureDCUpdateConfig()), **saved_config.get('feature_dc_update', {})}
             opacity = saved_config.pop('old_opacity', {})
             if opacity.get('enabled', False) or ckpt.get('old_opacity_delta') is not None:
                 raise ValueError('Opacity-correction checkpoints are replay-only')
@@ -387,6 +398,8 @@ class Module(BaseModule):
             self.motion.restore(ckpt['rigid_tree_motion'])
             if self.config.opacity_update.enabled:
                 self.opacity_update.restore(ckpt.get('quantized_opacity_update'), self.device)
+            if self.config.feature_dc_update.enabled:
+                self.feature_dc_update.restore(ckpt.get('quantized_feature_dc_update'), self.device)
             if self.motion_committed:
                 for parameter in self.motion.parameters():
                     parameter.requires_grad_(False)
@@ -432,9 +445,13 @@ class Module(BaseModule):
         self._freeze_base()
         if self.opacity_update is not None:
             self.opacity_update.setup(self.gaussians._opacity)
+        if self.feature_dc_update is not None:
+            self.feature_dc_update.setup(self.gaussians._features_dc)
 
     def pre_training_step(self):
         self.prepare_frame()
+        if not self.motion_committed and self.opacity_update is not None:
+            self.opacity_update.prepare_step(self.trainer.global_step, self.motion_steps)
 
     def begin_next_frame(self):
         if not self.frame_finalized:
@@ -470,6 +487,17 @@ class Module(BaseModule):
                         self.gaussians.rigid_alpha = self.opacity_update.alphas()
                     else:
                         self.gaussians.rigid_opacity = self.opacity_update()
+            elif (self.motion_committed and not self.frame_finalized and
+                    getattr(self, 'opacity_update', None) is not None and
+                    self.config.opacity_update.joint_with_birth):
+                if self.config.opacity_update.mode == 'alpha':
+                    self.gaussians.rigid_alpha = self.opacity_update.alphas()
+                else:
+                    self.gaussians.rigid_opacity = self.opacity_update()
+            if (self.frame_prepared and not self.frame_finalized and
+                    getattr(self, 'feature_dc_update', None) is not None and
+                    (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
+                self.gaussians.rigid_sh_dc = self.feature_dc_update()
             if self.motion_committed and not self.frame_finalized and not old_only:
                 birth_view = self.make_birth_view()
                 if birth_view is not None:
@@ -480,6 +508,7 @@ class Module(BaseModule):
             self.gaussians.rigid_rotation = None
             self.gaussians.rigid_opacity = None
             self.gaussians.rigid_alpha = None
+            self.gaussians.rigid_sh_dc = None
             self.renderer.gaussians = old_model
             if effective:
                 self.renderer.collect_contributions = previous_collection
@@ -502,10 +531,18 @@ class Module(BaseModule):
                        (len(self.births._xyz) if self.motion_committed else 0))
         if not self.motion_committed and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
-            if getattr(self, 'opacity_update', None) is not None:
-                terms = self.opacity_update.rate_terms(self._rate_byte_price(step),
-                    width=self.config.rigid_tree.sparse_rate_width_bins)
-                loss = loss + regularization_weight * terms['loss']
+        if (regularization_weight and getattr(self, 'opacity_update', None) is not None and
+                (not self.motion_committed or
+                 (not self.frame_finalized and self.config.opacity_update.joint_with_birth))):
+            terms = self.opacity_update.rate_terms(self._rate_byte_price(step),
+                width=self.config.rigid_tree.sparse_rate_width_bins)
+            loss = loss + regularization_weight * terms['loss']
+        if (regularization_weight and getattr(self, 'feature_dc_update', None) is not None and
+                (not self.motion_committed or
+                 (not self.frame_finalized and self.config.feature_dc_update.joint_with_birth))):
+            terms = self.feature_dc_update.rate_terms(self._rate_byte_price(step),
+                width=self.config.rigid_tree.sparse_rate_width_bins)
+            loss = loss + regularization_weight * terms['loss']
         return loss, metrics, package
 
     def _rate_byte_price(self, step):
@@ -539,6 +576,7 @@ class Module(BaseModule):
             self.motion.retain_survivors(rows)
         update.commit(rows)
         self.gaussians._opacity.copy_(logits[rows])
+        return rows
 
     @torch.no_grad()
     def _begin_births(self):
@@ -549,21 +587,13 @@ class Module(BaseModule):
             parameter.requires_grad_(False)
         self.motion.optimizer.zero_grad(set_to_none=True)
         count = len(self.gaussians._xyz)
-        grads = self.gaussians.xyz_gradient_accum / self.gaussians.denom
-        grads[grads.isnan()] = 0.
-        scores = grads.norm(dim=-1)
-        selected = ((scores >= self.config.birth.densify_grad_threshold) &
-                    (self.gaussians.get_scaling.max(dim=1).values <=
-                     self.gaussians.percent_dense * self.datamodule.cameras_extent))
-        selected = select_budget_mask(selected, scores,
-                                      self.config.birth.max_new_gaussians)
-        source_rows = selected.nonzero(as_tuple=True)[0]
-        clone = self.gaussians.adaptive_densify_and_clone(
+        clone, source_rows = self.gaussians.adaptive_densify_and_clone(
             self.config.birth.densify_grad_threshold,
             self.datamodule.cameras_extent,
             sigma_scale=self.config.birth.clone_sigma_scale,
             max_new_gaussians=self.config.birth.max_new_gaussians,
-            source_covariance_init=self.config.birth.source_covariance_init)
+            source_covariance_init=self.config.birth.source_covariance_init,
+            return_source_rows=True)
         if clone['added'] != len(source_rows):
             raise AssertionError('Initial birth source rows disagree with clones')
         self.birth_control['clone_added'] = clone['added']
@@ -622,6 +652,11 @@ class Module(BaseModule):
                     proximal=self.motion._motion_fit_window_due(),
                     lr_factor=(self.motion._motion_lr_factor(step)
                         if self.config.opacity_update.decay_with_motion else 1.))
+            if getattr(self, 'feature_dc_update', None) is not None:
+                self.feature_dc_update.optimizer_step(self._rate_byte_price(step),
+                    proximal=self.motion._motion_fit_window_due(),
+                    lr_factor=(self.motion._motion_lr_factor(step)
+                        if self.config.feature_dc_update.decay_with_motion else 1.))
             if edits:
                 self.birth_control['tree_edit_count'] = (
                     self.birth_control.get('tree_edit_count', 0) + len(edits))
@@ -638,8 +673,12 @@ class Module(BaseModule):
                     self.gaussians.add_densification_stats(
                         item['viewspace_points'], item['visibility_filter'])
             if step == self.motion_steps:
+                rows = torch.arange(len(self.gaussians._xyz), device=self.device)
                 if getattr(self, 'opacity_update', None) is not None:
-                    self._commit_opacity_and_retire()
+                    rows = self._commit_opacity_and_retire()
+                if getattr(self, 'feature_dc_update', None) is not None:
+                    self.feature_dc_update.commit(rows)
+                    self.gaussians._features_dc.copy_(self.feature_dc_update.canonical_features().to(self.device))
                 self.motion.record_final_diagnostics()
                 directory = self.output_dir / 'region_statistics'
                 directory.mkdir(parents=True, exist_ok=True)
@@ -674,6 +713,26 @@ class Module(BaseModule):
                         self.birth_control['pruned'] += result['pruned']
                     self.births.optimizer.step()
                     self.births.optimizer.zero_grad(set_to_none=True)
+            if (getattr(self, 'opacity_update', None) is not None and
+                    self.config.opacity_update.joint_with_birth):
+                birth_step = step - self.motion_steps
+                window = self.config.rigid_tree.motion_fit_window_steps
+                self.opacity_update.optimizer_step(self._rate_byte_price(step),
+                    proximal=(window is None or birth_step % window == 0 or step == self.total_steps),
+                    lr_factor=(self.motion._motion_lr_factor(self.motion_steps)
+                        if self.config.opacity_update.decay_with_motion else 1.))
+                # Keep source predictors, export and rendering on the same
+                # canonical alpha grid while newborn attributes keep fitting.
+                self.gaussians._opacity.copy_(self.opacity_update.canonical_logits().to(self.device))
+            if (getattr(self, 'feature_dc_update', None) is not None and
+                    self.config.feature_dc_update.joint_with_birth):
+                birth_step = step - self.motion_steps
+                window = self.config.rigid_tree.motion_fit_window_steps
+                self.feature_dc_update.optimizer_step(self._rate_byte_price(step),
+                    proximal=(window is None or birth_step % window == 0 or step == self.total_steps),
+                    lr_factor=(self.motion._motion_lr_factor(self.motion_steps)
+                        if self.config.feature_dc_update.decay_with_motion else 1.))
+                self.gaussians._features_dc.copy_(self.feature_dc_update.canonical_features().to(self.device))
             if step == self.total_steps:
                 self.finalize_frame()
 
@@ -681,6 +740,10 @@ class Module(BaseModule):
     def finalize_frame(self):
         if self.frame_finalized:
             return
+        if self.opacity_update is not None:
+            self.opacity_update.finish()
+        if getattr(self, 'feature_dc_update', None) is not None:
+            self.feature_dc_update.finish()
         view = self.make_birth_view()
         raw, sources = materialize_quantized_gaussians(
             model_raw(self.gaussians), view)
@@ -707,6 +770,13 @@ class Module(BaseModule):
             expected_logits = self.opacity_update.canonical_logits().to(raw['opacity'])
             if not torch.equal(raw['opacity'][:len(self.motion.owner)], expected_logits):
                 raise ValueError('Materialized old opacity differs from its sparse packet')
+        feature_info = None
+        if getattr(self, 'feature_dc_update', None) is not None:
+            feature_info = self.feature_dc_update.export(
+                stream_dir / f'shdc_{self.current_frame:03d}.bin', self.current_frame)
+            expected_features = self.feature_dc_update.canonical_features().to(raw['sh_dc'])
+            if not torch.equal(raw['sh_dc'][:len(self.motion.owner)], expected_features):
+                raise ValueError('Materialized old DC features differ from their sparse packet')
         decoded = self.motion.codec_previous_state
         prior = self.motion.frame_reference_state
         old_count = len(self.motion.owner)
@@ -757,6 +827,9 @@ class Module(BaseModule):
         if self.opacity_update is not None:
             manifest.update(opacity_update=Path(opacity_info['path']).name if opacity_info else None,
                             opacity_update_timing='before_births')
+        if getattr(self, 'feature_dc_update', None) is not None:
+            manifest.update(feature_dc_update=Path(feature_info['path']).name if feature_info else None,
+                            feature_dc_update_timing='before_births')
         manifest_path = stream_dir / f'frame_{self.current_frame:03d}.json'
         manifest_path.write_text(json.dumps(manifest, indent=2))
         self.frame_report = dict(frame=self.current_frame,
@@ -771,6 +844,7 @@ class Module(BaseModule):
             previous_count=len(prior.xyz), retired_count=retired_count,
             total_count=len(raw['xyz']), motion=motion_info, birth=birth_info,
             opacity_update=opacity_info,
+            feature_dc_update=feature_info,
             motion_observation_diagnostics=dict(
                 kind=('actual_compositing' if self.config.effective_motion_observations else 'frustum'),
                 frustum_samples=self.birth_control.get('motion_frustum_samples', 0),
@@ -780,7 +854,8 @@ class Module(BaseModule):
             stage_image_metrics=self.stage_image_metrics,
             encoded_bytes=motion_path.stat().st_size +
                 (birth_info['archive_bytes'] if birth_info else 0) +
-                (opacity_info['archive_bytes'] if opacity_info else 0),
+                (opacity_info['archive_bytes'] if opacity_info else 0) +
+                (feature_info['archive_bytes'] if feature_info else 0),
             shared_reference_bytes=self.trainer.decoder_reference_path.stat().st_size,
             materialized_sha256=reference_digest(raw),
             decoder_reference=manifest['reference'],
@@ -795,7 +870,8 @@ class Module(BaseModule):
             flat_region_diagnostics=self.motion.flat_region_diagnostics,
             birth_control=self.birth_control,
             semantics='Spatial gate motion and quantized births; shared first frame counted once. '
-                      'Previous-row deletions are encoded in motion; optional quantized old-opacity deltas; old scale/SH fixed.')
+                      'Previous-row deletions are encoded in motion; optional quantized old-opacity/DC deltas; '
+                      'old scale and higher-order SH fixed.')
 
     @torch.no_grad()
     def validation_step(self, viewpoint, idx, loader_idx):

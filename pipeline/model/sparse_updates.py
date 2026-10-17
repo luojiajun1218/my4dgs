@@ -9,7 +9,7 @@ import struct
 import torch
 from torch import nn
 
-from .legacy_opacity_codec import (HEADER, MAGIC, _step, _varint,
+from .legacy_opacity_codec import (HEADER, _step, _varint,
     opacity_reference_hash, decode_opacity_delta, MODES,
     canonical_alpha, canonical_alpha_logits)
 from .sparse_integer_codec import OPACITY_MAGICS, pack_layout, encode_opacity_layout
@@ -17,7 +17,8 @@ from .sparse_integer_codec import OPACITY_MAGICS, pack_layout, encode_opacity_la
 
 def sparse_block_support(value, step, *, continuous=None, differentiable=False, width=1.):
     """True nonzero block in forward; bin-scaled smooth L0 gradient backward."""
-    hard = torch.round(value / step).ne(0).any(-1).to(value.dtype)
+    symbols = torch.round(value / step)
+    hard = symbols.ne(0).any(-1).to(value.dtype)
     if not differentiable:
         return hard
     continuous = value if continuous is None else continuous
@@ -25,7 +26,7 @@ def sparse_block_support(value, step, *, continuous=None, differentiable=False, 
     # Evaluate the sparse derivative on the transmitted bins. In a zero bin
     # abs has zero subgradient: a large Adam step must not turn an already-free
     # sub-bin update into an opposite-sign nonzero update solely due to rate.
-    bins = bins + (torch.round(value / step) - bins).detach()
+    bins = bins + (symbols - bins).detach()
     soft = -torch.expm1(-bins.abs().sum(-1) / width)
     return hard + (soft - soft.detach())
 
@@ -40,6 +41,8 @@ class OpacityUpdateConfig:
     mode: str = 'logit'
     l1_weight: float = 0.
     decay_with_motion: bool = False
+    amplitude_refit_steps: int = 0
+    joint_with_birth: bool = False
 
     def validate(self):
         if not isinstance(self.enabled, bool):
@@ -48,6 +51,15 @@ class OpacityUpdateConfig:
             raise ValueError('opacity_update.proximal_regularization must be boolean')
         if not isinstance(self.decay_with_motion, bool):
             raise ValueError('opacity_update.decay_with_motion must be boolean')
+        if not isinstance(self.joint_with_birth, bool):
+            raise ValueError('opacity_update.joint_with_birth must be boolean')
+        if self.joint_with_birth and not self.enabled:
+            raise ValueError('Birth opacity fitting requires opacity updates')
+        if (isinstance(self.amplitude_refit_steps, bool) or
+                not isinstance(self.amplitude_refit_steps, int) or self.amplitude_refit_steps < 0):
+            raise ValueError('opacity_update.amplitude_refit_steps must be a nonnegative integer')
+        if self.amplitude_refit_steps and not self.enabled:
+            raise ValueError('Opacity amplitude refitting requires opacity updates')
         if (isinstance(self.l1_weight, bool) or not math.isfinite(self.l1_weight) or self.l1_weight < 0):
             raise ValueError('opacity_update.l1_weight must be finite and nonnegative')
         _step(self.step)
@@ -143,6 +155,7 @@ class QuantizedOpacityUpdate(nn.Module):
         self.rows = None
         self.optimizer = None
         self.committed = False
+        self.refit_support = None
 
     def setup(self, reference):
         self.reference = reference.detach().clone()
@@ -152,6 +165,25 @@ class QuantizedOpacityUpdate(nn.Module):
         self.rows = torch.arange(len(reference), device=reference.device)
         self.optimizer = torch.optim.Adam([self.delta], lr=self.config.learning_rate, eps=1e-8)
         self.committed = False
+        self.refit_support = None
+
+    @torch.no_grad()
+    def prepare_step(self, step, motion_steps):
+        """Finish selection before fitting amplitudes on the same sparse rows.
+
+        The mask is a training constraint, not a transmitted list. Final nonzero
+        symbols still use the ordinary opacity codec and may lose more rows.
+        """
+        count = self.config.amplitude_refit_steps
+        if count >= motion_steps:
+            raise ValueError('Opacity amplitude refitting must leave selection steps')
+        if (not count or self.committed or self.refit_support is not None or
+                step <= motion_steps - count or step > motion_steps):
+            return
+        self.refit_support = self.symbols().ne(0)
+        self.delta.masked_fill_(~self.refit_support, 0)
+        # Old sparse gradients/momentum must not affect the photo-only refit.
+        self.optimizer.state.pop(self.delta, None)
 
     def forward(self):
         if self.config.mode=='alpha':
@@ -171,7 +203,7 @@ class QuantizedOpacityUpdate(nn.Module):
 
     def rate_terms(self, byte_price, width=1.):
         value = self.delta[self.rows]
-        if self.config.proximal_regularization:
+        if self.config.proximal_regularization or self.refit_support is not None:
             value = value.detach()
         support = sparse_block_support(value, self.step, differentiable=True, width=width)
         nonzero = torch.round(value / self.step).ne(0).sum()
@@ -187,11 +219,15 @@ class QuantizedOpacityUpdate(nn.Module):
     def optimizer_step(self, byte_price, proximal=False, lr_factor=1.):
         learning_rate = self.config.learning_rate * lr_factor
         self.optimizer.param_groups[0]['lr'] = learning_rate
+        if self.refit_support is not None and self.delta.grad is not None:
+            self.delta.grad.mul_(self.refit_support)
         self.optimizer.step()
         self.delta.clamp_(min=-32767 * self.step, max=32767 * self.step)
         if self.config.mode=='alpha':
             self.delta.copy_(torch.minimum(torch.maximum(self.delta,-self.alpha_reference),1-self.alpha_reference))
-        if ((proximal and byte_price > 0) or
+        if self.refit_support is not None:
+            self.delta.masked_fill_(~self.refit_support, 0)
+        elif ((proximal and byte_price > 0) or
                 (self.config.proximal_regularization and self.config.l1_weight > 0)):
             state = self.optimizer.state.get(self.delta, {})
             if 'exp_avg_sq' in state:
@@ -227,6 +263,9 @@ class QuantizedOpacityUpdate(nn.Module):
     def commit(self, rows):
         self.rows = rows.detach().to(self.reference.device, dtype=torch.long).clone()
         self.committed = True
+        self.delta.requires_grad_(self.config.joint_with_birth)
+
+    def finish(self):
         self.delta.requires_grad_(False)
 
     @torch.no_grad()
@@ -252,7 +291,8 @@ class QuantizedOpacityUpdate(nn.Module):
             return None
         return dict(config=asdict(self.config), reference=self.reference,
                     delta=self.delta.detach(), rows=self.rows,
-                    committed=self.committed, optimizer=self.optimizer.state_dict())
+                    committed=self.committed, optimizer=self.optimizer.state_dict(),
+                    refit_support=self.refit_support, trainable=self.delta.requires_grad)
 
     def restore(self, packet, device):
         normalized = None if packet is None else {**asdict(OpacityUpdateConfig()), **packet['config']}
@@ -262,5 +302,13 @@ class QuantizedOpacityUpdate(nn.Module):
         self.delta.data.copy_(packet['delta'].to(device))
         self.rows = packet['rows'].to(device)
         self.committed = bool(packet['committed'])
-        self.delta.requires_grad_(not self.committed)
+        self.delta.requires_grad_(packet.get('trainable', not self.committed))
         self.optimizer.load_state_dict(packet['optimizer'])
+        support = packet.get('refit_support')
+        if support is not None:
+            if (not self.config.amplitude_refit_steps or support.dtype != torch.bool or
+                    support.shape != self.delta.shape):
+                raise ValueError('Invalid opacity amplitude-refit support')
+            self.refit_support = support.to(device).clone()
+            if bool(self.delta.detach()[~self.refit_support].ne(0).any()):
+                raise ValueError('Opacity refit changed an excluded row')

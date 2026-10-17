@@ -143,6 +143,95 @@ class SparseUpdateTests(unittest.TestCase):
             current().sigmoid().sum().backward();current.optimizer_step(1e-8,proximal=True)
         torch.testing.assert_close(one.delta,two.delta,atol=0,rtol=0)
 
+    def test_opacity_refit_keeps_zero_rows_frozen_and_removes_amplitude_bias(self):
+        cfg = OpacityUpdateConfig(enabled=True, mode='alpha', step=.01,
+            proximal_regularization=True, l1_weight=100., amplitude_refit_steps=20)
+        update = QuantizedOpacityUpdate(cfg)
+        update.setup(torch.zeros(3, 1))
+        with torch.no_grad():
+            update.delta[:, 0] = torch.tensor([.004, .1, -.1])
+        update.optimizer.state[update.delta] = dict(step=torch.tensor(1.),
+            exp_avg=torch.ones_like(update.delta), exp_avg_sq=torch.ones_like(update.delta))
+        update.prepare_step(80, 100)
+        self.assertIsNone(update.refit_support)
+        before = update.symbols().ne(0)
+        update.prepare_step(81, 100)
+        self.assertEqual(float(update.delta[0]), 0.)
+        self.assertNotIn(update.delta, update.optimizer.state)
+        self.assertFalse(update.rate_terms(100.)['loss'].requires_grad)
+        for _ in range(3):
+            # Huge rate/L1 penalties would erase all updates without refitting.
+            (-update.alphas().sum()).backward()
+            update.optimizer_step(100., proximal=True)
+            self.assertEqual(float(update.delta[0]), 0.)
+            self.assertFalse(bool((update.symbols().ne(0) & ~before).any()))
+        self.assertGreater(float(update.delta[1]), .1)
+
+    def test_opacity_refit_resume_and_survivor_selection_are_exact(self):
+        cfg = OpacityUpdateConfig(enabled=True, mode='alpha', step=.01, amplitude_refit_steps=20)
+        one = QuantizedOpacityUpdate(cfg)
+        one.setup(torch.zeros(3, 1))
+        with torch.no_grad():
+            one.delta[:, 0] = torch.tensor([0., .1, -.1])
+        one.prepare_step(81, 100)
+        one.alphas().sum().backward(); one.optimizer_step(0.)
+        two = QuantizedOpacityUpdate(copy.deepcopy(cfg))
+        two.restore(copy.deepcopy(one.capture()), torch.device('cpu'))
+        for update in (one, two):
+            update.prepare_step(82, 100)
+            update.alphas().sum().backward(); update.optimizer_step(1., proximal=True)
+            update.commit(torch.tensor([2, 0]))
+        torch.testing.assert_close(one.delta, two.delta, atol=0, rtol=0)
+        torch.testing.assert_close(one.canonical_logits(), two.canonical_logits(), atol=0, rtol=0)
+        self.assertEqual(float(two.delta[0]), 0.)
+        with tempfile.TemporaryDirectory() as directory:
+            packet = two.export(Path(directory)/'opacity_002.bin', 2)
+            decoded = decode_opacity_delta(Path(packet['path']).read_bytes(), two.reference[two.rows], frame_index=2)
+            torch.testing.assert_close(decoded.logits, two.canonical_logits(), atol=0, rtol=0)
+
+    def test_opacity_refit_validation_and_legacy_default(self):
+        for value in (True, -1, .5):
+            with self.assertRaises(ValueError):
+                OpacityUpdateConfig(enabled=True, amplitude_refit_steps=value).validate()
+        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True))
+        update.setup(torch.zeros(2, 1))
+        saved = copy.deepcopy(update.capture())
+        saved.pop('refit_support')
+        saved['config'].pop('amplitude_refit_steps')
+        update.restore(saved, torch.device('cpu'))
+        update.prepare_step(100, 100)
+        self.assertIsNone(update.refit_support)
+        bad = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, amplitude_refit_steps=100))
+        bad.setup(torch.zeros(2, 1))
+        with self.assertRaises(ValueError):
+            bad.prepare_step(1, 100)
+
+    def test_birth_opacity_joint_fit_retains_previous_frame_reference_and_resumes(self):
+        cfg = OpacityUpdateConfig(enabled=True, mode='alpha', step=.01,
+            joint_with_birth=True, proximal_regularization=True)
+        one = QuantizedOpacityUpdate(cfg)
+        one.setup(torch.tensor([[1.], [-1.], [0.]]))
+        one.commit(torch.tensor([2, 0]))
+        self.assertTrue(one.delta.requires_grad)
+        reference = one.reference.clone()
+        one.alphas().sum().backward(); one.optimizer_step(0.)
+        self.assertEqual(float(one.delta[1]), 0.)  # Deleted before birth.
+        two = QuantizedOpacityUpdate(copy.deepcopy(cfg))
+        two.restore(copy.deepcopy(one.capture()), torch.device('cpu'))
+        for current in (one, two):
+            self.assertTrue(current.delta.requires_grad)
+            current.alphas().sum().backward(); current.optimizer_step(0.)
+            current.finish()
+        torch.testing.assert_close(one.delta, two.delta, rtol=0, atol=0)
+        torch.testing.assert_close(two.reference, reference, rtol=0, atol=0)
+        finished = QuantizedOpacityUpdate(copy.deepcopy(cfg))
+        finished.restore(copy.deepcopy(two.capture()), torch.device('cpu'))
+        self.assertFalse(finished.delta.requires_grad)
+        with tempfile.TemporaryDirectory() as directory:
+            info = two.export(Path(directory)/'opacity_002.bin', 2)
+            decoded = decode_opacity_delta(Path(info['path']).read_bytes(), reference[two.rows], frame_index=2)
+            torch.testing.assert_close(decoded.logits, two.canonical_logits(), atol=0, rtol=0)
+
     def test_alpha_mode_has_unsaturated_image_gradient_and_zero_bits(self):
         cfg=OpacityUpdateConfig(enabled=True,mode='alpha',step=.01,learning_rate=.01)
         update=QuantizedOpacityUpdate(cfg)

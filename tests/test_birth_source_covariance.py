@@ -12,6 +12,75 @@ GAUSSIAN = importlib.import_module('pipeline.model.gaussian')
 
 
 class BirthSourceCovarianceTests(unittest.TestCase):
+    def test_clone_returns_exact_sources_with_budget_ties_and_rejected_rows(self):
+        for budget, expected in ((None, [1, 2, 5]), (0, []), (1, [1]),
+                                 (2, [1, 2]), (5, [1, 2, 5])):
+            with self.subTest(budget=budget):
+                rows = torch.arange(6, dtype=torch.float32)
+                scale = torch.tensor([[.1]] * 3 + [[1.], [.1], [.1]]).expand(-1, 3)
+                source = SimpleNamespace(_xyz=rows[:, None].expand(-1, 3),
+                    xyz_gradient_accum=torch.tensor([[.2], [.8], [.8], [.9],
+                                                    [float('nan')], [.7]]),
+                    denom=torch.ones(6, 1), get_scaling=scale, percent_dense=.5,
+                    _rotation=torch.tensor([[1., 0., 0., 0.]] * 6),
+                    _scaling=scale.log(), _opacity=rows[:, None],
+                    _features_dc=rows[:, None, None].expand(-1, 1, 3),
+                    _features_rest=rows[:, None, None].expand(-1, 3, 3))
+                captured = []
+                source.densification_postfix = lambda *values: captured.append(values)
+                with patch('torch.normal', side_effect=lambda mean, std: mean.clone()):
+                    report, selected = GAUSSIAN.GaussianModel.adaptive_densify_and_clone(
+                        source, .5, 1., max_new_gaussians=budget, return_source_rows=True)
+                torch.testing.assert_close(selected, torch.tensor(expected, dtype=torch.long))
+                self.assertEqual(report, dict(eligible=3, added=len(expected),
+                                              blocked=3 - len(expected)))
+                # Geometry and appearance rows must agree with the returned lineage.
+                torch.testing.assert_close(captured[0][0], source._xyz[selected])
+                torch.testing.assert_close(captured[0][1], source._features_dc[selected])
+                torch.testing.assert_close(captured[0][2], source._features_rest[selected])
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'Actual CUDA newborn splits')
+    def test_split_budget_preserves_child_order_and_source_lineage(self):
+        fields = ('_xyz', '_features_dc', '_features_rest', '_opacity',
+                  '_scaling', '_rotation')
+        def prune(model, remove):
+            for field in fields:
+                setattr(model, field, getattr(model, field)[~remove])
+
+        cases = ((2, None, [1, 2, 3, 4]), (2, 6, []), (2, 7, [1]),
+                 (2, 9, [1, 2, 3]), (3, 8, [1]))
+        for children, budget, selected_rows in cases:
+            with self.subTest(children=children, budget=budget):
+                model = GAUSSIAN.BirthGaussianModel(1)
+                ids = torch.tensor([11, 22, 33, 44, 55, 66], device='cuda')
+                model._xyz = ids[:, None].expand(-1, 3).float()
+                model._features_dc = ids[:, None, None].expand(-1, 1, 3).float()
+                model._features_rest = ids[:, None, None].expand(-1, 3, 3).float()
+                model._opacity = ids[:, None].float()
+                model._rotation = model._xyz.new_tensor([[1., 0., 0., 0.]] * 6)
+                model._scaling = model._xyz.new_tensor(
+                    [[.1], [.5], [.6], [.3], [.4], [.5]]).expand(-1, 3).log()
+                model.percent_dense = .2
+                model.source_rows = ids.clone()
+                def postfix(*values):
+                    for field, value in zip(fields, values):
+                        setattr(model, field, torch.cat((getattr(model, field), value)))
+                model.densification_postfix = postfix
+                grads = model._xyz.new_tensor([[.9], [.8], [.8], [.7], [.6], [.4]])
+                with patch.object(GAUSSIAN.BaseGaussianModel, 'prune_points', new=prune), \
+                        patch('torch.normal', side_effect=lambda mean, std: torch.zeros_like(mean)):
+                    report = model.adaptive_densify_and_split(
+                        grads, .5, 1., children, max_points=budget)
+                selected = torch.tensor(selected_rows, device='cuda', dtype=torch.long)
+                survivors = torch.tensor([i for i in range(6) if i not in selected_rows],
+                                         device='cuda', dtype=torch.long)
+                expected = torch.cat((ids[survivors], ids[selected].repeat(children)))
+                torch.testing.assert_close(model.source_rows, expected)
+                torch.testing.assert_close(model._xyz[:, 0], expected.float())
+                torch.testing.assert_close(model._features_dc[:, 0, 0], expected.float())
+                self.assertEqual(report, dict(eligible=4,
+                    added=len(selected_rows) * (children - 1), blocked=4 - len(selected_rows)))
+
     def test_frozen_newborn_orientation_inherits_raw_source_without_gradient(self):
         from pipeline.module import BirthConfig
         from pipeline.model.gaussian import GaussianModel

@@ -28,6 +28,7 @@ class RigidTreeConfig:
     gs_translation_lr: float = 1e-3
     gs_rotation_lr: float = 1e-3
     rotation_updates: bool = True
+    amplitude_refit_steps: int = 0
     motion_lr_final_ratio: float = 1.0
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
@@ -35,6 +36,7 @@ class RigidTreeConfig:
     differentiable_rate_support: bool = False
     sparse_rate_width_bins: float = 1.0
     proximal_gs_regularization: bool = False
+    defer_gs_sparsity_until_gate_freeze: bool = False
     rate_model: str = 'raw_blocks'
     codec_rate_interval: int = 20
     codec_rate_initial_steps: int = 20
@@ -56,10 +58,31 @@ class RigidTreeConfig:
         self.spatial_gate.validate(self.motion_steps)
         if not isinstance(self.rotation_updates, bool):
             raise ValueError('rotation_updates must be boolean')
+        if (isinstance(self.amplitude_refit_steps, bool) or
+                not isinstance(self.amplitude_refit_steps, int) or
+                not 0 <= self.amplitude_refit_steps < self.motion_steps):
+            raise ValueError('amplitude_refit_steps must leave motion-selection steps')
+        if self.amplitude_refit_steps and (self.spatial_gate.training_schedule != 'joint' or
+                self.spatial_gate.region_motion != 'absolute' or
+                self.motion_steps - self.amplitude_refit_steps < self.spatial_gate.freeze_step):
+            raise ValueError('Motion amplitude refitting requires frozen absolute joint gates')
         if not isinstance(self.differentiable_rate_support, bool):
             raise ValueError('differentiable_rate_support must be boolean')
         if not isinstance(self.proximal_gs_regularization, bool):
             raise ValueError('proximal_gs_regularization must be boolean')
+        if not isinstance(self.defer_gs_sparsity_until_gate_freeze, bool):
+            raise ValueError('defer_gs_sparsity_until_gate_freeze must be boolean')
+        if self.defer_gs_sparsity_until_gate_freeze and (
+                not self.proximal_gs_regularization or self.spatial_gate.training_schedule != 'joint'):
+            raise ValueError('Deferred GS sparsity requires joint proximal fitting')
+        if self.spatial_gate.shared_image_recode and not self.proximal_gs_regularization:
+            raise ValueError('Shared image recoding requires photometric GS Adam plus proximal sparsity')
+        if self.spatial_gate.hierarchical_private and not self.proximal_gs_regularization:
+            raise ValueError('Hierarchical private motion requires photometric GS Adam plus proximal sparsity')
+        if self.spatial_gate.predictor_objective == 'proximal_rd' and (
+                not self.proximal_gs_regularization or self.rate_model != 'raw_blocks' or
+                self.amplitude_refit_steps or self.defer_gs_sparsity_until_gate_freeze):
+            raise ValueError('Local proximal RD currently requires raw-block joint proximal fitting')
         if self.rate_model not in ('raw_blocks', 'codec'):
             raise ValueError('Unknown motion rate model')
         if self.rate_model == 'codec' and self.spatial_gate.training_schedule != 'joint':

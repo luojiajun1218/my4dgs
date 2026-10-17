@@ -9,15 +9,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 
-from torch.utils.data import ConcatDataset, DataLoader, RandomSampler, SequentialSampler, Subset
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Subset
 
 from libgs.data import Dataset, SceneInfo, load_scene
 from libgs.pipeline import DataConfig as BaseDataConfig
 from libgs.pipeline import DataModule as BaseDataModule
 from libgs.data.utils.fetch import Fetcher
-
-
-SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS = 30
 
 
 def _collate_single_view(batch, expected_image_size=None):
@@ -89,7 +86,6 @@ class DataModule(BaseDataModule):
             **config.extra_dataset_kwargs,
         }
         self.scene = load_scene(*args, **kwargs)
-        self._selective_pairs_cache = None
 
     @property
     def cameras_extent(self) -> float:
@@ -187,60 +183,6 @@ class DataModule(BaseDataModule):
     def _view_collate(self):
         return partial(_collate_single_view,
                        expected_image_size=getattr(self.config, 'expected_image_size', None))
-
-    def selective_training_pairs(self, names, device, camera_atol):
-        """Explicit filename selection is stable across dataset shuffling/resume."""
-        if self.current_frame <= 0:
-            raise ValueError('Selective comparisons require a previous frame')
-        cache_key = (self.current_frame, tuple(names), str(device), camera_atol)
-        cached = getattr(self, '_selective_pairs_cache', None)
-        if cached is not None and cached[0] == cache_key:
-            return cached[1]
-        # Drop the previous frame's GPU images before loading this frame's pairs.
-        self._selective_pairs_cache = None
-        current = self.scene.train_dataset.get_frame_dataset(self.current_frame)
-        previous = self.scene.train_dataset.get_frame_dataset(self.current_frame - 1)
-        def mapping(dataset):
-            result = {}
-            for index, item in enumerate(dataset.items):
-                if item.path.name in result:
-                    raise ValueError('Training camera filenames must be unique within a frame')
-                result[item.path.name] = index
-            return result
-        current_map, previous_map = mapping(current), mapping(previous)
-        for name in names:
-            if name not in current_map or name not in previous_map:
-                raise ValueError(f'Comparison camera {name} is not in both training frames')
-        dataset = ConcatDataset([Subset(current, [current_map[name] for name in names]),
-                                 Subset(previous, [previous_map[name] for name in names])])
-        kwargs = dict(self.config.extra_dataloader_kwargs)
-        if kwargs.get('num_workers', 0) < 1:
-            raise ValueError('Selective paired views require data.extra_dataloader_kwargs.num_workers >= 1')
-        # libgs full-resolution downsampling expects get_worker_info().id.
-        # Keep reading inside workers, using the same worker settings as training.
-        kwargs.update(batch_size=1, shuffle=False, drop_last=False,
-                      sampler=SequentialSampler(dataset), collate_fn=self._view_collate(),
-                      timeout=SELECTIVE_PAIR_WORKER_TIMEOUT_SECONDS)
-        loader = DataLoader(dataset, **kwargs)
-        loader_iter = iter(loader)
-        views = []
-        try:
-            for _ in range(len(dataset)):
-                views.append(next(loader_iter).to(device))
-        finally:
-            # This one-shot loader must release its workers on success and error.
-            shutdown_workers = getattr(loader_iter, '_shutdown_workers', None)
-            if shutdown_workers is not None:
-                shutdown_workers()
-        count = len(names)
-        pairs = []
-        for now, old in zip(views[:count], views[count:]):
-            if now.image.shape != old.image.shape or not torch.allclose(
-                    now.full_proj_transform, old.full_proj_transform, rtol=0, atol=camera_atol):
-                raise ValueError(f'Image evidence needs matched stationary camera: {name}')
-            pairs.append((now, old))
-        self._selective_pairs_cache = (cache_key, pairs)
-        return pairs
 
     def train_dataloader(
         self,

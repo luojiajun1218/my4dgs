@@ -137,15 +137,21 @@ class JointImageRateTests(unittest.TestCase):
             self.assertTrue(bool(torch.isfinite(gradient).all()))
             self.assertGreater(float(gradient.abs().sum()), 0.)
 
-    def test_unused_candidate_fitting_cannot_train_gate_or_its_motion_target(self):
+    def test_closed_candidates_fit_real_images_with_a_binary_forward_cut(self):
         model = self.model()
         terms = model.loss_terms(3, False)
         self.assertFalse(terms['relative_motion_loss'].requires_grad)
-        gradients = torch.autograd.grad(terms['candidate_motion_loss'],
-            [model.gate_logits, model.gs_translation, model.gs_rotation,
-             model.region_translation], allow_unused=True)
-        self.assertEqual(gradients[:3], (None, None, None))
-        self.assertGreater(float(gradients[3].abs().sum()), 0.)
+        self.assertEqual(float(terms['candidate_motion_loss']), 0.)
+        self.assertFalse(terms['candidate_motion_loss'].requires_grad)
+        xyz, _ = model(3, training=True)
+        rt, _ = model._regional_predictions()
+        expected = model.base_xyz + rt[model.owner] + torch.round(
+            model.gs_translation / model.gs_steps[:3]) * model.gs_steps[:3]
+        torch.testing.assert_close(xyz, expected, rtol=0, atol=0)
+        region, = torch.autograd.grad(self.image_loss(model, 3), [model.region_translation])
+        closed = model.node_counts.gt(0) & ~model._stored_region_support()
+        self.assertGreater(int(closed.sum()), 0)
+        self.assertGreater(float(region[closed].abs().sum()), 0.)
 
     def test_byte_context_prices_match_transmitted_streams_at_varint_boundaries(self):
         model = self.model()
