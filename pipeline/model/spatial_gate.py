@@ -35,8 +35,20 @@ class SpatialGateConfig:
     shared_image_recode: bool = False
     predictor_objective: str = 'residual_l1'
     hierarchical_private: bool = False
+    image_relaxation: str = 'hard_ste'
+    final_temperature: float = .3
 
     def validate(self, motion_steps):
+        if self.image_relaxation not in ('hard_ste', 'soft_anneal'):
+            raise ValueError('Unknown image gate relaxation')
+        if self.image_relaxation == 'soft_anneal':
+            if (self.training_schedule != 'joint' or not self.joint_image_gradients or
+                    self.region_motion != 'absolute'):
+                raise ValueError('Soft image gates require absolute joint image fitting')
+            if (isinstance(self.final_temperature, bool) or
+                    not math.isfinite(self.final_temperature) or
+                    not 0 < self.final_temperature <= self.temperature):
+                raise ValueError('Final gate temperature must be positive and no larger than its start')
         if not isinstance(self.hierarchical_private, bool):
             raise ValueError('hierarchical_private must be boolean')
         if self.hierarchical_private and (not self.joint_image_gradients or
