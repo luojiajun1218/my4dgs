@@ -21,6 +21,8 @@
 
 平均选中127.10个区域，范围8–306；29个动态帧中3帧使用8个粗区域，其余帧有不同程度细分。平均GS平移残差块14418.69个/帧，所有旋转更新仍关闭。这个现象说明gate已能学习空间细化，但区域数量变化本身不能证明独立性能贡献。
 
+按实际GS归属统计，约75.1%的点停留在第一层、17.8%在第二层、4.6%在第三层、2.5%在第四层，说明细分集中于少量空间位置，而不是整体打开细树。新增前约92.87%的GS无需额外平移残差，这个比例也包含无需运动的点。各层需要GS残差的比例依次为5.93%、7.17%、16.46%、25.68%，与细层承担更复杂局部运动的现象一致，但不单独证明因果关系。平均实际存储144.28个区域运动节点，包含必要祖先。
+
 对第29帧step200做CPU只读编码审计，固定总量化整数运动和参考位置，只改变表示方式：
 
 | 同一总运动的表示 | 新增前运动包/KB | GS平移块 |
@@ -41,5 +43,6 @@
 - 完成run：`output/fs_goal_rd_20261017/gate_shared_discovery_warm20_native29/20261018T112403_d9c447/`。
 - 完成汇总：`output/fs_goal_rd_20261017/gate_shared_discovery_warm20_native29_postprocess.json`，独立逐帧证据位于run内`independent_verification.json`。
 - 只读共享审计：`output/fs_goal_rd_20261017/shared_discovery_frame29_sharing_audit.json`。
+- 只读层级归属汇总：`output/fs_goal_rd_20261017/shared_discovery_native29_structure.json`。
 - 冻结源码和配方沿用三帧记录；配置为`output/fs_goal_rd_20261017/gate_shared_discovery_warm20_norot.yaml`。
 - 完整续跑：`output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de/`，本记录未计入其新增帧结果。
