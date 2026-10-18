@@ -372,7 +372,9 @@ class SpatialGatedMotion(MotionBase):
         """Relative packets retain the selected frontier and its ancestors."""
         active = torch.bincount(self.owner, minlength=len(self.parents)).gt(0)
         if self.relative_regions:
-            nodes = self.owner.unique()
+            # The histogram already identifies every occupied node. Sorting
+            # all GS owners again is unnecessary, especially at a fixed cut.
+            nodes = active.nonzero(as_tuple=True)[0]
             for _ in range(self.spatial_paths.shape[1]):
                 active[nodes] = True
                 nodes = self.parents[nodes].clamp_min(0)
@@ -963,7 +965,7 @@ class SpatialGatedMotion(MotionBase):
         # Shared-field fitting has no point residual objective. Once the gate
         # is frozen, every point has exactly one selected node; all other
         # level terms have zero weight and need not be constructed.
-        if not self._shared_field_active or self.joint_training:
+        if not self.shared_discovery_active and (not self._shared_field_active or self.joint_training):
             shared_t, shared_r = self._shared_motion()
             point_t = _quantized(self.gs_translation, gs_steps[:3])
             point_r = _quantized(self.gs_rotation, gs_steps[3:])
@@ -1757,10 +1759,22 @@ class SpatialGatedMotion(MotionBase):
         leaf = self.spatial_paths[:, -1]
         leaf_counts = torch.bincount(leaf, minlength=len(self.parents))
         leaf_residual_counts = torch.bincount(leaf[residual], minlength=len(self.parents))
+        # Materialize small diagnostic tables once. Reading CUDA scalars in
+        # the region/gate loops otherwise synchronizes thousands of times.
+        residual_fractions = (residual_counts / counts.clamp_min(1)).cpu()
+        counts, residual_counts, observed_counts, leaf_counts, leaf_residual_counts = (
+            table.cpu() for table in (counts, residual_counts, observed_counts,
+                                     leaf_counts, leaf_residual_counts))
+        active = active.cpu().tolist()
+        translations = self.region_translation.cpu().tolist()
+        rotations = self.region_rotation.cpu().tolist()
+        gate_probabilities = self._gate_probabilities().cpu().tolist()
+        gate_nodes = torch.where(self.split_eligible)[0].cpu().tolist()
+        opened = self.opened.cpu()
         largest_leaf = int(leaf_counts.argmax())
         deepest = self.spatial_paths.shape[1]
-        deepest_nodes = active.new_tensor([int(node) for node in active
-                                           if depth[int(node)] == deepest])
+        deepest_nodes = torch.tensor([node for node in active if depth[node] == deepest],
+                                     dtype=torch.long)
         tree_health = dict(
             scope='surviving GS before this frame birth; counts do not measure image correctness',
             point_weighted_depth=sum(depth[int(node)] * int(counts[node]) for node in active) / len(self.owner),
@@ -1794,7 +1808,7 @@ class SpatialGatedMotion(MotionBase):
             region_motion=self.config.spatial_gate.region_motion,
             stored_region_nodes=int(self._stored_region_support().sum()),
             candidate_nodes=len(self.parents), active_regions=len(active),
-            open_gates=int(self.opened[1:].sum()), eligible_gates=int(self.split_eligible.sum()),
+            open_gates=int(opened[1:].sum()), eligible_gates=len(gate_nodes),
             gate_start_step=self.config.spatial_gate.start_step,
             gate_learning_start_step=self.config.spatial_gate.gate_start_step,
             relative_motion_units='extent/radians; expected full-motion candidate residual',
@@ -1804,11 +1818,11 @@ class SpatialGatedMotion(MotionBase):
             tree_health=tree_health,
             regions=[dict(node=int(node), depth=depth[int(node)], count=int(counts[node]),
                 observed_count=int(observed_counts[node]), local_residual_count=int(residual_counts[node]),
-                local_residual_fraction=float(residual_counts[node] / counts[node]),
-                translation=self.region_translation[node].tolist(), rotation=self.region_rotation[node].tolist())
+                local_residual_fraction=float(residual_fractions[node]),
+                translation=translations[node], rotation=rotations[node])
                 for node in active],
-            gates=[dict(node=int(node), probability=float(self._gate_probabilities()[node]),
-                        opened=bool(self.opened[node])) for node in torch.where(self.split_eligible)[0]])
+            gates=[dict(node=node, probability=gate_probabilities[node],
+                        opened=bool(opened[node])) for node in gate_nodes])
 
     def export_motion(self, path, inherit_birth_rotation=False):
         from .rigid_tree_codec import encode_motion, decode_motion, motion_packet_info

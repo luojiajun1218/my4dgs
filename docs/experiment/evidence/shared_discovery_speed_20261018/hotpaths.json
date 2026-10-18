@@ -1,0 +1,122 @@
+{
+  "points": 206237,
+  "device": "NVIDIA GeForce RTX 3090 Ti",
+  "source_commit": "d2822232954feb307d399bfd776fdcbd58665d40",
+  "method": "same shared frame0 and unchanged active YAML; isolated hotpaths, not full training",
+  "checks": [
+    {
+      "step": 1,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 20,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 21,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 69,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 70,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 71,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 100,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 101,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    },
+    {
+      "step": 200,
+      "exact_pose": true,
+      "exact_loss": true,
+      "exact_gradients": true,
+      "exact_parameters": true,
+      "exact_gate_rng": true
+    }
+  ],
+  "exact_motion_bytes": true,
+  "exact_final_diagnostics": true,
+  "timings_ms": {
+    "stored_region_support": {
+      "before": 0.44463743348993984,
+      "after": 0.3716846336222564,
+      "speedup": 1.1962760718857843
+    },
+    "final_region_diagnostics": {
+      "before": 48.851616661219545,
+      "after": 4.871146006432052,
+      "speedup": 10.028772817877757
+    },
+    "shared_regularizer": {
+      "before": 3.7840748751477804,
+      "after": 2.610347374866251,
+      "speedup": 1.4496441782357297
+    },
+    "300_diagnostic_transfers": {
+      "before": 7.460619497578591,
+      "after": 1.5670442444388755,
+      "speedup": 4.760950128916161
+    }
+  },
+  "active_config": "config/fs_shared_discovery_depth4_full300.yaml",
+  "training_configuration_matches_verified_recipe": true,
+  "optimized_source_sha256": {
+    "pipeline/model/spatial_gated_motion.py": "27313c7a152572ada1e6024200509eabd95c7a87938f9cdc8d121f10d94896cb",
+    "pipeline/trainer.py": "c2233013d205fc9dbb6edd5a7f175230d6d3033e59b6e99ac84d1112d3c9dd9c"
+  },
+  "timing_scope": "Synchronized GPU wall time, median of three batches; same shared frame0 with 206237 GS. This is not a complete 300-frame training measurement.",
+  "numerical_check_scope": "Nine selected motion-stage updates using a synthetic 3D position loss plus unchanged production regularizers, exact gate RNG and parameters; equal motion bytes/diagnostic dictionaries at steps70 and200. Does not repeat photometric training or validate PSNR.",
+  "diagnostic_transfer_calls_per_frame": {
+    "before": 300,
+    "after": 30
+  },
+  "regression": {
+    "command": "python -m unittest discover -s tests -q",
+    "tests": 342,
+    "seconds": 48.057,
+    "passed": true
+  }
+}

@@ -13,7 +13,7 @@ from libgs.pipeline.loader import load_pipeline
 from libgs.utils.config import to_structured, to_yaml
 from libgs.utils.git import get_git_commit_hash
 
-#默认启动环境从base改成了ReConGS
+#默认启动环境从base改成了my4dgs
 flags.DEFINE_string("pipeline", "my4dgs", "pipeline name")
 flags.DEFINE_string("config", "", "config file path")
 flags.DEFINE_bool("print", False, "print config to stdout and exit")

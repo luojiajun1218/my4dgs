@@ -1,31 +1,25 @@
 output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
-experiment_name: fs_proximal_gs_rate002_full300_20261017
+experiment_name: fs_shared_discovery_depth4_verified_full300
 mode: train
 ckpt_path: /home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth
 trainer:
   cache_data_on_device: true
   num_init_steps: 15000
   saving_ckpt_steps:
+  - 20
   - 70
-  - 100
   - 200
+  - 300
   saving_ckpt_frames:
   - 1
-  - 9
   - 29
-  - 39
-  - 49
   - 59
-  - 69
-  - 79
   - 89
-  - 99
   - 119
   - 149
   - 179
-  - 199
-  - 229
-  - 249
+  - 209
+  - 239
   - 269
   - 299
   saving_ckpt_every_n_frames: 1000
@@ -58,6 +52,7 @@ module:
   motion_coarse_to_fine: false
   initial_opacity_threshold: 0.0075
   lambda_dssim: 0.2
+  photometric_loss: l1
   num_saving_images: 2
   lpips_required: true
   gaussian:
@@ -87,24 +82,33 @@ module:
     debug: false
   rigid_tree:
     region_count: 9
-    motion_steps: 100
+    motion_steps: 200
     birth_steps: 100
-    motion_xyz_step_extent: 3.0e-05
+    motion_xyz_step_extent: 6.0e-05
     motion_rotation_step_rad: 0.001
-    gs_xyz_step_extent: 3.0e-05
+    gs_xyz_step_extent: 6.0e-05
     gs_rotation_step_rad: 0.001
     region_translation_lr: 0.0003246817779541016
     region_rotation_lr: 0.0003
     gs_translation_lr: 0.0006493635559082032
     gs_rotation_lr: 0.0001
+    rotation_updates: false
+    amplitude_refit_steps: 100
     motion_lr_final_ratio: 0.2
     adam_betas:
     - 0.9
     - 0.999
     adam_eps: 1.0e-08
     rate_loss_weight: 0.002
+    differentiable_rate_support: true
+    sparse_rate_width_bins: 1.0
+    proximal_gs_regularization: true
+    defer_gs_sparsity_until_gate_freeze: false
+    rate_model: raw_blocks
+    codec_rate_interval: 20
+    codec_rate_initial_steps: 20
     rate_normalization: reference
-    relative_motion_loss_weight: 1.0
+    relative_motion_loss_weight: 0.5
     relative_motion_units: extent_radians
     rate_warmup_steps: 0
     rate_ramp_steps: 1
@@ -118,24 +122,31 @@ module:
       training_schedule: joint
       min_region_size: 2
       learning_rate: 0.15
-      initial_logit: -2.0
+      initial_logit: -0.2
       start_step: 0
-      gate_start_step: 0
+      gate_start_step: 20
       freeze_step: 70
       temperature: 3.0
       learn_region_motion: true
       image_fit_during_gate: true
-      joint_image_gradients: false
-      region_motion: absolute
-    differentiable_rate_support: true
-    sparse_rate_width_bins: 1.0
-    proximal_gs_regularization: true
-    rate_model: raw_blocks
-    codec_rate_interval: 20
-    codec_rate_initial_steps: 20
+      joint_image_gradients: true
+      region_motion: relative
+      candidate_refresh_interval: 0
+      temporal_logit_decay: 0.1
+      shared_image_recode: true
+      predictor_objective: residual_l1
+      hierarchical_private: false
+      private_full_motion: false
+      reparameterize_after_gate_freeze: false
+      image_relaxation: stochastic_ste
+      final_temperature: 0.3
+      proposal_image_weight: 0.0
+      predictor_image_weight: 0.0
+      shared_discovery: true
   birth:
     source_covariance_init: true
     replace_low_opacity: false
+    rotation_updates: false
     clone_sigma_scale: 2.0
     densification_stats_steps: 30
     densify_interval: 40
@@ -150,9 +161,26 @@ module:
     new_sh_step: 0.001
   opacity_update:
     enabled: true
-    step: 0.05
-    learning_rate: 0.05
+    step: 0.01
+    learning_rate: 0.01
     prune_threshold: 0.01
+    proximal_regularization: true
+    mode: alpha
+    l1_weight: 0.05
+    decay_with_motion: true
+    amplitude_refit_steps: 0
+    joint_with_birth: false
+  feature_dc_update:
+    enabled: true
+    step: 0.01
+    learning_rate: 0.0025
+    l1_weight: 0.005
+    decay_with_motion: true
+    joint_with_birth: true
+    sharing: spatial_region
+    gate_joint: true
+resume_prefix_dir: null
+resume_completed_prefix_frames: null
 gui_ip: 127.0.0.1
 gui_port: 6009
 gui_enabled: false

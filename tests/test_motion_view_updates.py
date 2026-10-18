@@ -1,8 +1,11 @@
 """Multi-view motion gradients, evidence, birth scores and resume ordering."""
 import importlib
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -63,6 +66,100 @@ class MotionViewUpdates(unittest.TestCase):
         self.assertEqual(loss, 2.)
         self.assertEqual(metrics, dict(image_loss=2., psnr=20., gs=7))
         self.assertIsInstance(metrics['image_loss'], float)
+
+    def test_deferred_metrics_preserve_gradients_and_materialized_values(self):
+        results = []
+        for deferred in (False, True):
+            parameter = torch.tensor(.5, requires_grad=True)
+            trainer = self.trainer(views=2)
+            optimizer = torch.optim.SGD([parameter], lr=.1)
+            targets = iter([1., 3., -2., 4., .25, .75])
+            def train(target, step, **kwargs):
+                loss = (parameter - target).square()
+                metrics = dict(image_loss=loss.detach(), psnr=loss.detach() * 2,
+                               gs=7, motion_image_factor=1)
+                if step == 2:
+                    metrics['optional_loss'] = loss.detach() * .1
+                return loss, metrics, {}
+            def update(_):
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+            trainer.module.training_step = train
+            trainer.module.post_training_step = update
+            rows = [TRAINER.Trainer._fit_views(trainer,
+                    SimpleNamespace(next=targets.__next__), step, defer_metrics=deferred)
+                    for step in range(1, 4)]
+            if deferred:
+                self.assertTrue(all(torch.is_tensor(loss) and not loss.requires_grad
+                                    for loss, _ in rows))
+                rows = TRAINER.Trainer._materialize_step_metrics(rows)
+            results.append((parameter.detach().clone(), rows))
+        torch.testing.assert_close(results[0][0], results[1][0], rtol=0, atol=0)
+        self.assertEqual(results[0][1], results[1][1])
+
+    def test_frame_batches_diagnostics_across_resume_tail_without_changing_reports(self):
+        class Progress:
+            def __init__(self, **kwargs):
+                self.n = kwargs['initial']
+                self.postfix = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def set_postfix(self, values, refresh=False):
+                self.postfix.append(values)
+            def update(self, count):
+                self.n += count
+
+        with TemporaryDirectory() as directory:
+            fetcher = object()
+            def fit(_, step, *, defer_metrics=False):
+                self.assertTrue(defer_metrics)
+                return (torch.tensor(step / 7),
+                        dict(image_loss=torch.tensor(step / 11),
+                             psnr=torch.tensor(step / 13), gs=7))
+            module = SimpleNamespace(pre_training_step=Mock(), motion_steps=20,
+                total_steps=23, frame_report={}, stage_image_metrics=[])
+            trainer = SimpleNamespace(current_frame=1, global_step=4, num_steps=23,
+                config=SimpleNamespace(stage_image_camera=None), module=module,
+                output_dir=Path(directory), _make_fetcher=Mock(return_value=fetcher),
+                _resume_fetcher=Mock(), _fit_views=fit,
+                _materialize_step_metrics=TRAINER.Trainer._materialize_step_metrics,
+                validation_loop=Mock(return_value={'test': {'psnr': 34.2}}))
+            trainer._checkpoint_due = lambda: trainer.global_step % 7 == 0 or trainer.global_step == 23
+            trainer.ckpt_save_path = Path(directory) / 'checkpoint.pth'
+            saved_steps = []
+            trainer.save_checkpoint = lambda: saved_steps.append(trainer.global_step)
+            progress = []
+            def make_progress(**kwargs):
+                bar = Progress(**kwargs)
+                progress.append(bar)
+                return bar
+            transfers = []
+            original_tolist = torch.Tensor.tolist
+            def tolist(tensor):
+                transfers.append(tensor.numel())
+                return original_tolist(tensor)
+            with patch.object(TRAINER, 'tqdm', make_progress), \
+                    patch.object(torch.Tensor, 'tolist', tolist):
+                report = TRAINER.Trainer.frame_training_loop(trainer)
+            # Resume at step 5: six rows to the first refresh, ten, then a
+            # three-step tail. Each row has the loss and two tensor metrics.
+            self.assertEqual(transfers, [18, 30, 9])
+            self.assertEqual(saved_steps, [7, 14, 21, 23])
+            self.assertEqual(report['train_loss_steps'], 19)
+            expected_loss, image_ema, psnr_ema = 0., 0., 0.
+            for step in range(5, 24):
+                expected_loss += float(torch.tensor(step / 7))
+                image_ema = .6 * image_ema + .4 * float(torch.tensor(step / 11))
+                psnr_ema = .6 * psnr_ema + .4 * float(torch.tensor(step / 13))
+            self.assertEqual(report['mean_train_loss'], expected_loss / 19)
+            self.assertEqual(report['final_train_metrics'],
+                dict(image_loss=float(torch.tensor(23 / 11)),
+                     psnr=float(torch.tensor(23 / 13)), gs=7))
+            self.assertEqual(progress[0].postfix[-1],
+                dict(image=f'{image_ema:.5f}', psnr=f'{psnr_ema:.2f}', gs=7))
+            self.assertEqual(json.loads((Path(directory) / 'frame_summary/frame_001.json').read_text()), report)
 
     def test_schedule_and_resume_replay_exact_view_consumption(self):
         trainer = self.trainer()

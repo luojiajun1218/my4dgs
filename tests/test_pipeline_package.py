@@ -61,7 +61,7 @@ assert 'pipeline.module' not in sys.modules
         outputs = []
         for flags in ([], ['--pipeline=ReCon-GS']):
             result = subprocess.run([sys.executable, 'main.py',
-                '--config=config/fs_spatial_gate_robustmedian_200_first30_20261016.yaml',
+                '--config=config/fs_shared_discovery_depth4_full300.yaml',
                 '--print', *flags], cwd=ROOT, check=True, capture_output=True, text=True)
             outputs.append(result.stdout)
         self.assertEqual(outputs[0], outputs[1])

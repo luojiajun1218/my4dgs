@@ -233,7 +233,7 @@ class Trainer(BaseTrainer):
         return (self.config.motion_views_per_step
                 if step <= self.module.motion_steps else 1)
 
-    def _fit_views(self, fetcher, step):
+    def _fit_views(self, fetcher, step, *, defer_metrics=False):
         """Average image objectives before one shared-motion optimizer update."""
         count = self._views_per_step(step)
         packages, metrics, loss_value = [], {}, 0.
@@ -256,12 +256,29 @@ class Trainer(BaseTrainer):
             packages.append(package)
         metrics['gs'] = values['gs']
         self.module.post_training_step(packages[0] if count == 1 else packages)
-        names = [name for name, value in metrics.items() if torch.is_tensor(value)]
-        # One device-to-host transfer instead of three scalar synchronizations
-        # for every view. JSON reports and callers still receive Python values.
-        scalars = torch.stack([loss_value] + [metrics[name] for name in names]).tolist()
-        metrics.update(zip(names, scalars[1:]))
-        return scalars[0], metrics
+        if defer_metrics:
+            return loss_value, metrics
+        return Trainer._materialize_step_metrics([(loss_value, metrics)])[0]
+
+    @staticmethod
+    def _materialize_step_metrics(rows):
+        """Transfer detached diagnostics together without changing Python sums."""
+        names, tensors = [], []
+        for loss, metrics in rows:
+            keys = [name for name, value in metrics.items() if torch.is_tensor(value)]
+            names.append(keys)
+            tensors.append(loss)
+            tensors.extend(metrics[name] for name in keys)
+        if not tensors:
+            return []
+        scalars = iter(torch.stack(tensors).tolist())
+        materialized = []
+        for (_, metrics), keys in zip(rows, names):
+            loss = next(scalars)
+            metrics = dict(metrics)
+            metrics.update((name, next(scalars)) for name in keys)
+            materialized.append((loss, metrics))
+        return materialized
 
     def training_loop(self):
         if self.is_first_frame:
@@ -297,6 +314,7 @@ class Trainer(BaseTrainer):
         train_loss = 0.0
         last_metrics = {}
         metrics_ema = dict(image=0., psnr=0.)
+        pending_metrics = []
         stage_view = None
 
         with tqdm(total=self.num_steps, initial=self.global_step,
@@ -306,15 +324,21 @@ class Trainer(BaseTrainer):
             for step in range(self.global_step + 1, self.num_steps + 1):
                 self.global_step = step
                 self.module.pre_training_step()
-                loss_value, metrics = self._fit_views(fetcher, step)
+                pending_metrics.append(self._fit_views(fetcher, step, defer_metrics=True))
                 if (self.config.stage_image_camera is not None and
                         step in (self.module.motion_steps, self.module.total_steps)):
                     stage_view = self._record_stage_image(step, stage_view)
-                train_loss += loss_value
-                last_metrics = metrics
-                for name, value in (('image', metrics['image_loss']), ('psnr', metrics['psnr'])):
-                    metrics_ema[name] = .6 * metrics_ema[name] + .4 * value
                 if step % 10 == 0 or step == self.num_steps:
+                    # The progress display only refreshes every ten steps. Keep
+                    # detached scalars on device until then instead of forcing
+                    # a CUDA synchronization after every optimizer update.
+                    for loss_value, metrics in self._materialize_step_metrics(pending_metrics):
+                        train_loss += loss_value
+                        last_metrics = metrics
+                        for name, value in (('image', metrics['image_loss']),
+                                            ('psnr', metrics['psnr'])):
+                            metrics_ema[name] = .6 * metrics_ema[name] + .4 * value
+                    pending_metrics.clear()
                     progress_bar.set_postfix(dict(image=f"{metrics_ema['image']:.5f}",
                         psnr=f"{metrics_ema['psnr']:.2f}", gs=metrics['gs']), refresh=False)
                     progress_bar.update(step - progress_bar.n)
