@@ -172,6 +172,16 @@ class SpatialGatedMotion(MotionBase):
     def stochastic_image_gates(self):
         return self.config.spatial_gate.image_relaxation == 'stochastic_ste'
 
+    @property
+    def binary_concrete_gates(self):
+        return self.stochastic_image_gates and self.shared_image_recode and self.joint_image_gradients
+
+    def _gate_estimator(self):
+        if self.binary_concrete_gates:
+            return 'recoded_binary_concrete_v2'
+        return ('stochastic_binary_path_v1' if self.stochastic_image_gates else
+                'soft_field_anneal_v1' if self.soft_image_gates else 'hard_value_soft_path_v1')
+
     def _initialize_gate_sampler(self):
         # An independent CPU generator keeps data sampling/birth RNG unchanged,
         # makes the state portable, and transfers only one small noise vector.
@@ -187,7 +197,9 @@ class SpatialGatedMotion(MotionBase):
             uniform = torch.rand(self.gate_logits.shape, generator=self._gate_rng).clamp_(1e-6, 1 - 1e-6)
             self._sampled_gate_noise = (uniform.log() - torch.log1p(-uniform)).to(self.gate_logits)
             self._sampled_gate_step = self.last_step
-        draw = self.gate_logits / self._gate_temperature() + self._sampled_gate_noise
+        draw = ((self.gate_logits + self._sampled_gate_noise) / self._gate_temperature()
+                if self.binary_concrete_gates else
+                self.gate_logits / self._gate_temperature() + self._sampled_gate_noise)
         soft = self._path_weights(draw.sigmoid() * self.split_eligible)
         hard = self._path_weights((draw.ge(0) & self.split_eligible).to(self.gate_logits))
         return hard.detach() + (soft - soft.detach())
@@ -610,6 +622,14 @@ class SpatialGatedMotion(MotionBase):
             for key in ('exp_avg', 'exp_avg_sq'):
                 if key in state:
                     state[key].mul_(support[:, None])
+            if (self.shared_image_recode and self.joint_image_gradients and
+                    not self._hard_gate_frozen and parameter.grad is not None and
+                    'exp_avg' in state):
+                # These predictors fit only actual main/auxiliary images.
+                # A sampled-out row must not move on its old velocity; retain
+                # its variance estimate for its next observed image gradient.
+                participating = parameter.grad.ne(0).any(-1)
+                state['exp_avg'].mul_(participating[:, None])
 
     def _gate_temperature(self):
         cfg = self.config.spatial_gate
@@ -619,7 +639,10 @@ class SpatialGatedMotion(MotionBase):
         return cfg.temperature * (cfg.final_temperature / cfg.temperature) ** progress
 
     def _gate_probabilities(self):
-        prob = torch.sigmoid(self.gate_logits / self._gate_temperature())
+        # Temperature controls the relaxed derivative, while the actual
+        # Bernoulli probability remains sigmoid(logit) in the recoding mode.
+        prob = torch.sigmoid(self.gate_logits if self.binary_concrete_gates else
+                             self.gate_logits / self._gate_temperature())
         return prob * self.split_eligible.to(prob)
 
     def _frontier_probabilities(self):
@@ -1460,8 +1483,12 @@ class SpatialGatedMotion(MotionBase):
         elif freeze and not was_frozen and (self.soft_image_gates or self.stochastic_image_gates):
             # The last 30 steps fit the actual discrete field. Its physical
             # Jacobian differs from the soft mixture used during exploration.
-            for parameter in (self.region_translation, self.region_rotation,
-                              self.gs_translation, self.gs_rotation):
+            parameters = (self.region_translation, self.region_rotation)
+            if not (self.shared_image_recode and self.joint_image_gradients):
+                parameters += (self.gs_translation, self.gs_rotation)
+            # Physical recoding uses the same GS image derivative before and
+            # after freezing; only the auxiliary predictor objective stops.
+            for parameter in parameters:
                 self.optimizer.state.pop(parameter, None)
             if self.config.spatial_gate.reparameterize_after_gate_freeze:
                 self._begin_fixed_gate_residuals()
@@ -1817,9 +1844,7 @@ class SpatialGatedMotion(MotionBase):
             packet['motion_schedule'] = ('joint_motion_v2' if self.joint_training
                                           else 'shared_field_zero_residual_v2')
             if self.joint_training:
-                packet['gate_estimator'] = ('stochastic_binary_path_v1' if self.stochastic_image_gates else
-                                            'soft_field_anneal_v1' if self.soft_image_gates else
-                                            'hard_value_soft_path_v1')
+                packet['gate_estimator'] = self._gate_estimator()
             if self.stochastic_image_gates:
                 packet['image_gate_sampler'] = dict(rng_state=self._gate_rng.get_state().clone(),
                     step=self._sampled_gate_step,
@@ -1856,8 +1881,7 @@ class SpatialGatedMotion(MotionBase):
             raise ValueError('Earlier zero-initialized motion checkpoints are replay-only')
         if packet is not None and packet.get('motion_schedule') != schedule:
             raise ValueError('Earlier point-first motion schedules are replay-only')
-        estimator = ('stochastic_binary_path_v1' if self.stochastic_image_gates else
-                     'soft_field_anneal_v1' if self.soft_image_gates else 'hard_value_soft_path_v1')
+        estimator = self._gate_estimator()
         if packet is not None and self.joint_training and packet.get('gate_estimator') != estimator:
             raise ValueError('Earlier joint gate estimators are replay-only')
         fitting = ('stochastic_proposals_fixed_residuals_v1'

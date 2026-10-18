@@ -134,6 +134,63 @@ class PredictorRecodeGateTests(unittest.TestCase):
             torch.testing.assert_close(getattr(model,name), getattr(restored,name), rtol=0, atol=0)
         self.assertEqual(self.packet(model), self.packet(restored))
 
+    def test_unsampled_predictor_does_not_drift_on_adam_velocity(self):
+        model = self.model()
+        p = model.region_translation
+        model.optimizer.state[p] = dict(step=torch.tensor(1.), exp_avg=torch.ones_like(p),
+                                        exp_avg_sq=torch.ones_like(p))
+        model._sampled_gate_step = 1
+        model._sampled_gate_noise = torch.full_like(model.gate_logits, -20.)
+        before = p.detach().clone()
+        target = model.base_xyz + .02
+        xyz, _ = model(1, training=True)
+        prediction, _ = model.predictor_pose()
+        loss = ((xyz - target).square().mean() + .25*(prediction - target).square().mean() +
+                model.regularization_loss(1))
+        loss.backward()
+        self.assertFalse(bool(p.grad[9:].ne(0).any()))
+        model.optimizer_step()
+        torch.testing.assert_close(p[9:], before[9:], rtol=0, atol=0)
+        self.assertFalse(bool(model.optimizer.state[p]['exp_avg'][9:].ne(0).any()))
+        self.assertTrue(bool(model.optimizer.state[p]['exp_avg_sq'][9:].gt(.5).all()))
+
+    def test_temperature_only_changes_relaxation_not_hard_sampling_probability(self):
+        model = self.model()
+        with torch.no_grad():
+            model.gate_logits.fill_(-1.)
+        samples, probabilities = [], []
+        for step in (1, 70):
+            model.last_step = step
+            model._sampled_gate_step = step
+            model._sampled_gate_noise = torch.full_like(model.gate_logits, .8)
+            samples.append(model._sampled_path_weights().detach())
+            probabilities.append(model._gate_probabilities().detach())
+        torch.testing.assert_close(samples[0], samples[1], rtol=0, atol=0)
+        torch.testing.assert_close(probabilities[0], probabilities[1], rtol=0, atol=0)
+        torch.testing.assert_close(probabilities[0][model.split_eligible],
+            torch.full_like(probabilities[0][model.split_eligible], torch.sigmoid(torch.tensor(-1.))),
+            rtol=0, atol=0)
+        packet = copy.deepcopy(model.capture())
+        self.assertEqual(packet['gate_estimator'], 'recoded_binary_concrete_v2')
+        packet['gate_estimator'] = 'stochastic_binary_path_v1'
+        with self.assertRaises(ValueError):
+            SpatialGatedMotion(copy.deepcopy(model.config)).restore(packet)
+
+    def test_freezing_keeps_photo_gs_moments_for_the_unchanged_image_derivative(self):
+        model = self.model()
+        state = dict(step=torch.tensor(7.), exp_avg=torch.full_like(model.gs_translation, .1),
+                     exp_avg_sq=torch.full_like(model.gs_translation, .3))
+        model.optimizer.state[model.gs_translation] = copy.deepcopy(state)
+        model.optimizer.state[model.region_translation] = dict(
+            step=torch.tensor(7.), exp_avg=torch.ones_like(model.region_translation),
+            exp_avg_sq=torch.ones_like(model.region_translation))
+        model.last_step = 70
+        model._select_frontier(freeze=True)
+        self.assertNotIn(model.region_translation, model.optimizer.state)
+        after = model.optimizer.state[model.gs_translation]
+        for name, value in state.items():
+            torch.testing.assert_close(after[name], value, rtol=0, atol=0)
+
 
 if __name__ == '__main__':
     unittest.main()
