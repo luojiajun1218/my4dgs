@@ -4,7 +4,9 @@
 
 最新完整序列为[所有旋转增量关闭＋直接α量化](experiment/20261017_all_rotation_off_full300.md)：**300帧34.054672dB，动态帧完整更新38.194930KB，纯渲染233.014FPS**。全部顺序解码、画质与实际文件大小独立核验通过；一次性参考帧另计。存储/FPS达标，PSNR尚未达到34.2，learnable gate的实际细分收益仍未体现。复现入口是`config/fs_alpha_norot_quant6_rate003_full300_20261017.yaml`，当前最完整的已验证候选，以新实验名从共享首帧开始。
 
-最新短测为[gate与区域颜色联合学习](experiment/20261018_joint_regional_dc_first3.md)：210–212帧33.898441dB/31.460667KB/243.000FPS，相比原提案监督配方小幅提高0.016340dB、增加0.129KB。306项检查与三帧独立回放通过；随后[共享首帧起步的早期核验](experiment/20261018_joint_regional_dc_native_first3.md)动态1–3帧为34.183821dB/30.664667KB，仍低于同范围基线34.352098dB。未直接进入30/300帧，下一步检查RMSE图像项与近端稀疏的配合。
+最新完成[RMSE像素项的早晚短窗口](experiment/20261018_joint_dc_rmse_short_windows.md)：210–212为34.015923dB/50.906667KB/243.344FPS，但原生1–3为34.158596dB/66.971667KB，早期画质和存储均未改善，未进入30/300帧。310项检查及两窗口独立回放通过。后续优先诊断和改进learnable gate的实际共享与细分收益。
+
+此前[gate与区域颜色联合学习](experiment/20261018_joint_regional_dc_first3.md)：210–212帧33.898441dB/31.460667KB/243.000FPS，相比原提案监督配方小幅提高0.016340dB、增加0.129KB。306项检查与三帧独立回放通过；随后[共享首帧起步的早期核验](experiment/20261018_joint_regional_dc_native_first3.md)动态1–3帧为34.183821dB/30.664667KB，仍低于同范围基线34.352098dB。未直接进入30/300帧。
 
 最新完成[个体提案图像监督的原生前30帧核验](experiment/20261018_proposal_image_native_first30.md)：34.171395dB/21.346828KB/216.483FPS，相比无辅助监督提高0.022999dB，仍低于同范围基线34.276890dB/38.130724KB。全部29个动态帧独立回放通过，未进入完整300帧。随后[区域候选拟合短测](experiment/20261018_proposal_region_fit_first3.md)和[首动态帧校准诊断](experiment/20261018_bootstrap1_early_first3.md)均未显示足够收益；[固定gate后允许所有GS例外](experiment/20261018_fixed_gate_all_residuals_first3.md)三帧33.896425dB/77.638KB，存储显著回归，原型撤回。下一步检查区域颜色与gate的联合学习时序。
 
