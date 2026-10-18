@@ -64,9 +64,8 @@ class RigidTreeConfig:
             raise ValueError('amplitude_refit_steps must leave motion-selection steps')
         if self.amplitude_refit_steps and (self.spatial_gate.training_schedule != 'joint' or
                 (self.spatial_gate.region_motion != 'absolute' and not (
-                    self.spatial_gate.private_full_motion and
                     self.spatial_gate.image_relaxation == 'stochastic_ste' and
-                    self.spatial_gate.reparameterize_after_gate_freeze)) or
+                    self.spatial_gate.joint_image_gradients)) or
                 self.motion_steps - self.amplitude_refit_steps < self.spatial_gate.freeze_step):
             raise ValueError('Motion amplitude refitting requires supported frozen joint gates')
         if not isinstance(self.differentiable_rate_support, bool):

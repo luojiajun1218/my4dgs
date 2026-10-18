@@ -55,6 +55,19 @@ class InheritedImageGateTests(unittest.TestCase):
         update.setup(reference)
         return update, reference
 
+    def shared_residual_model(self, refit=0):
+        template = self.model(refit=refit)
+        cfg = copy.deepcopy(template.config)
+        gate = cfg.spatial_gate
+        gate.hierarchical_private = gate.private_full_motion = False
+        gate.reparameterize_after_gate_freeze = False
+        gate.proposal_image_weight = 0.
+        cfg.validate()
+        model = SpatialGatedMotion(cfg)
+        model.setup(template.base_xyz, template.base_rotation, template.extent, frame_index=1)
+        model.observations.fill_(1)
+        return model
+
     def test_configuration_limits_relative_images_to_the_supported_residual_stage(self):
         cfg = self.model().config
         for name, value in (('reparameterize_after_gate_freeze', False),
@@ -211,6 +224,43 @@ class InheritedImageGateTests(unittest.TestCase):
         model.optimizer_step()
         decoded = decode_motion(self.packet(model), model.frame_reference_state)
         torch.testing.assert_close(decoded.xyz, model(82)[0], rtol=0, atol=0)
+
+    def test_shared_residual_gates_keep_gs_image_gradients_at_coarse_and_fine_levels(self):
+        model = self.shared_residual_model()
+        with torch.no_grad():
+            model.region_translation[1:9, 0] = .006
+            model.gs_translation[:, 0] = .004
+        model._sampled_gate_step = 1
+        model._sampled_gate_noise = torch.full_like(model.gate_logits, -20.)
+        coarse, _ = model(1, training=True)
+        self.sample_depth2(model)
+        fine, _ = model(1, training=True)
+        torch.testing.assert_close(coarse, fine, rtol=0, atol=0)
+        target = model.base_xyz.clone()
+        target[:, 0] += .02
+        point, parent = torch.autograd.grad((fine - target).square().mean(),
+            [model.gs_translation, model.region_translation])
+        self.assertTrue(bool(point[:, 0].ne(0).all()))
+        self.assertGreater(float(parent[1:9].abs().sum()), 0.)
+        self.assertGreater(float(parent[9:73].abs().sum()), 0.)
+        self.assertFalse(bool(model._private_support().any()))
+
+    def test_shared_residual_gate_freeze_and_refit_keep_coarse_exceptions(self):
+        model = self.shared_residual_model(refit=20)
+        with torch.no_grad():
+            model.region_translation[1:9, 0] = .006
+            model.gs_translation[0, 0] = .004
+        before = self.packet(model)
+        model.last_step = 70
+        model._select_frontier(freeze=True)
+        self.assertEqual(before, self.packet(model))
+        model(81, training=True)
+        self.assertTrue(bool(model._amplitude_refit_support['gs_translation'][0]))
+        decoded = decode_motion(self.packet(model), model.frame_reference_state)
+        torch.testing.assert_close(decoded.xyz, model(82)[0], rtol=0, atol=0)
+        restored = SpatialGatedMotion(copy.deepcopy(model.config))
+        restored.restore(copy.deepcopy(model.capture()))
+        self.assertEqual(self.packet(model), self.packet(restored))
 
 
 if __name__ == '__main__':

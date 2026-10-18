@@ -354,12 +354,13 @@ class SpatialGatedMotion(MotionBase):
 
     @torch.no_grad()
     def enable_relative_regions(self, *, inherit_unused=False):
-        """Explicit frame-boundary migration preserving every quantized predictor."""
+        """Preserve applied motion; optionally initialize unused children by inheritance."""
         if self.relative_regions:
             return
         image_refinement = (self.stochastic_image_gates and
-                            self.config.spatial_gate.private_full_motion and
-                            self.config.spatial_gate.reparameterize_after_gate_freeze)
+                            ((self.config.spatial_gate.private_full_motion and
+                              self.config.spatial_gate.reparameterize_after_gate_freeze) or
+                             not self.config.spatial_gate.hierarchical_private))
         if (not self.committed or not self.joint_training or self.shared_image_recode or
                 (self.joint_image_gradients and not image_refinement)):
             raise ValueError('Migrate a finalized joint full-motion checkpoint only')

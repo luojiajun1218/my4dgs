@@ -44,8 +44,10 @@ class SpatialGateConfig:
     def validate(self, motion_steps):
         relative_image = (self.region_motion == 'relative' and
                           self.image_relaxation == 'stochastic_ste' and
-                          self.hierarchical_private and self.private_full_motion and
-                          self.reparameterize_after_gate_freeze)
+                          ((self.hierarchical_private and self.private_full_motion and
+                            self.reparameterize_after_gate_freeze) or
+                           (not self.hierarchical_private and not self.private_full_motion and
+                            not self.reparameterize_after_gate_freeze)))
         if (isinstance(self.proposal_image_weight, bool) or
                 not math.isfinite(self.proposal_image_weight) or self.proposal_image_weight < 0):
             raise ValueError('Proposal image weight must be finite and nonnegative')
