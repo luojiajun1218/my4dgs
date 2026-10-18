@@ -1,0 +1,33 @@
+{
+  "method_commit": "7c462fb",
+  "frozen_python_files": 70,
+  "root_and_git_sources_exact": true,
+  "run": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de",
+  "source_frame0": "/home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth",
+  "source_frame0_sha256": "0715e9f0ce2eaea16633207fb9f1e87170162f9fb2974f8b9f1a20206da35c7d",
+  "native_prefix_chain": [
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_rd_20261017/gate_shared_discovery_warm20_native3/20261018T111713_eeca87",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_rd_20261017/gate_shared_discovery_warm20_native29/20261018T112403_d9c447",
+    "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de"
+  ],
+  "data_frames": 300,
+  "resolution_setting": -1,
+  "image_size": [
+    1600,
+    1199
+  ],
+  "shared_reference_bytes": 17720236,
+  "quality_scope": "Mean of original shared frame0 and independently decoded frames1..299, heldoutcam00.",
+  "update_scope": "All motion/alpha/feature/birth payloads plus frame manifest; one-time reference separate",
+  "fps_scope": "50 materialized renders after10 warmups; excludes decode/upload",
+  "validation": "340 full regression checks and12 targeted physical recoder checks passed on exact method source; new public config parsed with no unknown fields and exact module recipe equality.",
+  "important_baseline_tag": "important-full300-34.0547db-38.19kb-20261017",
+  "important_baseline_commit": "2efca1b056afdaf81397cb82396c6c535067a9c9",
+  "strict_dynamic_bytes_le50000": false,
+  "approx_storage_acceptance": "50.917187KB is1.834375% above50KB, within user instruction that approx50KB may be slightly relaxed. Strict50000B flag remains false; no payload omitted.",
+  "reproduction_config": "config/fs_shared_discovery_depth4_full300_20261018.yaml",
+  "reproduction_config_sha256": "cb8c9e07cd2dbf341e9ed6108f8d6bc6bb45ace8c98eb5b80913c2f0abe79b76",
+  "cli_validation": "Actual python main.py --config=... --print succeeded; no unknown fields, exact actual module recipe, original source0, no prefix or training experiment created.",
+  "release_tag": "verified-shared-gate-full300-34.2444db-50.92kb-20261018",
+  "archive_formatting": "Archived CSV normalizes CRLF toLF; all300 rows and fields identical to original. Resolved CLI YAML removes only extra EOF blank line. Historical output files unchanged."
+}

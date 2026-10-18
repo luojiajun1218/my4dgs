@@ -2,9 +2,13 @@
 
 **特别重要：[34.0547dB / 38.19KB / 233FPS 完整300帧基线](experiment/20261017_all_rotation_off_full300.md)。** 对应Git标签为 `important-full300-34.0547db-38.19kb-20261017`；配置、指标口径和保留规则见[重要版本索引](IMPORTANT_BASELINES.md)。
 
-最新完整序列为[所有旋转增量关闭＋直接α量化](experiment/20261017_all_rotation_off_full300.md)：**300帧34.054672dB，动态帧完整更新38.194930KB，纯渲染233.014FPS**。全部顺序解码、画质与实际文件大小独立核验通过；一次性参考帧另计。存储/FPS达标，PSNR尚未达到34.2，learnable gate的实际细分收益仍未体现。复现入口是`config/fs_alpha_norot_quant6_rate003_full300_20261017.yaml`，当前最完整的已验证候选，以新实验名从共享首帧开始。
+最新完整序列为[共享发现与learnable gate](experiment/20261018_shared_discovery_full300.md)：**300帧34.244412dB，动态完整更新50.917187KB，纯渲染226.931FPS**。全部299个动态帧独立顺序解码、画质与实际文件大小核验通过。PSNR和FPS达标；存储比50KB高1.83%，按允许略微放宽的“约50KB”口径报告，严格≤50KB标记仍为false。一次性参考另计。推荐入口为`config/fs_shared_discovery_depth4_full300_20261018.yaml`，原始共享首帧起步，使用新实验名。
 
-最新完成[共享发现机制的原生前30帧](experiment/20261018_shared_discovery_native_first30.md)：**0–29为34.302943dB/50.299931KB/212.362FPS**，区域平均127.10个、范围8–306。相比匹配重要基线，PSNR提高0.026052dB、更新增加12.169207KB。340项检查及29帧独立回放通过，正用同一冻结源码和配方续跑完整300帧；目标尚未完成，重要基线保留。方法与前三帧诊断见[共享发现机制](experiment/20261018_shared_discovery_first3.md)。
+本次283个动态帧有细分、16帧采用粗层，平均112.04个选中区域，约93.58%的旧GS无需平移残差（包括静止点）。第239帧同运动字段的层级包比重拟合8粗区域省52.88%；第269帧粗层选择与现有候选的训练图像目标一致。340项代码检查、结构化配置校验及完整解码通过；[轻量证据](experiment/evidence/shared_discovery_full300_20261018/)及[保留版本索引](IMPORTANT_BASELINES.md)记录口径与来源。
+
+此前完整基线为[所有旋转增量关闭＋直接α量化](experiment/20261017_all_rotation_off_full300.md)：300帧34.054672dB/38.194930KB/233.014FPS，仍作为“特别重要”版本保留。它存储更低，画质低于34.2dB；本次整体提高0.189741dB、动态更新增加12.722258KB，不能将所有变化独立归因于gate。
+
+此前[共享发现机制的原生前30帧](experiment/20261018_shared_discovery_native_first30.md)为34.302943dB/50.299931KB/212.362FPS；该前缀已按同一冻结源码及配方延长并完成上述300帧核验。方法与前三帧诊断见[共享发现机制](experiment/20261018_shared_discovery_first3.md)。
 
 此前[gate候选预热20步及图像诊断](experiment/20261018_gate_candidate_warmup_first3.md)：原生动态1–3为34.317298dB/112.852333KB/205.482FPS，仍停在8个粗区域，未进入30/300帧。338项检查及独立回放通过。只读诊断显示细层共享预测在训练和留出视角都更准。
 
