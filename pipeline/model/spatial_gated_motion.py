@@ -138,6 +138,10 @@ class SpatialGatedMotion(MotionBase):
     def all_region_proposals(self):
         return self.private_full_motion and not self.hierarchical_private
 
+    @property
+    def shared_discovery_active(self):
+        return self.config.spatial_gate.shared_discovery and not self._hard_gate_frozen
+
     def _private_nodes(self):
         return self.spatial_paths[:, -1] if self.hierarchical_private else self.owner
 
@@ -588,6 +592,11 @@ class SpatialGatedMotion(MotionBase):
             temporal_initialization='previous_full_increment' if proposal is not None else 'zero',
             initial_gates=(('all_eligible_open' if self.opened[1:].any() else 'all_eligible_closed')
                            if self.frame_index == 1 else 'previous_frame'))
+        if self.config.spatial_gate.shared_discovery:
+            # Start from inherited regional predictions. Point moments learn
+            # image sensitivity while zero learning rates hold E at zero.
+            self.gs_translation.zero_()
+            self.gs_rotation.zero_()
 
     def _make_optimizer(self):
         super()._make_optimizer()
@@ -777,7 +786,10 @@ class SpatialGatedMotion(MotionBase):
         if training:
             self.last_step = int(step)
             self._prepare_amplitude_refit(step)
-        if self.all_region_proposals or self.predictor_image_weight and self.shared_image_recode:
+        if training and self.shared_discovery_active:
+            translation, rotation_vector = self._stochastic_image_motion()
+            xyz = self.base_xyz + translation
+        elif self.all_region_proposals or self.predictor_image_weight and self.shared_image_recode:
             if training:
                 self._sampled_path_weights()
             shared_t, shared_r = self._shared_motion()
@@ -962,7 +974,11 @@ class SpatialGatedMotion(MotionBase):
                      self.spatial_paths.unbind(1))
         else:
             nodes = ()
-        if self.all_region_proposals:
+        if self.shared_discovery_active:
+            # E is constrained to zero for every cut in this phase. The gate
+            # therefore trades actual shared-field images against region cost.
+            nodes = ()
+        elif self.all_region_proposals:
             # A candidate changes the residual that is literally encoded,
             # while U remains the fitted total motion. Price every level.
             for level, node in enumerate(nodes):
@@ -1440,7 +1456,7 @@ class SpatialGatedMotion(MotionBase):
         if self.shared_image_recode and self.joint_image_gradients:
             # Repartition the current fitted motion. Regional parameter
             # updates above remain physical; only a gate change rebases E.
-            if bool(new_owner.ne(self.owner).any()):
+            if not self.shared_discovery_active and bool(new_owner.ne(self.owner).any()):
                 self._recode_owner(new_owner, preserve_remainder=True)
         elif self.joint_image_gradients:
             # The forward model and its STE must agree: a hard split changes
@@ -1476,6 +1492,16 @@ class SpatialGatedMotion(MotionBase):
         edits = [dict(kind='spatial_gate', node=int(node), opened=bool(new_open[node]),
                       step=self.last_step) for node in gate_changes]
         self.opened, self.owner = new_open, new_owner
+        if freeze and not was_frozen and self.config.spatial_gate.shared_discovery:
+            factor = self._motion_lr_factor(self.last_step)
+            self.optimizer.param_groups[2]['lr'] = self.config.gs_translation_lr * factor
+            self.optimizer.param_groups[3]['lr'] = self.config.gs_rotation_lr * factor
+            for parameter in (self.gs_translation, self.gs_rotation):
+                state = self.optimizer.state.get(parameter, {})
+                if 'exp_avg' in state:
+                    # Keep sensitivity accumulated from real images, and
+                    # fit a fresh direction under the newly fixed predictor.
+                    state['exp_avg'].zero_()
         if freeze and not was_frozen and self.hierarchical_private:
             self._finalize_private_support()
             if self.config.spatial_gate.reparameterize_after_gate_freeze:
@@ -1528,7 +1554,7 @@ class SpatialGatedMotion(MotionBase):
         a value towards zero and cannot jump across zero due to the penalty.
         The periodic block-L0 step uses the same photometric-only moments.
         """
-        if (not self.gs_sparsity_active or not self.proximal_gs_regularization or
+        if (self.shared_discovery_active or not self.gs_sparsity_active or not self.proximal_gs_regularization or
                 not self.config.relative_motion_loss_weight):
             return
         ramp = min(max((self.last_step - self.config.rate_warmup_steps) /
@@ -1563,9 +1589,9 @@ class SpatialGatedMotion(MotionBase):
         if self.last_step <= cfg.gate_start_step or self._hard_gate_frozen:
             self.gate_logits.grad = None
         factor = self._motion_lr_factor(self.last_step)
-        for group, lr in zip(self.optimizer.param_groups, (self.config.region_translation_lr,
-                self.config.region_rotation_lr, self.config.gs_translation_lr, self.config.gs_rotation_lr)):
-            group['lr'] = lr * factor
+        for index, (group, lr) in enumerate(zip(self.optimizer.param_groups, (self.config.region_translation_lr,
+                self.config.region_rotation_lr, self.config.gs_translation_lr, self.config.gs_rotation_lr))):
+            group['lr'] = 0. if self.shared_discovery_active and index >= 2 else lr * factor
         previous_shared = None
         if self.joint_training and not self.joint_image_gradients and not self.regional_image_updates:
             previous_shared = tuple(value.detach() for value in self._shared_motion())
@@ -1642,7 +1668,7 @@ class SpatialGatedMotion(MotionBase):
 
     @torch.no_grad()
     def _proximal_gs_blocks(self):
-        if not self.gs_sparsity_active:
+        if self.shared_discovery_active or not self.gs_sparsity_active:
             return
         weight = self._private_probabilities().detach() if self.hierarchical_private else None
         origins = self._private_origins() if self.private_full_motion else None

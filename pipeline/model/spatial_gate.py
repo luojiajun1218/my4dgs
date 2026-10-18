@@ -41,6 +41,7 @@ class SpatialGateConfig:
     final_temperature: float = .3
     proposal_image_weight: float = 0.
     predictor_image_weight: float = 0.
+    shared_discovery: bool = False
 
     def validate(self, motion_steps):
         relative_image = (self.region_motion == 'relative' and
@@ -55,6 +56,8 @@ class SpatialGateConfig:
         global_proposals = self.private_full_motion and not self.hierarchical_private
         image_recode = (self.shared_image_recode and self.joint_image_gradients and
                         not self.hierarchical_private and not self.private_full_motion)
+        if not isinstance(self.shared_discovery, bool) or (self.shared_discovery and not image_recode):
+            raise ValueError('Shared discovery requires physical predictor recoding without private permission')
         if self.predictor_image_weight and (not (global_proposals or image_recode) or
                 self.image_relaxation != 'stochastic_ste' or
                 (global_proposals and not self.reparameterize_after_gate_freeze) or self.proposal_image_weight):
@@ -107,7 +110,7 @@ class SpatialGateConfig:
         if self.shared_image_recode and not image_recode and (self.training_schedule != 'joint' or
                 not self.learn_region_motion or self.joint_image_gradients or self.region_motion != 'absolute'):
             raise ValueError('Shared image recoding requires absolute joint region learning')
-        if image_recode and not self.predictor_image_weight:
+        if image_recode and not self.predictor_image_weight and not self.shared_discovery:
             raise ValueError('Physical gate recoding requires direct predictor image supervision')
         if (isinstance(self.candidate_refresh_interval, bool) or
                 not isinstance(self.candidate_refresh_interval, int) or self.candidate_refresh_interval < 0):

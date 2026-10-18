@@ -216,6 +216,52 @@ class PredictorRecodeGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 invalid.validate()
 
+    def test_shared_discovery_keeps_zero_residuals_and_warms_photo_moments(self):
+        model = self.model()
+        model.config.spatial_gate.shared_discovery = True
+        model.config.spatial_gate.predictor_image_weight = 0.
+        model.config.validate()
+        target = model.base_xyz + .02
+        for step in (1, 69, 70):
+            xyz, _ = model(step, training=True)
+            loss = (xyz - target).square().mean() + model.regularization_loss(step)
+            loss.backward()
+            model.optimizer_step()
+            self.assertFalse(bool(model.gs_translation.ne(0).any()))
+            self.assertIn('exp_avg_sq', model.optimizer.state[model.gs_translation])
+        self.assertTrue(model._hard_gate_frozen)
+        state_step = model.optimizer.state[model.gs_translation]['step'].clone()
+        self.assertFalse(bool(model.optimizer.state[model.gs_translation]['exp_avg'].ne(0).any()))
+        self.assertTrue(bool(model.optimizer.state[model.gs_translation]['exp_avg_sq'].gt(0).any()))
+        self.assertGreater(model.optimizer.param_groups[2]['lr'], 0.)
+        # Isolate release from the separate sparsity penalty, which may
+        # legitimately keep this simple constant-motion residual at zero.
+        model.config.relative_motion_loss_weight = 0.
+        xyz, _ = model(71, training=True)
+        ((xyz - target).square().mean() + model.regularization_loss(71)).backward()
+        model.optimizer_step()
+        self.assertTrue(bool(model.gs_translation.ne(0).any()))
+        self.assertEqual(model.optimizer.state[model.gs_translation]['step'], state_step + 1)
+        decoded = decode_motion(self.packet(model), model.frame_reference_state)
+        torch.testing.assert_close(decoded.xyz, model(72)[0], rtol=0, atol=0)
+
+    def test_shared_discovery_gate_changes_the_shared_field_without_creating_gs_updates(self):
+        model = self.model()
+        model.config.spatial_gate.shared_discovery = True
+        model.config.spatial_gate.predictor_image_weight = 0.
+        model.config.validate()
+        with torch.no_grad():
+            model.region_translation[9:73, 0] = .02
+            model.gate_logits[1:9] = 2.
+        before = model._full_motion_symbols()[0].clone()
+        model._select_frontier(freeze=False)
+        self.assertTrue(bool(model._full_motion_symbols()[0].ne(before).any()))
+        self.assertFalse(bool(model.gs_translation.ne(0).any()))
+        terms = model.loss_terms(10, False)
+        self.assertEqual(float(terms['relative_motion_loss']), 0.)
+        decoded = decode_motion(self.packet(model), model.frame_reference_state)
+        torch.testing.assert_close(decoded.xyz, model(11)[0], rtol=0, atol=0)
+
 
 if __name__ == '__main__':
     unittest.main()
