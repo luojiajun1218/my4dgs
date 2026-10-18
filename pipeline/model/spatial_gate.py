@@ -40,14 +40,23 @@ class SpatialGateConfig:
     image_relaxation: str = 'hard_ste'
     final_temperature: float = .3
     proposal_image_weight: float = 0.
+    predictor_image_weight: float = 0.
 
     def validate(self, motion_steps):
         relative_image = (self.region_motion == 'relative' and
                           self.image_relaxation == 'stochastic_ste' and
-                          ((self.hierarchical_private and self.private_full_motion and
+                          ((self.private_full_motion and
                             self.reparameterize_after_gate_freeze) or
                            (not self.hierarchical_private and not self.private_full_motion and
                             not self.reparameterize_after_gate_freeze)))
+        if (isinstance(self.predictor_image_weight, bool) or
+                not math.isfinite(self.predictor_image_weight) or self.predictor_image_weight < 0):
+            raise ValueError('Predictor image weight must be finite and nonnegative')
+        global_proposals = self.private_full_motion and not self.hierarchical_private
+        if self.predictor_image_weight and (not global_proposals or
+                self.image_relaxation != 'stochastic_ste' or
+                not self.reparameterize_after_gate_freeze or self.proposal_image_weight):
+            raise ValueError('Predictor images require all-region stochastic proposals and fixed-gate residuals')
         if (isinstance(self.proposal_image_weight, bool) or
                 not math.isfinite(self.proposal_image_weight) or self.proposal_image_weight < 0):
             raise ValueError('Proposal image weight must be finite and nonnegative')
@@ -61,8 +70,9 @@ class SpatialGateConfig:
             raise ValueError('Post-gate residual coordinates require stochastic full-motion proposals')
         if not isinstance(self.private_full_motion, bool):
             raise ValueError('private_full_motion must be boolean')
-        if self.private_full_motion and (not self.hierarchical_private or self.candidate_refresh_interval):
-            raise ValueError('Private full-motion proposals require hierarchical permission without candidate refresh')
+        if self.private_full_motion and (self.candidate_refresh_interval or
+                (not self.hierarchical_private and not self.predictor_image_weight)):
+            raise ValueError('Full-motion proposals require hierarchical permission or predictor image fitting')
         if self.image_relaxation not in ('hard_ste', 'soft_anneal', 'stochastic_ste'):
             raise ValueError('Unknown image gate relaxation')
         if (self.image_relaxation == 'stochastic_ste' and self.hierarchical_private and

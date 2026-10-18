@@ -32,7 +32,7 @@ class StochasticSharedResidualTests(unittest.TestCase):
         with torch.no_grad():
             model.gs_translation[:, 0] = .004
         self.assertEqual(len(model.owner.unique()), 8)
-        self.assertFalse(bool(model._private_support().any()))
+        self.assertTrue(bool(model._private_support().all()))
         xyz, _ = model(1, training=True)
         target = model.base_xyz.clone()
         target[:, 0] += .02

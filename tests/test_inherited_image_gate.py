@@ -243,7 +243,7 @@ class InheritedImageGateTests(unittest.TestCase):
         self.assertTrue(bool(point[:, 0].ne(0).all()))
         self.assertGreater(float(parent[1:9].abs().sum()), 0.)
         self.assertGreater(float(parent[9:73].abs().sum()), 0.)
-        self.assertFalse(bool(model._private_support().any()))
+        self.assertTrue(bool(model._private_support().all()))
 
     def test_shared_residual_gate_freeze_and_refit_keep_coarse_exceptions(self):
         model = self.shared_residual_model(refit=20)

@@ -484,18 +484,22 @@ class Module(BaseModule):
             self.datamodule.cameras_extent, reference,
             source_rows=self.births.source_rows)
 
-    def forward(self, viewpoint, training=False, old_only=False, proposal_only=False):
-        if proposal_only and (not training or not self.frame_prepared or self.motion_committed):
-            raise ValueError('Proposal render is only available during motion training')
+    def forward(self, viewpoint, training=False, old_only=False, proposal_only=False,
+                predictor_only=False):
+        auxiliary = proposal_only or predictor_only
+        if (proposal_only and predictor_only) or (auxiliary and (
+                not training or not self.frame_prepared or self.motion_committed)):
+            raise ValueError('Auxiliary render is only available during motion training')
         old_model = self.renderer.gaussians
         effective = getattr(self.config, 'effective_motion_observations', False)
         previous_collection = getattr(self.renderer, 'collect_contributions', False)
         if effective:
-            self.renderer.collect_contributions = bool(training and not proposal_only and self.frame_prepared and
+            self.renderer.collect_contributions = bool(training and not auxiliary and self.frame_prepared and
                                                        not self.motion_committed)
         try:
             if self.frame_prepared and not self.motion_committed:
-                xyz, rotation = (self.motion.proposal_pose() if proposal_only else
+                xyz, rotation = (self.motion.predictor_pose() if predictor_only else
+                                 self.motion.proposal_pose() if proposal_only else
                                  self.motion(self.trainer.global_step, training=training))
                 self.gaussians.rigid_xyz = xyz
                 self.gaussians.rigid_rotation = rotation
@@ -504,9 +508,9 @@ class Module(BaseModule):
                         self.gaussians.rigid_alpha = self.opacity_update.alphas()
                     else:
                         self.gaussians.rigid_opacity = self.opacity_update()
-                    if proposal_only:
-                        # The auxiliary image fits proposals, not a second
-                        # opacity solution or the region/gate parameters.
+                    if auxiliary:
+                        # Fit the auxiliary motion field with the main
+                        # appearance solution, without fitting it twice.
                         for field in ('rigid_alpha', 'rigid_opacity'):
                             value = getattr(self.gaussians, field, None)
                             if value is not None:
@@ -525,7 +529,7 @@ class Module(BaseModule):
                     self.feature_dc_update(training=training)
                     if getattr(self.config.feature_dc_update, 'gate_joint', False) else
                     self.feature_dc_update())
-                if proposal_only:
+                if auxiliary:
                     self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
             if self.motion_committed and not self.frame_finalized and not old_only:
                 birth_view = self.make_birth_view()
@@ -567,6 +571,14 @@ class Module(BaseModule):
                                                     self.config.lambda_dssim, factor, metric=metric)
             loss = loss + proposal_weight * proposal_loss
             metrics['proposal_image_loss'] = proposal_loss.detach()
+        predictor_weight = (getattr(self.motion, 'predictor_image_weight', 0.)
+                            if not self.motion_committed else 0.)
+        if predictor_weight:
+            prediction = self.forward(viewpoint, training=True, predictor_only=True)['render']
+            prediction_loss = motion_photometric_loss(prediction, viewpoint.image,
+                self.config.lambda_dssim, factor, metric=metric)
+            loss = loss + predictor_weight * prediction_loss
+            metrics['predictor_image_loss'] = prediction_loss.detach()
         if not self.motion_committed and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
         if (regularization_weight and getattr(self, 'opacity_update', None) is not None and
