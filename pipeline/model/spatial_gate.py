@@ -53,10 +53,12 @@ class SpatialGateConfig:
                 not math.isfinite(self.predictor_image_weight) or self.predictor_image_weight < 0):
             raise ValueError('Predictor image weight must be finite and nonnegative')
         global_proposals = self.private_full_motion and not self.hierarchical_private
-        if self.predictor_image_weight and (not global_proposals or
+        image_recode = (self.shared_image_recode and self.joint_image_gradients and
+                        not self.hierarchical_private and not self.private_full_motion)
+        if self.predictor_image_weight and (not (global_proposals or image_recode) or
                 self.image_relaxation != 'stochastic_ste' or
-                not self.reparameterize_after_gate_freeze or self.proposal_image_weight):
-            raise ValueError('Predictor images require all-region stochastic proposals and fixed-gate residuals')
+                (global_proposals and not self.reparameterize_after_gate_freeze) or self.proposal_image_weight):
+            raise ValueError('Predictor images require stochastic proposals or physical gate recoding')
         if (isinstance(self.proposal_image_weight, bool) or
                 not math.isfinite(self.proposal_image_weight) or self.proposal_image_weight < 0):
             raise ValueError('Proposal image weight must be finite and nonnegative')
@@ -102,9 +104,11 @@ class SpatialGateConfig:
             raise ValueError('Unknown spatial region motion representation')
         if not isinstance(self.shared_image_recode, bool):
             raise ValueError('shared_image_recode must be boolean')
-        if self.shared_image_recode and (self.training_schedule != 'joint' or
+        if self.shared_image_recode and not image_recode and (self.training_schedule != 'joint' or
                 not self.learn_region_motion or self.joint_image_gradients or self.region_motion != 'absolute'):
             raise ValueError('Shared image recoding requires absolute joint region learning')
+        if image_recode and not self.predictor_image_weight:
+            raise ValueError('Physical gate recoding requires direct predictor image supervision')
         if (isinstance(self.candidate_refresh_interval, bool) or
                 not isinstance(self.candidate_refresh_interval, int) or self.candidate_refresh_interval < 0):
             raise ValueError('candidate_refresh_interval must be a nonnegative integer')

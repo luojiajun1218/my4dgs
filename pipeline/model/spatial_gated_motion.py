@@ -737,7 +737,7 @@ class SpatialGatedMotion(MotionBase):
     @property
     def predictor_image_weight(self):
         return (self.config.spatial_gate.predictor_image_weight
-                if self.all_region_proposals and not self._hard_gate_frozen else 0.)
+                if (self.all_region_proposals or self.shared_image_recode) and not self._hard_gate_frozen else 0.)
 
     def predictor_pose(self):
         """Render one actual sampled shared predictor, without GS corrections."""
@@ -754,7 +754,7 @@ class SpatialGatedMotion(MotionBase):
         if training:
             self.last_step = int(step)
             self._prepare_amplitude_refit(step)
-        if self.all_region_proposals:
+        if self.all_region_proposals or self.predictor_image_weight and self.shared_image_recode:
             if training:
                 self._sampled_path_weights()
             shared_t, shared_r = self._shared_motion()
@@ -959,7 +959,7 @@ class SpatialGatedMotion(MotionBase):
             residual_bytes = _hard_value_soft_gradient(hard_residual_bytes, residual_bytes)
             relative = _hard_value_soft_gradient(hard_relative, relative)
             nodes = ()
-        elif self.joint_image_gradients:
+        elif self.joint_image_gradients and not self.shared_image_recode:
             # Point residuals are actual jointly optimized parameters, not
             # hypothetically rebased residuals for every alternative gate.
             # Their current transmitted rate is independent of a gate switch.
@@ -995,12 +995,12 @@ class SpatialGatedMotion(MotionBase):
             if self._hard_gate_frozen:
                 nodes = ()
         for level, node in enumerate(nodes):
-            if self.joint_image_gradients:
+            if self.joint_image_gradients and not self.shared_image_recode:
                 # Dense field STE fits closed candidates from actual image
                 # gradients. A second target copied from the current coarse
                 # motion would instead train away their alternative detail.
                 continue
-            if self.shared_image_recode and not self._hard_gate_frozen:
+            if self.shared_image_recode and not self.joint_image_gradients and not self._hard_gate_frozen:
                 # A closed candidate needs a target independent of its ancestors'
                 # gate probabilities. Balance its observed members per region.
                 mask = self.owner.ne(node) & self.observations.gt(0)
@@ -1085,7 +1085,7 @@ class SpatialGatedMotion(MotionBase):
             selected = self._stored_region_support().to(rt)
             region_bytes = _hard_value_soft_gradient((selected * regional_cost).sum(), region_bytes)
         soft_bytes = residual_bytes + region_bytes + self._metadata_bytes()
-        if discrete_joint and not self.joint_image_gradients:
+        if discrete_joint and (not self.joint_image_gradients or self.shared_image_recode):
             selected = self._stored_region_support().to(rt)
             hard_bytes = hard_residual_bytes + (selected * regional_cost).sum() + self._metadata_bytes()
             # Apply STE to the complete path objective, rather than each gate
@@ -1414,7 +1414,12 @@ class SpatialGatedMotion(MotionBase):
         new_open[0] = True
         new_owner = spatial_owner(self.spatial_paths, new_open)
         gate_changes = torch.where(new_open != self.opened)[0]
-        if self.joint_image_gradients:
+        if self.shared_image_recode and self.joint_image_gradients:
+            # Repartition the current fitted motion. Regional parameter
+            # updates above remain physical; only a gate change rebases E.
+            if bool(new_owner.ne(self.owner).any()):
+                self._recode_owner(new_owner, preserve_remainder=True)
+        elif self.joint_image_gradients:
             # The forward model and its STE must agree: a hard split changes
             # the selected shared field. Do not silently undo it in point
             # residuals; both fields continue fitting after the decision.
