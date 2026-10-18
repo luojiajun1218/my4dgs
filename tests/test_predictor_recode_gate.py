@@ -191,6 +191,31 @@ class PredictorRecodeGateTests(unittest.TestCase):
         for name, value in state.items():
             torch.testing.assert_close(after[name], value, rtol=0, atol=0)
 
+    def test_candidate_warmup_fits_motion_before_learning_logits(self):
+        model = self.model()
+        model.config.spatial_gate.gate_start_step = 20
+        model.config.validate()
+        gates = model.gate_logits.detach().clone()
+        initial = model.region_translation.detach().clone()
+        target = model.base_xyz + .04
+        for step in (1, 10, 20, 21):
+            xyz, _ = model(step, training=True)
+            prediction, _ = model.predictor_pose()
+            loss = ((xyz - target).square().mean() + .25*(prediction - target).square().mean() +
+                    model.regularization_loss(step))
+            loss.backward()
+            model.optimizer_step()
+            if step <= 20:
+                torch.testing.assert_close(model.gate_logits, gates, rtol=0, atol=0)
+                self.assertEqual(len(model.owner.unique()), 8)
+        self.assertTrue(bool(model.region_translation.ne(initial).any()))
+        self.assertTrue(bool(model.gate_logits.ne(gates).any()))
+        for step in (-1, 70):
+            invalid = copy.deepcopy(model.config)
+            invalid.spatial_gate.gate_start_step = step
+            with self.assertRaises(ValueError):
+                invalid.validate()
+
 
 if __name__ == '__main__':
     unittest.main()

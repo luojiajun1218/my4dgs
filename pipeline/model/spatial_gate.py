@@ -145,7 +145,8 @@ class SpatialGateConfig:
             raise ValueError('Invalid spatial gate optimization settings')
         if self.enabled:
             if self.training_schedule == 'joint':
-                if not (self.start_step == self.gate_start_step == 0 and
+                delayed_gate = image_recode and 0 <= self.gate_start_step < self.freeze_step
+                if not (self.start_step == 0 and (self.gate_start_step == 0 or delayed_gate) and
                         0 < self.freeze_step < motion_steps):
                     raise ValueError('Joint fitting starts immediately and must leave a fixed-gate phase')
             elif not 1 <= self.start_step <= self.gate_start_step < self.freeze_step < motion_steps:
