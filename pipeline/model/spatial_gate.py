@@ -42,6 +42,10 @@ class SpatialGateConfig:
     proposal_image_weight: float = 0.
 
     def validate(self, motion_steps):
+        relative_image = (self.region_motion == 'relative' and
+                          self.image_relaxation == 'stochastic_ste' and
+                          self.hierarchical_private and self.private_full_motion and
+                          self.reparameterize_after_gate_freeze)
         if (isinstance(self.proposal_image_weight, bool) or
                 not math.isfinite(self.proposal_image_weight) or self.proposal_image_weight < 0):
             raise ValueError('Proposal image weight must be finite and nonnegative')
@@ -64,8 +68,8 @@ class SpatialGateConfig:
             raise ValueError('Stochastic hierarchical capacity requires private full-motion proposals')
         if self.image_relaxation != 'hard_ste':
             if (self.training_schedule != 'joint' or not self.joint_image_gradients or
-                    self.region_motion != 'absolute'):
-                raise ValueError('Soft image gates require absolute joint image fitting')
+                    (self.region_motion != 'absolute' and not relative_image)):
+                raise ValueError('Image relaxation requires supported joint image coordinates')
             if (isinstance(self.final_temperature, bool) or
                     not math.isfinite(self.final_temperature) or
                     not 0 < self.final_temperature <= self.temperature):
@@ -73,8 +77,9 @@ class SpatialGateConfig:
         if not isinstance(self.hierarchical_private, bool):
             raise ValueError('hierarchical_private must be boolean')
         if self.hierarchical_private and (not self.joint_image_gradients or
-                self.training_schedule != 'joint' or self.region_motion != 'absolute'):
-            raise ValueError('Hierarchical private motion requires absolute joint image fitting')
+                self.training_schedule != 'joint' or
+                (self.region_motion != 'absolute' and not relative_image)):
+            raise ValueError('Hierarchical private motion requires supported joint image fitting')
         if self.predictor_objective not in ('residual_l1', 'proximal_rd'):
             raise ValueError('Unknown shared predictor objective')
         if self.predictor_objective == 'proximal_rd' and (
@@ -96,8 +101,9 @@ class SpatialGateConfig:
         if (isinstance(self.temporal_logit_decay, bool) or not math.isfinite(self.temporal_logit_decay) or
                 not 0 < self.temporal_logit_decay <= 1):
             raise ValueError('temporal_logit_decay must be in (0, 1]')
-        if self.region_motion == 'relative' and (self.training_schedule != 'joint' or self.joint_image_gradients):
-            raise ValueError('Relative regions currently use joint full-motion coordinates')
+        if self.region_motion == 'relative' and (self.training_schedule != 'joint' or
+                (self.joint_image_gradients and not relative_image)):
+            raise ValueError('Relative regions require coding coordinates or stochastic residual refinement')
         if not isinstance(self.enabled, bool):
             raise ValueError('spatial gate enabled must be boolean')
         if not isinstance(self.learn_region_motion, bool):

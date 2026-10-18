@@ -10,6 +10,7 @@ from torch import nn
 
 from .legacy_opacity_codec import HEADER, decode_opacity_delta
 from .sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate, _QuantizedLogits
+from .spatial_gate import spatial_accumulate
 
 
 MAGIC = b'SDC1'
@@ -99,6 +100,7 @@ class QuantizedFeatureDCUpdate(nn.Module):
         self.scalar = QuantizedOpacityUpdate(config.scalar_config())
         self._motion_ref = None if motion is None else weakref.ref(motion)
         self.reference = None
+        self._relative_active = False
 
     @property
     def regional(self):
@@ -124,8 +126,22 @@ class QuantizedFeatureDCUpdate(nn.Module):
                 raise ValueError('Regional DC reference must match float32 old GS attributes')
             self.reference = reference.detach().clone()
             self.scalar.setup(reference.new_zeros(len(motion.parents) * 3, 1))
+            self._relative_active = self.config.gate_joint and motion.relative_regions
         else:
             self.scalar.setup(reference.reshape(-1, 1))
+
+    def _regional_table(self, *, canonical=False):
+        if not self._relative_active:
+            return (self.scalar.canonical_logits() if canonical else self.scalar()).reshape(-1, 3)
+        local = self.scalar.delta.reshape(-1, 3)
+        if canonical:
+            symbols = self.scalar.symbols().detach().cpu().reshape(-1, 3).to(local.dtype)
+        else:
+            normalized = local / self.scalar.step
+            symbols = normalized.round().detach() + (normalized - normalized.detach())
+        symbols = torch.cat((torch.zeros_like(symbols[:1]), symbols[1:]))
+        parents = self._motion().parents.to(symbols.device)
+        return spatial_accumulate(symbols, parents) * self.scalar.step
 
     def forward(self, training=False):
         if self.regional:
@@ -134,10 +150,12 @@ class QuantizedFeatureDCUpdate(nn.Module):
             motion = self._motion()
             if self.config.gate_joint and training and not motion._hard_gate_frozen:
                 weights = motion._sampled_path_weights(sample_if_needed=False)
-                table = self.scalar().reshape(-1, 3)
+                table = self._regional_table()
                 delta = (weights[..., None] * table[motion.spatial_paths]).sum(1)[:, None]
             else:
-                delta = self.scalar.delta.reshape(-1, 1, 3)[motion.owner]
+                delta = (self._regional_table().reshape(-1, 1, 3)[motion.owner]
+                         if self._relative_active else
+                         self.scalar.delta.reshape(-1, 1, 3)[motion.owner])
             return _QuantizedLogits.apply(self.reference, delta, self.scalar.step)
         return self.scalar().reshape(-1, 1, 3)
 
@@ -146,7 +164,7 @@ class QuantizedFeatureDCUpdate(nn.Module):
             reference = self.reference.detach().cpu()
             if not self._ready():
                 return reference
-            delta = self.scalar.canonical_logits().reshape(-1, 1, 3)[self._motion().owner.cpu()]
+            delta = self._regional_table(canonical=True).reshape(-1, 1, 3)[self._motion().owner.cpu()]
             return _merge_regional_dc(reference, delta)
         return self.scalar.canonical_logits().reshape(-1, 1, 3)
 
@@ -174,7 +192,13 @@ class QuantizedFeatureDCUpdate(nn.Module):
         """
         motion = self._motion()
         delta = self.scalar.delta.detach().reshape(-1, 3)
-        channels = self.scalar.symbols().reshape(-1, 3).ne(0).sum(-1).to(delta)
+        if self._relative_active:
+            with torch.no_grad():
+                table = self._regional_table().detach()
+            channels = table.ne(0).sum(-1).to(delta)
+        else:
+            table = delta
+            channels = self.scalar.symbols().reshape(-1, 3).ne(0).sum(-1).to(delta)
         selected = self._selected_regions().to(delta)
         probabilities = (selected if motion._hard_gate_frozen else
                          motion._region_selection_probabilities())
@@ -182,7 +206,7 @@ class QuantizedFeatureDCUpdate(nn.Module):
         soft_rows = (probabilities * channels).sum()
         raw = 3 * (hard_rows + (soft_rows - soft_rows.detach()))
         raw = raw + hard_rows.gt(0).to(raw) * (HEADER.size + 36)
-        per_node_l1 = self.config.l1_weight * delta.abs().sum(-1) / delta.numel()
+        per_node_l1 = self.config.l1_weight * table.abs().sum(-1) / delta.numel()
         hard_l1 = (selected * per_node_l1).sum()
         soft_l1 = (probabilities * per_node_l1).sum()
         l1 = hard_l1 + (soft_l1 - soft_l1.detach())
@@ -204,12 +228,33 @@ class QuantizedFeatureDCUpdate(nn.Module):
         if not self._ready():
             self.scalar.optimizer.zero_grad(set_to_none=True)
             return
+        if self._relative_active and self._motion()._hard_gate_frozen:
+            # Finish the last gradient in its original local coordinates,
+            # then change coordinates without changing quantized colors.
+            self.scalar.optimizer_step(*args, **kwargs)
+            self._finalize_relative_regions()
+            self._mask_unused_regions()
+            return
         if self.config.gate_joint and self._motion()._hard_gate_frozen:
             self._mask_unused_regions()
         self.scalar.optimizer_step(*args, **kwargs)
 
+    @torch.no_grad()
+    def _finalize_relative_regions(self):
+        if not self._relative_active:
+            return
+        if not self._motion()._hard_gate_frozen:
+            raise ValueError('Freeze gate before materializing inherited regional colors')
+        table = self._regional_table(canonical=True)
+        if bool(torch.round(table / self.scalar.step).abs().gt(32767).any()):
+            raise ValueError('Accumulated regional color exceeds the scalar codec range')
+        self.scalar.delta.copy_(table.reshape_as(self.scalar.delta))
+        self.scalar.optimizer.state.pop(self.scalar.delta, None)
+        self._relative_active = False
+
     def commit(self, rows):
         if self.regional:
+            self._finalize_relative_regions()
             self.reference = self.reference[rows].clone()
             motion = self._motion()
             if len(self.reference) != len(motion.owner):
@@ -229,6 +274,8 @@ class QuantizedFeatureDCUpdate(nn.Module):
         packet = dict(config=asdict(self.config), scalar=self.scalar.capture())
         if self.regional:
             packet['regional_reference'] = self.reference
+            if self.config.gate_joint and self._motion().relative_regions:
+                packet['regional_relative_active'] = self._relative_active
         return packet
 
     def restore(self, packet, device):
@@ -238,6 +285,12 @@ class QuantizedFeatureDCUpdate(nn.Module):
         self.scalar.restore(packet['scalar'], device)
         if self.regional:
             motion = self._motion()
+            relative = packet.get('regional_relative_active', False)
+            configured = self.config.gate_joint and motion.relative_regions
+            if (not isinstance(relative, bool) or (relative and not configured) or
+                    (configured and 'regional_relative_active' not in packet)):
+                raise ValueError('Regional color checkpoint lacks its inherited coordinate state')
+            self._relative_active = relative
             reference = packet.get('regional_reference')
             if (not torch.is_tensor(reference) or reference.shape != (len(motion.owner), 1, 3) or
                     reference.dtype != torch.float32 or not bool(torch.isfinite(reference).all()) or
@@ -262,6 +315,7 @@ class QuantizedFeatureDCUpdate(nn.Module):
         if self.regional:
             if not self._motion()._hard_gate_frozen:
                 return None
+            self._finalize_relative_regions()
             self._mask_unused_regions()
         info = self.scalar.export(path, frame_index)
         if info is None:

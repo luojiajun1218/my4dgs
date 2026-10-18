@@ -334,6 +334,9 @@ class SpatialGatedMotion(MotionBase):
                                 (self.region_rotation, self.steps[3:])):
             symbols = (_integer(parameter, step).to(torch.int32) if hard else
                        _quantized(parameter / step, 1.))
+            # The codec's sentinel root is an identity, never an unpriced
+            # global parameter receiving every descendant's image gradient.
+            symbols = torch.cat((torch.zeros_like(symbols[:1]), symbols[1:]))
             total = spatial_accumulate(symbols, self.parents)
             result.append(total if hard else total * step)
         return tuple(result)
@@ -350,19 +353,30 @@ class SpatialGatedMotion(MotionBase):
         return active
 
     @torch.no_grad()
-    def enable_relative_regions(self):
+    def enable_relative_regions(self, *, inherit_unused=False):
         """Explicit frame-boundary migration preserving every quantized predictor."""
         if self.relative_regions:
             return
-        if not self.committed or not self.joint_training or self.joint_image_gradients or self.shared_image_recode:
+        image_refinement = (self.stochastic_image_gates and
+                            self.config.spatial_gate.private_full_motion and
+                            self.config.spatial_gate.reparameterize_after_gate_freeze)
+        if (not self.committed or not self.joint_training or self.shared_image_recode or
+                (self.joint_image_gradients and not image_refinement)):
             raise ValueError('Migrate a finalized joint full-motion checkpoint only')
         full = tuple(value.clone() for value in self._full_motion_symbols())
+        used = torch.bincount(self.owner, minlength=len(self.parents)).gt(0)
+        for _ in range(self.spatial_paths.shape[1]):
+            used[self.parents[used].clamp_min(0)] = True
         converted = []
         for parameter, step in ((self.region_translation, self.steps[:3]),
                                 (self.region_rotation, self.steps[3:])):
             absolute = _integer(parameter, step).to(torch.int32)
             local = absolute - absolute[self.parents]
             local[0] = 0  # The identity root has sentinel parent -1.
+            if inherit_unused:
+                # Unused children start at their parent's fitted field. A
+                # stale absolute zero must not become its negative correction.
+                local[~used] = 0
             if bool(local.abs().gt(32767).any()):
                 raise ValueError('Relative conversion exceeds the int16 correction range')
             converted.append(_retain_bin_remainder(local, parameter - parameter[self.parents], step))
@@ -982,7 +996,7 @@ class SpatialGatedMotion(MotionBase):
         # The probability a candidate is selected is the same for every point
         # it covers. Recover it by averaging their path weights, not by charging
         # a region once for each GS.
-        if self.relative_regions and not self._hard_gate_frozen:
+        if self.relative_regions and not self.joint_image_gradients and not self._hard_gate_frozen:
             # Closed candidates fit the required correction even when an
             # ancestor is hard closed. This loss cannot train the gate, GS,
             # or parent target; only the candidate's own correction changes.
@@ -999,7 +1013,7 @@ class SpatialGatedMotion(MotionBase):
         regional_weight = self._region_selection_probabilities(probabilities,
             include_ancestors=self.relative_regions)
         if self.joint_image_gradients and not self.soft_image_active and not self.private_full_motion:
-            selected = torch.bincount(self.owner, minlength=len(self.parents)).gt(0).to(rt)
+            selected = self._stored_region_support().to(rt)
             regional_weight = _hard_value_soft_gradient(selected, regional_weight)
         st = support(local_rt, steps[:3], continuous=self.region_translation)
         sr = support(local_rr, steps[3:], continuous=self.region_rotation)
@@ -1009,7 +1023,7 @@ class SpatialGatedMotion(MotionBase):
         region_bytes = (regional_weight * (regional_cost.detach() if self.shared_image_recode or
                         (gate_only_soft_cost and not self.joint_image_gradients) else regional_cost)).sum()
         if self.private_full_motion and not self.soft_image_active and not self._hard_gate_frozen:
-            selected = torch.bincount(self.owner, minlength=len(self.parents)).gt(0).to(rt)
+            selected = self._stored_region_support().to(rt)
             region_bytes = _hard_value_soft_gradient((selected * regional_cost).sum(), region_bytes)
         soft_bytes = residual_bytes + region_bytes + self._metadata_bytes()
         if discrete_joint and not self.joint_image_gradients:
