@@ -39,3 +39,15 @@ gate切换owner时，按同一总运动改写GS残差，保留其优化状态及
 ## 证据
 
 运行：`output/fs_goal_rd_20261017/gate_predictor_recode_refit100_native3/20261018T104102_d35ce6/`；配置：上级`gate_predictor_recode_refit100_norot.yaml`；汇总：`predictor_recode_gate_native3_verified.json`；各帧核验在run内`independent_verification.json`。特别重要完整基线标签保留。
+
+## 稳定性调整后的同配方短测
+
+随后在`f6e57fb`实现上述三项调整，使用`recoded_binary_concrete_v2`区别采样恢复状态。9项针对性检查及**337项完整检查通过，47.821秒**。新名称从原始共享首帧训练，没有改动旧run。
+
+动态1–3为**34.296232dB / 113.065667KB**，GS平移块35574、区域8、新增80，未优于前版，也未推广到30/300帧。含第0帧的0–3均值34.225003dB，独立纯渲染205.606FPS，训练41.04秒/动态帧。组件为运动102.944667KB、α7.639667KB、DC0.117667KB、新增1.706333KB、manifest0.657333KB。
+
+独立顺序解码差、缓存逐像素差均为0，首尾终态属性及来源/70文件源码哈希通过。第一帧step70确实保留GS照片梯度优化状态；但顶层开门概率仍由step1约0.45降至step35的0.023–0.031、step70的0.007–0.010。实现稳定性的修正没有自动带来层级收益，不能将其描述成成功的门控改进。
+
+下一步只改变既有`gate_start_step`：前20步保持初始logit并拟合运动/外观候选，21–70再学习gate，后续步数保持原配方。此时开关仍由学习决定，不强制打开；预热结束检查点用于检查候选质量。这是待完成实验，不属于本次结果。
+
+稳定性run：`output/fs_goal_rd_20261017/gate_predictor_recode_stable_native3/20261018T105010_d3988b/`；配置与上版相同；汇总：`predictor_recode_stable_native3_verified.json`。
