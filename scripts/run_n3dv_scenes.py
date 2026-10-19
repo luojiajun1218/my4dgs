@@ -318,7 +318,7 @@ def main(args):
             config['ckpt_path'] = str(args.frame0_root.resolve() / name / 'frame0.pth')
             config['trainer']['saving_ckpt_steps'] = [300]
             config['trainer']['saving_ckpt_frames'] = [1, *range(29, 300, 30)]
-            path = ROOT / 'config/n3dv' / (name + '_half_final480w_full300.yaml')
+            path = ROOT / 'config/n3dv' / (name + '_half_full300.yaml')
             if path.exists():
                 raise FileExistsError(path)
             path.write_text(yaml.safe_dump(config, sort_keys=False))
