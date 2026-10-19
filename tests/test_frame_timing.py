@@ -1,7 +1,7 @@
 """Frame wall-time accounting must exclude evaluation and checkpoint stalls."""
 import unittest
 
-from pipeline.timing import FrameTimer
+from pipeline.timing import FrameTimer, summarize_frame_timings
 
 
 class Clock:
@@ -69,6 +69,41 @@ class FrameTimingTests(unittest.TestCase):
                 raise ValueError('save failed')
         self.assertEqual(timer.current, 'motion')
         self.assertEqual(timer.finish()['checkpoint_seconds'], 3.)
+
+    def test_aggregation_separates_cold_first_frame_and_ignores_reference(self):
+        clock = Clock()
+        timer = FrameTimer(clock.synchronize, clock)
+        timer.switch('motion')
+        clock.pending = 10.
+        base = timer.finish()
+        rows = [dict(frame=0, timing=base), dict(frame=1, timing=base),
+                dict(frame=2, timing={**base, 'training_seconds': 2.})]
+        result = summarize_frame_timings(rows)
+        self.assertEqual(result['all_dynamic']['frame_count'], 2)
+        self.assertEqual(result['all_dynamic']['mean_seconds']['training_seconds'], 6.)
+        self.assertEqual(result['excluding_first_dynamic']['mean_seconds']['training_seconds'], 2.)
+
+    def test_aggregation_does_not_substitute_legacy_combined_time_for_training(self):
+        legacy = dict(frame=1, elapsed_seconds=99.)
+        result = summarize_frame_timings([legacy])['all_dynamic']
+        self.assertFalse(result['all_frames_measured'])
+        self.assertEqual(result['missing_frames'], [1])
+        self.assertIsNone(result['mean_seconds']['training_seconds'])
+        self.assertIsNone(result['measured_only_mean_seconds']['training_seconds'])
+
+    def test_partial_coverage_and_invalid_measurements_are_explicit(self):
+        clock = Clock()
+        timing = FrameTimer(clock.synchronize, clock).finish()
+        rows = [dict(frame=1, elapsed_seconds=20.), dict(frame=2, timing=timing)]
+        result = summarize_frame_timings(rows)['all_dynamic']
+        self.assertEqual(result['measured_frame_count'], 1)
+        self.assertIsNone(result['mean_seconds']['training_seconds'])
+        self.assertEqual(result['measured_only_mean_seconds']['training_seconds'], 0.)
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            summarize_frame_timings([rows[1], rows[1]])
+        rows[1]['timing']['training_seconds'] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'finite'):
+            summarize_frame_timings(rows)
 
 
 if __name__ == '__main__':

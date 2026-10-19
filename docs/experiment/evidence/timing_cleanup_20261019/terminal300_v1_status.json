@@ -1,0 +1,9 @@
+{
+  "status": "completed_prefix",
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_timing_efficiency_20261019/terminal300_v1/20261019T120635_ab21b6",
+  "last_frame": 3,
+  "planned_frames": 300,
+  "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_timing_efficiency_20261019/terminal300_v1/20261019T120635_ab21b6/rigid-ckpt-3-300.pth",
+  "training_recipe_unchanged": true,
+  "stop_scope": "Returned from original frame_training_loop after full validation and checkpoint save."
+}

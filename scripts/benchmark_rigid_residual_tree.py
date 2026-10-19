@@ -601,6 +601,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
     reference_bytes = reference.stat().st_size
     checks = [dict(after_frame=None, status=first_gpu_check)]
     rows = []
+    training_reports = []
     tolerance = dict(psnr=args.psnr_tolerance,
                      ssim=args.ssim_tolerance, l1=args.l1_tolerance)
     relative_reference = json.loads(
@@ -627,6 +628,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         if frame:
             summary = json.loads((run / 'frame_summary' /
                 f'frame_{frame:03d}.json').read_text())
+            training_reports.append(dict(frame=frame, timing=summary.get('timing')))
             expected = summary['evaluation']['test']
             storage = _actual_frame_storage(
                 stream, frame, manifest, summary, reference_bytes,
@@ -658,6 +660,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
             checks.append(dict(after_frame=frame,
                                status=check_gpu_exclusivity()))
         del view
+    from pipeline.timing import summarize_frame_timings
     groups = _sequence_groups(rows, args.segment_size)
     complete = num_frames == planned_frames
     result = dict(schema=('rigid_residual_tree_complete_sequence_benchmark_v1' if complete else
@@ -668,6 +671,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         image_shape=list(_configured_image_shape(config.data)), cache_enabled=cache_enabled,
         gpu_name=torch.cuda.get_device_name(device),
         storage=_summarize_sequence_storage(rows, reference_bytes),
+        training_timing=summarize_frame_timings(training_reports),
         timing_protocol=dict(warmups_per_frame=args.sequence_warmups,
             timed_full_renders_per_frame=args.sequence_renders,
             cuda_synchronize_before_and_after=True,

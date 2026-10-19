@@ -29,6 +29,7 @@ class RigidTreeConfig:
     gs_rotation_lr: float = 1e-3
     rotation_updates: bool = True
     amplitude_refit_steps: int = 0
+    terminal_motion_proximal: bool = False
     motion_lr_final_ratio: float = 1.0
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
@@ -73,6 +74,12 @@ class RigidTreeConfig:
             raise ValueError('differentiable_rate_support must be boolean')
         if not isinstance(self.proximal_gs_regularization, bool):
             raise ValueError('proximal_gs_regularization must be boolean')
+        if not isinstance(self.terminal_motion_proximal, bool):
+            raise ValueError('terminal_motion_proximal must be boolean')
+        if self.terminal_motion_proximal and (
+                not self.proximal_gs_regularization or not self.amplitude_refit_steps or
+                self.spatial_gate.training_schedule != 'joint'):
+            raise ValueError('Terminal motion proximal requires joint proximal amplitude refitting')
         if not isinstance(self.defer_gs_sparsity_until_gate_freeze, bool):
             raise ValueError('defer_gs_sparsity_until_gate_freeze must be boolean')
         if self.defer_gs_sparsity_until_gate_freeze and (

@@ -1,6 +1,43 @@
 """Partition synchronized frame wall time without synchronizing every step."""
 from contextlib import contextmanager
+import math
 import time
+
+
+def summarize_frame_timings(reports):
+    """Report measured phases without relabeling legacy combined elapsed time."""
+    dynamic = [row for row in reports if row['frame'] > 0]
+    ids = [row['frame'] for row in dynamic]
+    if len(set(ids)) != len(ids):
+        raise ValueError('Frame timing reports must have unique frame IDs')
+    fields = ('training_seconds', 'optimization_seconds', 'evaluation_seconds',
+              'checkpoint_seconds', 'bookkeeping_seconds', 'frame_wall_seconds')
+
+    def group(rows):
+        measured = []
+        missing = []
+        for row in rows:
+            timing = row.get('timing') or {}
+            if timing.get('version') != 1 or any(key not in timing for key in fields):
+                missing.append(row['frame'])
+                continue
+            values = {key: float(timing[key]) for key in fields}
+            if any(not math.isfinite(value) or value < 0 for value in values.values()):
+                raise ValueError('Measured frame times must be finite and nonnegative')
+            measured.append(values)
+        complete = bool(rows) and not missing
+        return dict(frame_count=len(rows), measured_frame_count=len(measured),
+            all_frames_measured=complete, missing_frames=sorted(missing),
+            mean_seconds={key: (sum(row[key] for row in measured) / len(measured)
+                                if complete else None) for key in fields},
+            measured_only_mean_seconds={key: (sum(row[key] for row in measured) / len(measured)
+                                              if measured else None) for key in fields})
+
+    return dict(all_dynamic=group(dynamic),
+        excluding_first_dynamic=group([row for row in dynamic if row['frame'] > 1]),
+        scope='Measured synchronized phase times only; no fallback to legacy '
+              'elapsed_seconds, which combines training and evaluation. '
+              'Excluding-first group omits frame 1, which may include cold startup.')
 
 
 class FrameTimer:

@@ -1,0 +1,67 @@
+{
+  "scope": "Verified frames 0\u201329 of a planned 300-frame run. No full-300 candidate claim.",
+  "candidate_run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_timing_efficiency_20261019/terminal300_prefix30/20261019T121036_d1b10a",
+  "source_snapshot": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_timing_efficiency_20261019/source_terminal300_v1",
+  "baseline_run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563",
+  "psnr_baseline": 34.024044799804685,
+  "psnr_candidate": 34.04545021057129,
+  "complete_kb_baseline": 51.17641379310345,
+  "complete_kb_candidate": 50.324724137931035,
+  "pure_render_fps": 271.2431925795556,
+  "mean_selected_regions": 120.65517241379311,
+  "removed_translation_blocks": 998,
+  "training_timing": {
+    "all_dynamic": {
+      "frame_count": 29,
+      "measured_frame_count": 29,
+      "all_frames_measured": true,
+      "missing_frames": [],
+      "mean_seconds": {
+        "training_seconds": 28.202442975689713,
+        "optimization_seconds": 28.10980511758605,
+        "evaluation_seconds": 2.6165389566921133,
+        "checkpoint_seconds": 0.028478547724983493,
+        "bookkeeping_seconds": 0.00011458851653954079,
+        "frame_wall_seconds": 30.84757506862335
+      },
+      "measured_only_mean_seconds": {
+        "training_seconds": 28.202442975689713,
+        "optimization_seconds": 28.10980511758605,
+        "evaluation_seconds": 2.6165389566921133,
+        "checkpoint_seconds": 0.028478547724983493,
+        "bookkeeping_seconds": 0.00011458851653954079,
+        "frame_wall_seconds": 30.84757506862335
+      }
+    },
+    "excluding_first_dynamic": {
+      "frame_count": 28,
+      "measured_frame_count": 28,
+      "all_frames_measured": true,
+      "missing_frames": [],
+      "mean_seconds": {
+        "training_seconds": 26.288238417429966,
+        "optimization_seconds": 26.19457356496527,
+        "evaluation_seconds": 2.614338891787546,
+        "checkpoint_seconds": 0.017699967714309293,
+        "bookkeeping_seconds": 0.00011326896388449573,
+        "frame_wall_seconds": 28.920390545895707
+      },
+      "measured_only_mean_seconds": {
+        "training_seconds": 26.288238417429966,
+        "optimization_seconds": 26.19457356496527,
+        "evaluation_seconds": 2.614338891787546,
+        "checkpoint_seconds": 0.017699967714309293,
+        "bookkeeping_seconds": 0.00011326896388449573,
+        "frame_wall_seconds": 28.920390545895707
+      }
+    },
+    "scope": "Measured synchronized phase times only; no fallback to legacy elapsed_seconds, which combines training and evaluation. Excluding-first group omits frame 1, which may include cold startup."
+  },
+  "max_saved_quality_difference": {
+    "psnr": 0.0,
+    "ssim": 0.0,
+    "l1": 0.0
+  },
+  "cache_max_pixel_difference": 0.0,
+  "provenance": false
+}

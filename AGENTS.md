@@ -17,6 +17,10 @@ flame 半分辨率连续 300 帧已于 2026-10-19 完成：配置 `config/n3dv/f
 
 2026-10-19 作者指定的 **480 W 最终正式复跑已完成并核验**：标准 1345×1008、300 帧、cam00，**34.211170 dB / 51.027672 KB/动态完整更新 / 292.205 纯渲染 FPS**，训练与评估 29.4586 秒/动态帧。今后 flame_steak 最终指标以此次为准，不使用此前 350 W 的结果替代。固定原字节代价配方，加载本轮此前新训的 15000 步半分辨率首帧，从第 0 帧参考开始，未继承动态前缀、未改训练参数。推荐配置 `config/n3dv/flame_steak_half_final480w.yaml`；输出 `output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563`；逐帧统计在 `output/n3dv_flame_steak_half_final480w_20261019/measurement`；最终结果指针 `output/n3dv_flame_steak_half_final480w_20261019/final_result.json`。记录 `docs/experiment/20261019_flame_steak_final480w_full300.md`，含独立顺序解码、15000 次渲染计时及源码摘要。质量与纯渲染速度达标，存储比严格 50 KB 高约 2.06%；纯渲染 FPS 不含解码/上传，首帧参考另计。291/299 动态帧存在有效细分，94.705% 旧 GS 无逐点平移残差。其余五景完整训练尚未开始。
 
+2026-10-19 计时口径已拆分：新的 `frame_summary/frame_*.json` 分别记录 `training_seconds`、`optimization_seconds`、`evaluation_seconds`、`checkpoint_seconds` 和 `frame_wall_seconds`，详细阶段在 `timing`。训练包含数据准备及必要量化编码，排除留出渲染、评估和 checkpoint；源码扩展冷启动可能出现在第一个动态帧。顺序解码基准报告同步汇总分项时间及已测覆盖范围，历史记录缺少分项时保持未知，不能把旧 `elapsed_seconds` 或正式结果的 29.4586 秒直接称为纯训练时间。冗余清理与基础计时提交 `c7c9e5d`，原 300 步训练安排不变。
+
+可选 `terminal_motion_proximal: true` 在第 200 步幅值精修结束时额外检查一次低收益 GS 残差块，默认关闭。已完成 0–29 帧及独立解码，同段 PSNR 34.024045 → 34.045450 dB、完整动态更新 51.176414 → 50.324724 KB；只是短测改善信号，未替代正式 300 帧配置或指标。见 `docs/experiment/20261019_timing_cleanup_and_terminal_prox.md`，输出 `output/fs_timing_efficiency_20261019/terminal300_prefix30/20261019T121036_d1b10a`。
+
 # 特别须知
 实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档（别乱写文档，做完实验 再写文档），
 文档中记录这次实验的核心idea，以及对应的代码改动（简要版的，不需要特别详细，可以渐进式披露），运行的结果分析，以及可能造成这种结果的原因。

@@ -1,0 +1,108 @@
+{
+  "frame": 3,
+  "gaussians": 224530,
+  "image_max_abs_difference": 0.0,
+  "visibility_and_contributions_equal": true,
+  "gradient_repeatability": {
+    "_xyz": {
+      "native_repeat": {
+        "max_abs": 3.4530178254499333e-06,
+        "relative_l2": 0.001214102278431355
+      },
+      "new": {
+        "max_abs": 5.750951459049247e-06,
+        "relative_l2": 0.0019385545734290845
+      },
+      "new_repeat": {
+        "max_abs": 1.214298481500009e-05,
+        "relative_l2": 0.0037544385585583035
+      }
+    },
+    "_rotation": {
+      "native_repeat": {
+        "max_abs": 6.872101948829368e-06,
+        "relative_l2": 0.0006406510698237465
+      },
+      "new": {
+        "max_abs": 1.5736079149064608e-05,
+        "relative_l2": 0.00118446856105716
+      },
+      "new_repeat": {
+        "max_abs": 4.316352351452224e-05,
+        "relative_l2": 0.0026498207860806817
+      }
+    },
+    "_scaling": {
+      "native_repeat": {
+        "max_abs": 1.4941081644792575e-05,
+        "relative_l2": 0.0030037692068753496
+      },
+      "new": {
+        "max_abs": 2.484915967215784e-05,
+        "relative_l2": 0.004847427036686882
+      },
+      "new_repeat": {
+        "max_abs": 5.241992766968906e-05,
+        "relative_l2": 0.009745445111700763
+      }
+    },
+    "_opacity": {
+      "native_repeat": {
+        "max_abs": 2.473825588822365e-09,
+        "relative_l2": 2.530833096890603e-06
+      },
+      "new": {
+        "max_abs": 1.6298145055770874e-09,
+        "relative_l2": 1.7747856923795448e-06
+      },
+      "new_repeat": {
+        "max_abs": 3.1723175197839737e-09,
+        "relative_l2": 2.529840476083782e-06
+      }
+    },
+    "_features_dc": {
+      "native_repeat": {
+        "max_abs": 1.9208528101444244e-09,
+        "relative_l2": 2.5337301434037897e-06
+      },
+      "new": {
+        "max_abs": 4.220055416226387e-09,
+        "relative_l2": 2.817305038796932e-06
+      },
+      "new_repeat": {
+        "max_abs": 4.103640094399452e-09,
+        "relative_l2": 2.6898511981528654e-06
+      }
+    },
+    "_features_rest": {
+      "native_repeat": {
+        "max_abs": 3.026798367500305e-09,
+        "relative_l2": 2.53434229702874e-06
+      },
+      "new": {
+        "max_abs": 6.461050361394882e-09,
+        "relative_l2": 2.820222510014931e-06
+      },
+      "new_repeat": {
+        "max_abs": 6.2282197177410126e-09,
+        "relative_l2": 2.686805198929826e-06
+      }
+    },
+    "viewspace": {
+      "native_repeat": {
+        "max_abs": 2.393790055066347e-08,
+        "relative_l2": 1.894387729230494e-06
+      },
+      "new": {
+        "max_abs": 9.080395102500916e-09,
+        "relative_l2": 1.4084030944192988e-06
+      },
+      "new_repeat": {
+        "max_abs": 2.2773747332394123e-08,
+        "relative_l2": 1.8474437832704026e-06
+      }
+    }
+  },
+  "inference_and_reused_cache_equal": true,
+  "scope": "Same decoded scene, camera and loss; old/native versus fresh-leaf screen-space scratch; observed training and native inference backends."
+}

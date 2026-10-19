@@ -1,0 +1,86 @@
+[
+  {
+    "frame": 1,
+    "stored_bytes": 145990,
+    "sizes": {
+      "planar": 145990,
+      "interleaved": 145534,
+      "chain": 153314,
+      "mean": 146886,
+      "bitplanes": 146838,
+      "byteplanes": 146042
+    }
+  },
+  {
+    "frame": 3,
+    "stored_bytes": 37130,
+    "sizes": {
+      "planar": 37130,
+      "interleaved": 37014,
+      "chain": 38558,
+      "mean": 37398,
+      "bitplanes": 37554,
+      "byteplanes": 37162
+    }
+  },
+  {
+    "frame": 29,
+    "stored_bytes": 34174,
+    "sizes": {
+      "planar": 34174,
+      "interleaved": 34094,
+      "chain": 35554,
+      "mean": 34470,
+      "bitplanes": 34646,
+      "byteplanes": 34198
+    }
+  },
+  {
+    "frame": 99,
+    "stored_bytes": 34486,
+    "sizes": {
+      "planar": 34486,
+      "interleaved": 34394,
+      "chain": 35854,
+      "mean": 34898,
+      "bitplanes": 34966,
+      "byteplanes": 34506
+    }
+  },
+  {
+    "frame": 170,
+    "stored_bytes": 45834,
+    "sizes": {
+      "planar": 45834,
+      "interleaved": 45678,
+      "chain": 47758,
+      "mean": 46326,
+      "bitplanes": 46562,
+      "byteplanes": 45898
+    }
+  },
+  {
+    "frame": 239,
+    "stored_bytes": 39418,
+    "sizes": {
+      "planar": 39418,
+      "interleaved": 39286,
+      "chain": 40938,
+      "mean": 39642,
+      "bitplanes": 40030,
+      "byteplanes": 39454
+    }
+  },
+  {
+    "frame": 299,
+    "stored_bytes": 39678,
+    "sizes": {
+      "planar": 39678,
+      "interleaved": 39574,
+      "chain": 41566,
+      "mean": 39934,
+      "bitplanes": 40358,
+      "byteplanes": 39718
+    }
+  }
+]

@@ -1,0 +1,47 @@
+{
+  "all_dynamic": {
+    "frame_count": 3,
+    "measured_frame_count": 3,
+    "all_frames_measured": true,
+    "missing_frames": [],
+    "mean_seconds": {
+      "training_seconds": 44.63250306030386,
+      "optimization_seconds": 44.543283352647755,
+      "evaluation_seconds": 2.6271091740054544,
+      "checkpoint_seconds": 0.19031377300658883,
+      "bookkeeping_seconds": 0.00013484900894885263,
+      "frame_wall_seconds": 47.45006085632485
+    },
+    "measured_only_mean_seconds": {
+      "training_seconds": 44.63250306030386,
+      "optimization_seconds": 44.543283352647755,
+      "evaluation_seconds": 2.6271091740054544,
+      "checkpoint_seconds": 0.19031377300658883,
+      "bookkeeping_seconds": 0.00013484900894885263,
+      "frame_wall_seconds": 47.45006085632485
+    }
+  },
+  "excluding_first_dynamic": {
+    "frame_count": 2,
+    "measured_frame_count": 2,
+    "all_frames_measured": true,
+    "missing_frames": [],
+    "mean_seconds": {
+      "training_seconds": 26.38085964297352,
+      "optimization_seconds": 26.28055765297904,
+      "evaluation_seconds": 2.588593448002939,
+      "checkpoint_seconds": 0.12018148650531657,
+      "bookkeeping_seconds": 0.00012851050996687263,
+      "frame_wall_seconds": 29.08976308799174
+    },
+    "measured_only_mean_seconds": {
+      "training_seconds": 26.38085964297352,
+      "optimization_seconds": 26.28055765297904,
+      "evaluation_seconds": 2.588593448002939,
+      "checkpoint_seconds": 0.12018148650531657,
+      "bookkeeping_seconds": 0.00012851050996687263,
+      "frame_wall_seconds": 29.08976308799174
+    }
+  },
+  "scope": "Measured synchronized phase times only; no fallback to legacy elapsed_seconds, which combines training and evaluation. Excluding-first group omits frame 1, which may include cold startup."
+}

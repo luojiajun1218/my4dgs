@@ -1659,11 +1659,21 @@ class SpatialGatedMotion(MotionBase):
                     # old moments belonged to a local proposal objective.
                     for parameter in (self.region_translation, self.region_rotation):
                         self.optimizer.state.pop(parameter, None)
-        if self._motion_fit_window_due() and not self.amplitude_refit_active:
+        terminal_cleanup = (self.config.terminal_motion_proximal and
+                            self.amplitude_refit_active and self.last_step == self.motion_steps)
+        if self._motion_fit_window_due() and (not self.amplitude_refit_active or terminal_cleanup):
             if (self._hard_gate_frozen and not self.joint_image_gradients and
                     cfg.predictor_objective != 'proximal_rd'):
                 self.last_metrics['motion/refreshed_region_modes'] = self._refresh_active_representatives()
+            before = (self._values(hard=True)[2].ne(0).any(-1).sum()
+                      if terminal_cleanup else None)
             self._proximal_gs_blocks()
+            if terminal_cleanup:
+                after = self._values(hard=True)[2].ne(0).any(-1).sum()
+                removed = int(before - after)
+                self.last_metrics['motion/terminal_removed_translation_blocks'] = removed
+                self.flat_region_diagnostics['terminal_motion_proximal'] = dict(
+                    step=self.last_step, removed_translation_blocks=removed)
         if self.last_step in (1, cfg.freeze_step // 2, cfg.freeze_step, self.motion_steps):
             self._record_gate_learning()
         self.optimizer.zero_grad(set_to_none=True)
