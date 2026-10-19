@@ -1,0 +1,44 @@
+{
+  "source": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result",
+  "frames": 300,
+  "camera_names": [
+    "cam00.png",
+    "cam01.png",
+    "cam02.png",
+    "cam03.png",
+    "cam04.png",
+    "cam05.png",
+    "cam06.png",
+    "cam07.png",
+    "cam08.png",
+    "cam09.png",
+    "cam10.png",
+    "cam11.png",
+    "cam12.png",
+    "cam13.png",
+    "cam14.png",
+    "cam15.png",
+    "cam16.png",
+    "cam17.png",
+    "cam18.png",
+    "cam19.png",
+    "cam20.png"
+  ],
+  "image_links": 6300,
+  "scaled_cameras": [
+    {
+      "id": 1,
+      "width": 1345,
+      "height": 1008,
+      "params": [
+        730.7152678471941,
+        727.6929257404652,
+        672.5,
+        504.0
+      ]
+    }
+  ],
+  "seed_sha256": "d227fe877d84a12eeaf50c0fe508694aea63324350910e7daf8f4a9087b8db3b",
+  "source_intrinsics_sha256": "ef14152ae4be61b5aa96542bd423aac02ad7300cc9d3c2e0abbcd958344e9b8a",
+  "note": "Loader adapter only. images.bin 2D observations retain original pixel coordinates; do not use this adapter as an SfM model."
+}

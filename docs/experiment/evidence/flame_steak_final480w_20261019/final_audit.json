@@ -1,0 +1,94 @@
+{
+  "status": "verified",
+  "checked_at": "2026-10-19T11:47:30.664213+08:00",
+  "final_result_designated_by_user": true,
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563",
+  "frames": 300,
+  "dynamic_frames": 299,
+  "no_dynamic_prefix": true,
+  "fixed_parameters": true,
+  "unchanged_training_source_files": 467,
+  "frozen_source_files_verified": 525,
+  "initial_checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_half_fresh_frame0_20261018/flame_steak/20261018T224824_9ca22a/ckpt-0-15000.pth",
+  "initial_checkpoint_sha256": "61f38b3ff4ffc40655b1bad75834ce92c1540537962f0a65438b5a2646b4384e",
+  "initial_reference_identical_to_350w": true,
+  "reference_bytes": 19661738,
+  "psnr": 34.21117045084635,
+  "dynamic_complete_kb": 51.02767224080267,
+  "pure_render_fps": 292.20484089991515,
+  "complete_update_median_kb": 50.575,
+  "complete_update_p95_kb": 57.450399999999995,
+  "complete_update_max_kb": 163.961,
+  "frames_at_most_50kb": 137,
+  "reference_amortized_kb_per_frame": 116.39670666666666,
+  "worst_quality_frame": {
+    "frame": 170,
+    "psnr": 32.31903076171875
+  },
+  "best_quality_frame": {
+    "frame": 112,
+    "psnr": 35.1312255859375
+  },
+  "power_limit_watts": 480,
+  "training_power_samples": 292,
+  "sampled_peak_power_watts": 321.75,
+  "sampled_peak_temperature_c": 59.0,
+  "measurement_provenance": {
+    "command": [
+      "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+      "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source/scripts/benchmark_rigid_residual_tree.py",
+      "--run=/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563",
+      "--sequence",
+      "--mode=stream",
+      "--sequence-warmups=10",
+      "--sequence-renders=50",
+      "--segment-size=30",
+      "--gpu-check-interval=30",
+      "--psnr-tolerance=0.00001",
+      "--ssim-tolerance=0.000001",
+      "--l1-tolerance=0.000001",
+      "--output=/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/measurement/decoded_sequence.json"
+    ],
+    "benchmark_sha256": "6994c4638eb7c7f8022ecf08de0e5da13951388f38774d1c9cb82a037b13c9c6",
+    "pipeline_source": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source",
+    "power_before": "480.00 W, 134.60 W, 51",
+    "power_after": "480.00 W, 168.51 W, 48"
+  },
+  "comparison_to_350w": {
+    "psnr": {
+      "previous": 34.20891078948975,
+      "final": 34.21117045084635,
+      "delta": 0.002259661356603715
+    },
+    "ssim": {
+      "previous": 0.9676039560635885,
+      "final": 0.9676287631193797,
+      "delta": 2.4807055791220556e-05
+    },
+    "lpips": {
+      "previous": 0.11703064235548179,
+      "final": 0.11741944767534733,
+      "delta": 0.0003888053198655428
+    },
+    "dynamic_complete_kb": {
+      "previous": 50.79638795986622,
+      "final": 51.02767224080267,
+      "delta": 0.2312842809364497
+    },
+    "aggregate_materialized_fps": {
+      "previous": 291.792049274808,
+      "final": 292.20484089991515,
+      "delta": 0.41279162510716105
+    },
+    "mean_train_wall_seconds": {
+      "previous": 29.464281757157096,
+      "final": 29.458647296755974,
+      "delta": -0.005634460401122254
+    }
+  },
+  "target_checks": {
+    "psnr_at_least_34_2": true,
+    "dynamic_complete_at_most_50kb": false,
+    "pure_render_fps_above_200": true
+  }
+}

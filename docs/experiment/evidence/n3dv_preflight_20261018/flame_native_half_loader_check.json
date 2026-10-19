@@ -1,0 +1,14 @@
+{
+  "image_size": [
+    1345,
+    1008
+  ],
+  "training_views": 20,
+  "test_views": 1,
+  "test_camera": "cam00.png",
+  "all_frame0_pixels_match_canonical_pngs": true,
+  "shared_source_hashes_unchanged": true,
+  "camera_extent": 6.493635559082032,
+  "seed_points": 40000,
+  "reuses_old_checkpoint": false
+}

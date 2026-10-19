@@ -1,0 +1,91 @@
+{
+  "phase": "complete",
+  "training_pid": 1516189,
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_full300/20261019T023630_678e85",
+  "completed_dynamic_frames": 299,
+  "last_completed_frame": 299,
+  "milestones": [
+    {
+      "first_dynamic_frame": 1,
+      "last_frame": 29,
+      "psnr": 34.05876199130354,
+      "complete_update_kb": 50.3921724137931,
+      "train_wall_seconds": 30.95815232279209,
+      "final_gaussians": 223478
+    },
+    {
+      "first_dynamic_frame": 30,
+      "last_frame": 59,
+      "psnr": 34.14923782348633,
+      "complete_update_kb": 47.23043333333334,
+      "train_wall_seconds": 28.731750399466062,
+      "final_gaussians": 225046
+    },
+    {
+      "first_dynamic_frame": 60,
+      "last_frame": 89,
+      "psnr": 34.1764726003011,
+      "complete_update_kb": 51.0443,
+      "train_wall_seconds": 28.813717352534876,
+      "final_gaussians": 226412
+    },
+    {
+      "first_dynamic_frame": 90,
+      "last_frame": 119,
+      "psnr": 34.67397880554199,
+      "complete_update_kb": 48.384933333333336,
+      "train_wall_seconds": 28.870482699229616,
+      "final_gaussians": 229160
+    },
+    {
+      "first_dynamic_frame": 120,
+      "last_frame": 149,
+      "psnr": 34.71687761942545,
+      "complete_update_kb": 49.972366666666666,
+      "train_wall_seconds": 29.087436989169024,
+      "final_gaussians": 233295
+    },
+    {
+      "first_dynamic_frame": 150,
+      "last_frame": 179,
+      "psnr": 34.07671890258789,
+      "complete_update_kb": 53.7322,
+      "train_wall_seconds": 29.22534307006669,
+      "final_gaussians": 236791
+    },
+    {
+      "first_dynamic_frame": 180,
+      "last_frame": 209,
+      "psnr": 34.02472216288249,
+      "complete_update_kb": 55.028533333333336,
+      "train_wall_seconds": 29.426965632934785,
+      "final_gaussians": 239706
+    },
+    {
+      "first_dynamic_frame": 210,
+      "last_frame": 239,
+      "psnr": 34.10573120117188,
+      "complete_update_kb": 51.26136666666667,
+      "train_wall_seconds": 29.631287455002894,
+      "final_gaussians": 243956
+    },
+    {
+      "first_dynamic_frame": 240,
+      "last_frame": 269,
+      "psnr": 33.852511978149415,
+      "complete_update_kb": 50.06613333333333,
+      "train_wall_seconds": 29.86294187209763,
+      "final_gaussians": 248469
+    },
+    {
+      "first_dynamic_frame": 270,
+      "last_frame": 299,
+      "psnr": 34.28957201639811,
+      "complete_update_kb": 50.83796666666667,
+      "train_wall_seconds": 30.08453546379848,
+      "final_gaussians": 252239
+    }
+  ],
+  "updated_at_utc": "2026-10-18T20:52:21.922019+00:00",
+  "summary": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/measurement_full300/summary.json"
+}

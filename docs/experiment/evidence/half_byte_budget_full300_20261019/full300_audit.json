@@ -1,0 +1,170 @@
+{
+  "status": "verified",
+  "frames": 300,
+  "dynamic_frames": 299,
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_full300/20261019T023630_678e85",
+  "independent_measurement": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/measurement_full300/decoded_sequence.json",
+  "training_config": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_full300/20261019T023630_678e85/config.yaml",
+  "fresh_reproduction_config": "/home/gamer-02/Documents/DeepLearning/my4dgs/config/n3dv/flame_steak_half_byte_budget_20261019.yaml",
+  "reproduction_module_data_trainer_match": true,
+  "initial_checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_half_fresh_frame0_20261018/flame_steak/20261018T224824_9ca22a/ckpt-0-15000.pth",
+  "initial_checkpoint_sha256": "61f38b3ff4ffc40655b1bad75834ce92c1540537962f0a65438b5a2646b4384e",
+  "continuation_checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_v1_continued/20261019T022111_3bfb84/rigid-ckpt-29-300.pth",
+  "continuation_checkpoint_sha256": "af2cecdcc0ada4d27a262386a072d7fddcd539853f9e49c48a4f8fd132f6d33e",
+  "initial_reference_identical_to_half_baseline": true,
+  "frozen_source_files_verified": 522,
+  "current_training_source_files_match": 467,
+  "prefix_files_unchanged": 204,
+  "rate_configuration_changes": {
+    "rate_loss_weight": {
+      "baseline": 0.002,
+      "candidate": 3e-05
+    },
+    "rate_normalization": {
+      "baseline": "reference",
+      "candidate": "budget"
+    },
+    "rate_budget_bytes": {
+      "baseline": null,
+      "candidate": 50000
+    }
+  },
+  "checkpoint_schedule_changes": {
+    "saving_ckpt_frames": {
+      "baseline": [
+        1,
+        29,
+        59,
+        89,
+        119,
+        149,
+        179,
+        209,
+        239,
+        269,
+        299
+      ],
+      "candidate": [
+        1,
+        3,
+        29,
+        59,
+        89,
+        119,
+        149,
+        179,
+        209,
+        239,
+        269,
+        299
+      ]
+    }
+  },
+  "baseline_byte_price": 3.6480586491092903e-10,
+  "candidate_byte_price": 6e-10,
+  "byte_price_increase_percent": 64.47103999999999,
+  "comparison": {
+    "psnr": {
+      "baseline": 34.26551361083985,
+      "candidate": 34.20891078948975,
+      "delta": -0.05660282135009709
+    },
+    "ssim": {
+      "baseline": 0.9676939753691355,
+      "candidate": 0.9676039560635885,
+      "delta": -9.001930554697335e-05
+    },
+    "lpips": {
+      "baseline": 0.11712085189918676,
+      "candidate": 0.11703064235548179,
+      "delta": -9.020954370497769e-05
+    },
+    "dynamic_complete_kb": {
+      "baseline": 60.913511705685615,
+      "candidate": 50.79638795986622,
+      "delta": -10.117123745819391
+    },
+    "aggregate_materialized_fps": {
+      "baseline": 291.51345543472974,
+      "candidate": 291.792049274808,
+      "delta": 0.2785938400782584
+    },
+    "mean_train_wall_seconds": {
+      "baseline": 29.722070538905587,
+      "candidate": 29.464281757157096,
+      "delta": -0.2577887817484914
+    }
+  },
+  "storage_reduction_percent": 16.60899767969718,
+  "complete_update_kb": {
+    "mean": 50.79638795986622,
+    "median": 50.253,
+    "p95": 57.03539999999999,
+    "maximum": 164.201,
+    "frames_at_most_50kb": 137
+  },
+  "total_stream_mb": 34.849858,
+  "reference_amortized_kb_per_frame": 116.16619333333333,
+  "storage_components": {
+    "motion_bytes": {
+      "mean_kb": 39.69367892976588,
+      "percent": 78.1427194412475
+    },
+    "opacity_bytes": {
+      "mean_kb": 5.8907658862876255,
+      "percent": 11.596820409635953
+    },
+    "feature_bytes": {
+      "mean_kb": 0.26229096989966555,
+      "percent": 0.5163575215365693
+    },
+    "birth_bytes": {
+      "mean_kb": 4.290588628762542,
+      "percent": 8.44664119061477
+    },
+    "manifest_bytes": {
+      "mean_kb": 0.6590635451505017,
+      "percent": 1.297461436965207
+    }
+  },
+  "worst_quality_frame": {
+    "frame": 170,
+    "psnr": 32.33843231201172
+  },
+  "best_quality_frame": {
+    "frame": 112,
+    "psnr": 35.12546157836914
+  },
+  "frames_with_effective_subdivisions": 284,
+  "old_gs_without_local_residual_fraction": 0.9468848388351333,
+  "rotation_residual_blocks_zero": true,
+  "numerical_and_packet_verification_passed": true,
+  "goals": {
+    "psnr_at_least_34_2": true,
+    "dynamic_complete_strictly_below_50kb": false,
+    "over_50kb_percent": 1.5927759197324587,
+    "pure_render_fps_at_least_200": true
+  },
+  "measurement_provenance": {
+    "command": [
+      "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+      "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/measurement/benchmark.py",
+      "--run=/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_full300/20261019T023630_678e85",
+      "--sequence",
+      "--mode=stream",
+      "--sequence-warmups=10",
+      "--sequence-renders=50",
+      "--segment-size=30",
+      "--gpu-check-interval=30",
+      "--psnr-tolerance=0.00001",
+      "--ssim-tolerance=0.000001",
+      "--l1-tolerance=0.000001",
+      "--output=/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/measurement_full300/decoded_sequence.json"
+    ],
+    "benchmark_sha256": "6994c4638eb7c7f8022ecf08de0e5da13951388f38774d1c9cb82a037b13c9c6",
+    "pipeline_source": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1",
+    "power_before": "350.00 W, 30.56 W, 44",
+    "power_after": "350.00 W, 180.52 W, 49"
+  },
+  "limitations": "Around 50 KB is achieved, strict <=50 KB is not. FPS excludes CPU decode/verify, upload, image I/O and quality metrics. Dynamic LPIPS uses saved final decoded-state evaluations. GPU power restoration remains separately blocked by OS authentication."
+}

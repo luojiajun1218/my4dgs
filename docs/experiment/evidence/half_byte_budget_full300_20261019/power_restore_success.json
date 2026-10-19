@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-10-19T09:11:52.905508+08:00",
+  "status": "restored",
+  "action": [
+    "sudo",
+    "systemctl",
+    "disable",
+    "--now",
+    "my4dgs-gpu-power-limit.service"
+  ],
+  "gpu": {
+    "index": "0",
+    "uuid": "GPU-ba22542c-c87e-a4f9-8fbd-2dfd200d967a",
+    "power.limit": "480.00 W",
+    "enforced.power.limit": "480.00 W",
+    "power.default_limit": "480.00 W",
+    "power.max_limit": "516.00 W"
+  },
+  "power_limit_service": {
+    "ExecMainStatus": "0",
+    "ActiveState": "inactive",
+    "UnitFileState": "disabled"
+  },
+  "telemetry_service": {
+    "ActiveState": "active",
+    "UnitFileState": "enabled"
+  },
+  "measurement_note": "The completed experiment and its 291.792 FPS benchmark used the previous 350 W limit. Power was restored afterwards.",
+  "authentication_note": "User-authorized interactive authentication; no authentication secret persisted."
+}

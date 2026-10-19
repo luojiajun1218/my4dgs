@@ -1,0 +1,21 @@
+{
+  "min_complete_update_bytes": 49296,
+  "median_complete_update_bytes": 59810.0,
+  "p95_complete_update_bytes": 67916.79999999997,
+  "max_complete_update_bytes": 182030,
+  "worst_psnr": {
+    "frame": 170,
+    "psnr": 32.33259963989258
+  },
+  "best_psnr": {
+    "frame": 112,
+    "psnr": 35.132286071777344
+  },
+  "amortized_stream_kb": 126.24959333333334,
+  "pixel_area_reduction": 0.2932860717264387,
+  "train_time_reduction": 0.1013540454540609,
+  "steady_train_time_reduction": 0.10693235994400341,
+  "render_fps_increase": 0.2760609261297404,
+  "complete_update_increase": 0.2016370851660747,
+  "local_residual_count_increase": 0.22741745346061304
+}

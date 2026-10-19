@@ -1,0 +1,22 @@
+{
+  "pid": 1502368,
+  "started_at_utc": "2026-10-18T18:21:09.677812+00:00",
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/run_prefix.py",
+    "--source",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1",
+    "--config",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/prefix_v3_config.yaml",
+    "--through-frame",
+    "29",
+    "--status",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/prefix_v3_status.json"
+  ],
+  "config_sha256": "3ad0e8a42f578111370b02494a73e2a90ce1736a41f46399be7749e827ee75b1",
+  "source_manifest": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1/source_manifest.json",
+  "first_frame": "Fresh half-resolution 15000-step original checkpoint; the refit candidate is not used.",
+  "continuation": "Verified causal continuation from v1 completed frame3, preserving its raw reference and packets.",
+  "planned_frames": 300,
+  "stop_after_frame": 29
+}

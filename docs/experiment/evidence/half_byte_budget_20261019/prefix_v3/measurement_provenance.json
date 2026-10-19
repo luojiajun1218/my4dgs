@@ -1,0 +1,22 @@
+{
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/measurement/benchmark.py",
+    "--run=/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_v1_continued/20261019T022111_3bfb84",
+    "--sequence",
+    "--through-frame=29",
+    "--mode=stream",
+    "--sequence-warmups=10",
+    "--sequence-renders=50",
+    "--segment-size=30",
+    "--gpu-check-interval=30",
+    "--psnr-tolerance=0.00001",
+    "--ssim-tolerance=0.000001",
+    "--l1-tolerance=0.000001",
+    "--output=/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/measurement_prefix_v3/decoded_sequence.json"
+  ],
+  "benchmark_sha256": "6994c4638eb7c7f8022ecf08de0e5da13951388f38774d1c9cb82a037b13c9c6",
+  "pipeline_source": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1",
+  "power_before": "350.00 W, 30.88 W, 45",
+  "power_after": "350.00 W, 165.78 W, 48"
+}

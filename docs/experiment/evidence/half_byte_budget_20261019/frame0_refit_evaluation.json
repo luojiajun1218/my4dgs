@@ -1,0 +1,15 @@
+{
+  "train": {
+    "l1": 0.0082,
+    "psnr": 38.2504,
+    "ssim": 0.9762,
+    "lpips": 0.0999
+  },
+  "test": {
+    "l1": 0.0154,
+    "psnr": 33.7515,
+    "ssim": 0.9692,
+    "lpips": 0.11
+  },
+  "precision_note": "Native log prints four decimal places; independent decoded-reference evaluation follows in the dynamic run."
+}

@@ -1,0 +1,56 @@
+# Refine this round's fresh first frame: 15000 -> 17000, no new GS.
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+experiment_name: fs_goal_half_budget_20261019/frame0_noisefree_refit_v2
+mode: train
+ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_half_fresh_frame0_20261018/flame_steak/20261018T224824_9ca22a/ckpt-0-15000.pth
+trainer:
+  cache_data_on_device: true
+  num_init_steps: 17000
+  num_incr_steps: 200
+  testing_steps: []
+  saving_ckpt_steps: []
+  saving_ckpt_every_n_frames: 1000
+data:
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d_half/flame_steak
+  resolution: 1
+  white_background: false
+  split_train_test: true
+  shuffle: true
+  eval_train: true
+  eval_test: true
+  extra_dataset_kwargs:
+    num_frames: 1
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+module:
+  sh_degree: 1
+  random_background: false
+  lambda_dssim: 0.2
+  noise_scale: 0.0
+  saving_gs_steps: []
+  saving_gs_every_n_frames: 1000
+  num_saving_images: 2
+  full_eval: true
+  lpips_required: true
+  densify:
+    from_step: 500
+    until_step: 5000
+    interval: 100
+    grad_threshold: 0.0002
+    opacity_reset_interval: 30000
+    max_gaussians: 10000000
+  gaussian:
+    position_lr_init: 0.00016
+    position_lr_final: 1.6e-06
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.0025
+    opacity_lr: 0.05
+    scaling_lr: 0.005
+    rotation_lr: 0.001
+    percent_dense: 0.01
+gui_ip: 127.0.0.1
+gui_port: 0
+detect_anomaly: false
+quiet: false

@@ -1,0 +1,1632 @@
+{
+  "schema": "n3dv_readonly_preflight_v1",
+  "root": "/home/gamer-02/Documents/DeepLearning/data/n3dv",
+  "scenes": [
+    {
+      "scene": "/home/gamer-02/Documents/DeepLearning/data/n3dv/coffee_martini_result",
+      "cameras": [
+        "cam00",
+        "cam01",
+        "cam02",
+        "cam04",
+        "cam05",
+        "cam06",
+        "cam07",
+        "cam08",
+        "cam09",
+        "cam10",
+        "cam11",
+        "cam12",
+        "cam13",
+        "cam14",
+        "cam16",
+        "cam18",
+        "cam19",
+        "cam20"
+      ],
+      "frames_per_camera": 300,
+      "images": 5400,
+      "image_size": [
+        1341,
+        1006
+      ],
+      "initial_points": 40000,
+      "name": "coffee_martini",
+      "png_crc_checked": 5400,
+      "png_crc_failures": [],
+      "test_camera": "cam00",
+      "train_cameras": 17,
+      "missing_camera_ids_from_raw": [
+        "cam03",
+        "cam15",
+        "cam17"
+      ],
+      "geometry": {
+        "points": 40000,
+        "unique_points": 40000,
+        "finite": true,
+        "orthogonality_max_error": 4.440892098500626e-16,
+        "determinant_min": 0.9999999999999997,
+        "camera_extent": 6.647056922615491,
+        "point_radius_quantiles": {
+          "p50": 14.651569782095574,
+          "p99": 197.82922577298885,
+          "p999": 839.2040780098608,
+          "max": 1453.922404216695
+        },
+        "far_points_over_10_camera_extents": 8370,
+        "extreme_to_median_radius": 99.2332170436378,
+        "focal_range": [
+          1459.7946699489562,
+          1459.7946699489562
+        ],
+        "calibrated_dimensions": [
+          2682.0,
+          2011.0
+        ]
+      },
+      "decoded_sample_images": 54,
+      "projection_diagnostics": [
+        {
+          "camera": "cam00",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36349,
+          "foreground_grid_samples": 22123,
+          "median_color_L1": 0.03137254901960784,
+          "p90_color_L1": 0.10457516339869281,
+          "point_depth_above_10x_far": 3
+        },
+        {
+          "camera": "cam01",
+          "points_in_front": 39998,
+          "points_projecting_inside": 32273,
+          "foreground_grid_samples": 16652,
+          "median_color_L1": 0.07320261437908498,
+          "p90_color_L1": 0.2431372549019608,
+          "point_depth_above_10x_far": 1
+        },
+        {
+          "camera": "cam02",
+          "points_in_front": 39999,
+          "points_projecting_inside": 33168,
+          "foreground_grid_samples": 17490,
+          "median_color_L1": 0.07058823529411762,
+          "p90_color_L1": 0.20653594771241826,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam04",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35885,
+          "foreground_grid_samples": 20632,
+          "median_color_L1": 0.049673202614379075,
+          "p90_color_L1": 0.13581699346405415,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam05",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36526,
+          "foreground_grid_samples": 21666,
+          "median_color_L1": 0.04313725490196078,
+          "p90_color_L1": 0.11241830065359477,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam06",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35979,
+          "foreground_grid_samples": 22468,
+          "median_color_L1": 0.02875816993464053,
+          "p90_color_L1": 0.11241830065359477,
+          "point_depth_above_10x_far": 4
+        },
+        {
+          "camera": "cam07",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32015,
+          "foreground_grid_samples": 21456,
+          "median_color_L1": 0.028758169934640514,
+          "p90_color_L1": 0.11241830065359477,
+          "point_depth_above_10x_far": 3
+        },
+        {
+          "camera": "cam08",
+          "points_in_front": 40000,
+          "points_projecting_inside": 28514,
+          "foreground_grid_samples": 19935,
+          "median_color_L1": 0.030065359477124184,
+          "p90_color_L1": 0.11895424836601305,
+          "point_depth_above_10x_far": 4
+        },
+        {
+          "camera": "cam09",
+          "points_in_front": 40000,
+          "points_projecting_inside": 23311,
+          "foreground_grid_samples": 17485,
+          "median_color_L1": 0.036601307189542485,
+          "p90_color_L1": 0.134640522875817,
+          "point_depth_above_10x_far": 56
+        },
+        {
+          "camera": "cam10",
+          "points_in_front": 40000,
+          "points_projecting_inside": 20013,
+          "foreground_grid_samples": 15544,
+          "median_color_L1": 0.040522875816993466,
+          "p90_color_L1": 0.1503267973856209,
+          "point_depth_above_10x_far": 97
+        },
+        {
+          "camera": "cam11",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36742,
+          "foreground_grid_samples": 20035,
+          "median_color_L1": 0.04052287581699345,
+          "p90_color_L1": 0.27581699346405225,
+          "point_depth_above_10x_far": 33
+        },
+        {
+          "camera": "cam12",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34998,
+          "foreground_grid_samples": 19347,
+          "median_color_L1": 0.03921568627450981,
+          "p90_color_L1": 0.25228758169934645,
+          "point_depth_above_10x_far": 3
+        },
+        {
+          "camera": "cam13",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34680,
+          "foreground_grid_samples": 18671,
+          "median_color_L1": 0.0810457516339869,
+          "p90_color_L1": 0.22875816993464052,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam14",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36519,
+          "foreground_grid_samples": 20731,
+          "median_color_L1": 0.061437908496731995,
+          "p90_color_L1": 0.1568627450980392,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam16",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36111,
+          "foreground_grid_samples": 21250,
+          "median_color_L1": 0.03529411764705881,
+          "p90_color_L1": 0.13725490196078435,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam18",
+          "points_in_front": 40000,
+          "points_projecting_inside": 30623,
+          "foreground_grid_samples": 20021,
+          "median_color_L1": 0.03137254901960788,
+          "p90_color_L1": 0.15424836601307193,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam19",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32583,
+          "foreground_grid_samples": 21159,
+          "median_color_L1": 0.03398692810457512,
+          "p90_color_L1": 0.17908496732026147,
+          "point_depth_above_10x_far": 2
+        },
+        {
+          "camera": "cam20",
+          "points_in_front": 40000,
+          "points_projecting_inside": 28821,
+          "foreground_grid_samples": 19734,
+          "median_color_L1": 0.047058823529411764,
+          "p90_color_L1": 0.19477124183006536,
+          "point_depth_above_10x_far": 6
+        }
+      ],
+      "projection_scope": "Sparse 4px z-buffer RGB consistency under the existing S2GS loader. Diagnostic only; not feature reprojection error or proof of geometric accuracy.",
+      "retained_original_colmap_model": false,
+      "retained_fullres_undistorted_300": false,
+      "dense_fused_points_reported": 743338,
+      "farthest_sampling_reported": true,
+      "source_metadata_sha256": {
+        "poses_bounds.npy": "432d742e7cebd40e5dfe4946ce62728a34439f21ae7fe6ae6a2594e4431c70f6",
+        "points3D_downsample2.ply": "0ebe988f12d837ac16dcc01283ca948435d2d912b313c29bbc5c9e9476a81cac"
+      },
+      "raw_cam00_video": {
+        "width": 2704,
+        "height": 2028,
+        "r_frame_rate": "30/1",
+        "duration": "10.000000",
+        "nb_frames": "300"
+      },
+      "elapsed_seconds": 14.051027055014856
+    },
+    {
+      "scene": "/home/gamer-02/Documents/DeepLearning/data/n3dv/cook_spinach_result",
+      "cameras": [
+        "cam00",
+        "cam01",
+        "cam02",
+        "cam03",
+        "cam04",
+        "cam05",
+        "cam06",
+        "cam07",
+        "cam08",
+        "cam09",
+        "cam10",
+        "cam11",
+        "cam12",
+        "cam13",
+        "cam14",
+        "cam15",
+        "cam16",
+        "cam17",
+        "cam18",
+        "cam19",
+        "cam20"
+      ],
+      "frames_per_camera": 300,
+      "images": 6300,
+      "image_size": [
+        1345,
+        1008
+      ],
+      "initial_points": 40000,
+      "name": "cook_spinach",
+      "png_crc_checked": 6300,
+      "png_crc_failures": [],
+      "test_camera": "cam00",
+      "train_cameras": 20,
+      "missing_camera_ids_from_raw": [],
+      "geometry": {
+        "points": 40000,
+        "unique_points": 40000,
+        "finite": true,
+        "orthogonality_max_error": 4.440892098500626e-16,
+        "determinant_min": 0.9999999999999996,
+        "camera_extent": 6.507602387211638,
+        "point_radius_quantiles": {
+          "p50": 10.243288163111563,
+          "p99": 21.652910656932924,
+          "p999": 30.7539625046297,
+          "max": 42.890430590112686
+        },
+        "far_points_over_10_camera_extents": 0,
+        "extreme_to_median_radius": 4.187174070194666,
+        "focal_range": [
+          1461.965121586573,
+          1461.965121586573
+        ],
+        "calibrated_dimensions": [
+          2689.0,
+          2016.0
+        ]
+      },
+      "decoded_sample_images": 63,
+      "projection_diagnostics": [
+        {
+          "camera": "cam00",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33743,
+          "foreground_grid_samples": 24117,
+          "median_color_L1": 0.019607843137254898,
+          "p90_color_L1": 0.08627450980392155,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam01",
+          "points_in_front": 40000,
+          "points_projecting_inside": 27312,
+          "foreground_grid_samples": 18243,
+          "median_color_L1": 0.032679738562091505,
+          "p90_color_L1": 0.13725490196078433,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam02",
+          "points_in_front": 40000,
+          "points_projecting_inside": 29183,
+          "foreground_grid_samples": 19519,
+          "median_color_L1": 0.039215686274509796,
+          "p90_color_L1": 0.10457516339869281,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam03",
+          "points_in_front": 40000,
+          "points_projecting_inside": 30409,
+          "foreground_grid_samples": 20433,
+          "median_color_L1": 0.05490196078431372,
+          "p90_color_L1": 0.1176470588235294,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam04",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31547,
+          "foreground_grid_samples": 21573,
+          "median_color_L1": 0.023529411764705882,
+          "p90_color_L1": 0.10039215686274414,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam05",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32337,
+          "foreground_grid_samples": 22617,
+          "median_color_L1": 0.022222222222222237,
+          "p90_color_L1": 0.09281045751633987,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam06",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34147,
+          "foreground_grid_samples": 24590,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.09411764705882353,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam07",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35438,
+          "foreground_grid_samples": 25561,
+          "median_color_L1": 0.023529411764705854,
+          "p90_color_L1": 0.10196078431372546,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam08",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34851,
+          "foreground_grid_samples": 24809,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.11241830065359476,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam09",
+          "points_in_front": 40000,
+          "points_projecting_inside": 30971,
+          "foreground_grid_samples": 22319,
+          "median_color_L1": 0.04052287581699346,
+          "p90_color_L1": 0.1241830065359477,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam10",
+          "points_in_front": 39979,
+          "points_projecting_inside": 28828,
+          "foreground_grid_samples": 20674,
+          "median_color_L1": 0.033986928104575174,
+          "p90_color_L1": 0.134640522875817,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam11",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34657,
+          "foreground_grid_samples": 23690,
+          "median_color_L1": 0.026143790849673183,
+          "p90_color_L1": 0.15555555555555556,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam12",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34745,
+          "foreground_grid_samples": 24458,
+          "median_color_L1": 0.0326797385620915,
+          "p90_color_L1": 0.15294117647058825,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam13",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32380,
+          "foreground_grid_samples": 21781,
+          "median_color_L1": 0.05228758169934641,
+          "p90_color_L1": 0.13986928104575164,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam14",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32993,
+          "foreground_grid_samples": 22538,
+          "median_color_L1": 0.036601307189542465,
+          "p90_color_L1": 0.12026143790849675,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam15",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34872,
+          "foreground_grid_samples": 24468,
+          "median_color_L1": 0.022222222222222237,
+          "p90_color_L1": 0.12026143790849673,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam16",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35386,
+          "foreground_grid_samples": 25084,
+          "median_color_L1": 0.02614379084967322,
+          "p90_color_L1": 0.12026143790849673,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam17",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36229,
+          "foreground_grid_samples": 25662,
+          "median_color_L1": 0.023529411764705837,
+          "p90_color_L1": 0.11895424836601305,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam18",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36160,
+          "foreground_grid_samples": 25306,
+          "median_color_L1": 0.026143790849673203,
+          "p90_color_L1": 0.12287581699346406,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam19",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34095,
+          "foreground_grid_samples": 23586,
+          "median_color_L1": 0.024836601307189527,
+          "p90_color_L1": 0.1392156862745098,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam20",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33636,
+          "foreground_grid_samples": 23109,
+          "median_color_L1": 0.037908496732026155,
+          "p90_color_L1": 0.1398692810457516,
+          "point_depth_above_10x_far": 0
+        }
+      ],
+      "projection_scope": "Sparse 4px z-buffer RGB consistency under the existing S2GS loader. Diagnostic only; not feature reprojection error or proof of geometric accuracy.",
+      "retained_original_colmap_model": false,
+      "retained_fullres_undistorted_300": false,
+      "dense_fused_points_reported": 934675,
+      "farthest_sampling_reported": true,
+      "source_metadata_sha256": {
+        "poses_bounds.npy": "e0bb22d4e05db950be98ac2277a2b66eff50c74f5499ca8eef5cc529ca37ed45",
+        "points3D_downsample2.ply": "15197af70ee9e82583c704cb32faa962e51395982b9d7f8466977fcc7571477f"
+      },
+      "raw_cam00_video": {
+        "width": 2704,
+        "height": 2028,
+        "r_frame_rate": "30/1",
+        "duration": "10.000000",
+        "nb_frames": "300"
+      },
+      "elapsed_seconds": 12.594367890007561
+    },
+    {
+      "scene": "/home/gamer-02/Documents/DeepLearning/data/n3dv/cut_roasted_beef_result",
+      "cameras": [
+        "cam00",
+        "cam01",
+        "cam02",
+        "cam03",
+        "cam05",
+        "cam06",
+        "cam07",
+        "cam08",
+        "cam09",
+        "cam10",
+        "cam11",
+        "cam12",
+        "cam13",
+        "cam14",
+        "cam15",
+        "cam16",
+        "cam17",
+        "cam18",
+        "cam19",
+        "cam20"
+      ],
+      "frames_per_camera": 300,
+      "images": 6000,
+      "image_size": [
+        1343,
+        1006
+      ],
+      "initial_points": 40000,
+      "name": "cut_roasted_beef",
+      "png_crc_checked": 6000,
+      "png_crc_failures": [],
+      "test_camera": "cam00",
+      "train_cameras": 19,
+      "missing_camera_ids_from_raw": [
+        "cam04"
+      ],
+      "geometry": {
+        "points": 40000,
+        "unique_points": 40000,
+        "finite": true,
+        "orthogonality_max_error": 4.440892098500626e-16,
+        "determinant_min": 0.9999999999999997,
+        "camera_extent": 6.591048580925103,
+        "point_radius_quantiles": {
+          "p50": 10.133964879681471,
+          "p99": 21.325013663831683,
+          "p999": 30.395265659785803,
+          "max": 43.944062116441955
+        },
+        "far_points_over_10_camera_extents": 0,
+        "extreme_to_median_radius": 4.33631482230114,
+        "focal_range": [
+          1464.0866782301537,
+          1464.0866782301537
+        ],
+        "calibrated_dimensions": [
+          2686.0,
+          2012.0
+        ]
+      },
+      "decoded_sample_images": 60,
+      "projection_diagnostics": [
+        {
+          "camera": "cam00",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33396,
+          "foreground_grid_samples": 24329,
+          "median_color_L1": 0.020915032679738554,
+          "p90_color_L1": 0.0862745098039216,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam01",
+          "points_in_front": 39999,
+          "points_projecting_inside": 27268,
+          "foreground_grid_samples": 18270,
+          "median_color_L1": 0.03267973856209149,
+          "p90_color_L1": 0.13071895424836602,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam02",
+          "points_in_front": 40000,
+          "points_projecting_inside": 28962,
+          "foreground_grid_samples": 19591,
+          "median_color_L1": 0.03398692810457513,
+          "p90_color_L1": 0.09934640522875816,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam03",
+          "points_in_front": 40000,
+          "points_projecting_inside": 30255,
+          "foreground_grid_samples": 20591,
+          "median_color_L1": 0.05228758169934641,
+          "p90_color_L1": 0.11503267973856209,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam05",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31994,
+          "foreground_grid_samples": 22762,
+          "median_color_L1": 0.02483660130718954,
+          "p90_color_L1": 0.09281045751633987,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam06",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34070,
+          "foreground_grid_samples": 25029,
+          "median_color_L1": 0.026143790849673203,
+          "p90_color_L1": 0.0915032679738562,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam07",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35352,
+          "foreground_grid_samples": 25967,
+          "median_color_L1": 0.022222222222222216,
+          "p90_color_L1": 0.09803921568627451,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam08",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34879,
+          "foreground_grid_samples": 25380,
+          "median_color_L1": 0.022222222222222216,
+          "p90_color_L1": 0.10457516339869281,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam09",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31046,
+          "foreground_grid_samples": 22781,
+          "median_color_L1": 0.0379084967320261,
+          "p90_color_L1": 0.12156862745098039,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam10",
+          "points_in_front": 39973,
+          "points_projecting_inside": 28912,
+          "foreground_grid_samples": 21054,
+          "median_color_L1": 0.028758169934640514,
+          "p90_color_L1": 0.12941176470588234,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam11",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34342,
+          "foreground_grid_samples": 23727,
+          "median_color_L1": 0.02352941176470591,
+          "p90_color_L1": 0.13856209150326798,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam12",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34682,
+          "foreground_grid_samples": 24760,
+          "median_color_L1": 0.030065359477124184,
+          "p90_color_L1": 0.13594771241830064,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam13",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32232,
+          "foreground_grid_samples": 22033,
+          "median_color_L1": 0.05228758169934639,
+          "p90_color_L1": 0.13594771241830064,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam14",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32811,
+          "foreground_grid_samples": 22941,
+          "median_color_L1": 0.0326797385620915,
+          "p90_color_L1": 0.1084967320261438,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam15",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34590,
+          "foreground_grid_samples": 24860,
+          "median_color_L1": 0.0209150326797386,
+          "p90_color_L1": 0.10980392156862745,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam16",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35235,
+          "foreground_grid_samples": 25618,
+          "median_color_L1": 0.026143790849673203,
+          "p90_color_L1": 0.11372549019607843,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam17",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36153,
+          "foreground_grid_samples": 26171,
+          "median_color_L1": 0.022222222222222216,
+          "p90_color_L1": 0.11111111111111112,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam18",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36187,
+          "foreground_grid_samples": 25935,
+          "median_color_L1": 0.026143790849673207,
+          "p90_color_L1": 0.11503267973856209,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam19",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34010,
+          "foreground_grid_samples": 24064,
+          "median_color_L1": 0.022222222222222254,
+          "p90_color_L1": 0.13594771241830064,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam20",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33504,
+          "foreground_grid_samples": 23420,
+          "median_color_L1": 0.04052287581699341,
+          "p90_color_L1": 0.1398692810457516,
+          "point_depth_above_10x_far": 0
+        }
+      ],
+      "projection_scope": "Sparse 4px z-buffer RGB consistency under the existing S2GS loader. Diagnostic only; not feature reprojection error or proof of geometric accuracy.",
+      "retained_original_colmap_model": false,
+      "retained_fullres_undistorted_300": false,
+      "dense_fused_points_reported": 910170,
+      "farthest_sampling_reported": true,
+      "source_metadata_sha256": {
+        "poses_bounds.npy": "b147280710e425b8f5a8070d4bd480fa70019f908821fa8b6ac9f31530ab53e0",
+        "points3D_downsample2.ply": "c4d718ee416125f4938b3abd9823b51d9050099d66f0fab7adf878a094cf9a10"
+      },
+      "raw_cam00_video": {
+        "width": 2704,
+        "height": 2028,
+        "r_frame_rate": "30/1",
+        "duration": "10.000000",
+        "nb_frames": "300"
+      },
+      "elapsed_seconds": 13.343250967998756
+    },
+    {
+      "scene": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_salmon_1_result",
+      "cameras": [
+        "cam00",
+        "cam01",
+        "cam02",
+        "cam04",
+        "cam05",
+        "cam06",
+        "cam07",
+        "cam08",
+        "cam09",
+        "cam10",
+        "cam11",
+        "cam12",
+        "cam13",
+        "cam14",
+        "cam15",
+        "cam16",
+        "cam18",
+        "cam19",
+        "cam20"
+      ],
+      "frames_per_camera": 300,
+      "images": 5700,
+      "image_size": [
+        1345,
+        1009
+      ],
+      "initial_points": 40000,
+      "name": "flame_salmon_1",
+      "png_crc_checked": 5700,
+      "png_crc_failures": [],
+      "test_camera": "cam00",
+      "train_cameras": 18,
+      "missing_camera_ids_from_raw": [
+        "cam03",
+        "cam17"
+      ],
+      "geometry": {
+        "points": 40000,
+        "unique_points": 40000,
+        "finite": true,
+        "orthogonality_max_error": 4.440892098500626e-16,
+        "determinant_min": 0.9999999999999996,
+        "camera_extent": 6.5866162515739894,
+        "point_radius_quantiles": {
+          "p50": 19.684780562106916,
+          "p99": 189.21452646857134,
+          "p999": 710.6395289782456,
+          "max": 1211.7697836412792
+        },
+        "far_points_over_10_camera_extents": 11626,
+        "extreme_to_median_radius": 61.558714348786225,
+        "focal_range": [
+          1459.3175816220335,
+          1459.3175816220335
+        ],
+        "calibrated_dimensions": [
+          2689.0,
+          2017.0
+        ]
+      },
+      "decoded_sample_images": 57,
+      "projection_diagnostics": [
+        {
+          "camera": "cam00",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36710,
+          "foreground_grid_samples": 20685,
+          "median_color_L1": 0.030065359477124205,
+          "p90_color_L1": 0.10849673202614381,
+          "point_depth_above_10x_far": 10
+        },
+        {
+          "camera": "cam01",
+          "points_in_front": 39991,
+          "points_projecting_inside": 32486,
+          "foreground_grid_samples": 15615,
+          "median_color_L1": 0.06143790849673201,
+          "p90_color_L1": 0.25359477124183005,
+          "point_depth_above_10x_far": 1
+        },
+        {
+          "camera": "cam02",
+          "points_in_front": 39993,
+          "points_projecting_inside": 33559,
+          "foreground_grid_samples": 16537,
+          "median_color_L1": 0.060130718954248354,
+          "p90_color_L1": 0.20653594771241826,
+          "point_depth_above_10x_far": 10
+        },
+        {
+          "camera": "cam04",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36472,
+          "foreground_grid_samples": 19583,
+          "median_color_L1": 0.04575163398692811,
+          "p90_color_L1": 0.1359477124183007,
+          "point_depth_above_10x_far": 9
+        },
+        {
+          "camera": "cam05",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36954,
+          "foreground_grid_samples": 20483,
+          "median_color_L1": 0.04052287581699343,
+          "p90_color_L1": 0.11372549019607843,
+          "point_depth_above_10x_far": 10
+        },
+        {
+          "camera": "cam06",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36327,
+          "foreground_grid_samples": 20962,
+          "median_color_L1": 0.03137254901960782,
+          "p90_color_L1": 0.12143790849673389,
+          "point_depth_above_10x_far": 13
+        },
+        {
+          "camera": "cam07",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32020,
+          "foreground_grid_samples": 20142,
+          "median_color_L1": 0.03137254901960784,
+          "p90_color_L1": 0.11882352941176658,
+          "point_depth_above_10x_far": 9
+        },
+        {
+          "camera": "cam08",
+          "points_in_front": 40000,
+          "points_projecting_inside": 27923,
+          "foreground_grid_samples": 18593,
+          "median_color_L1": 0.03137254901960784,
+          "p90_color_L1": 0.12418300653594772,
+          "point_depth_above_10x_far": 9
+        },
+        {
+          "camera": "cam09",
+          "points_in_front": 40000,
+          "points_projecting_inside": 21548,
+          "foreground_grid_samples": 16194,
+          "median_color_L1": 0.03398692810457519,
+          "p90_color_L1": 0.14379084967320263,
+          "point_depth_above_10x_far": 31
+        },
+        {
+          "camera": "cam10",
+          "points_in_front": 40000,
+          "points_projecting_inside": 18174,
+          "foreground_grid_samples": 14299,
+          "median_color_L1": 0.03790849673202612,
+          "p90_color_L1": 0.15294117647058822,
+          "point_depth_above_10x_far": 120
+        },
+        {
+          "camera": "cam11",
+          "points_in_front": 40000,
+          "points_projecting_inside": 37106,
+          "foreground_grid_samples": 19258,
+          "median_color_L1": 0.039215686274509796,
+          "p90_color_L1": 0.32287581699346407,
+          "point_depth_above_10x_far": 13
+        },
+        {
+          "camera": "cam12",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35564,
+          "foreground_grid_samples": 18593,
+          "median_color_L1": 0.040522875816993466,
+          "p90_color_L1": 0.29150326797385623,
+          "point_depth_above_10x_far": 9
+        },
+        {
+          "camera": "cam13",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35212,
+          "foreground_grid_samples": 17897,
+          "median_color_L1": 0.07058823529411762,
+          "p90_color_L1": 0.18823529411764706,
+          "point_depth_above_10x_far": 10
+        },
+        {
+          "camera": "cam14",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36952,
+          "foreground_grid_samples": 19886,
+          "median_color_L1": 0.05490196078431373,
+          "p90_color_L1": 0.1516339869281046,
+          "point_depth_above_10x_far": 10
+        },
+        {
+          "camera": "cam15",
+          "points_in_front": 40000,
+          "points_projecting_inside": 37019,
+          "foreground_grid_samples": 20367,
+          "median_color_L1": 0.03398692810457519,
+          "p90_color_L1": 0.14379084967320263,
+          "point_depth_above_10x_far": 9
+        },
+        {
+          "camera": "cam16",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36578,
+          "foreground_grid_samples": 20164,
+          "median_color_L1": 0.0326797385620915,
+          "p90_color_L1": 0.1477124183006536,
+          "point_depth_above_10x_far": 7
+        },
+        {
+          "camera": "cam18",
+          "points_in_front": 40000,
+          "points_projecting_inside": 30462,
+          "foreground_grid_samples": 18955,
+          "median_color_L1": 0.03267973856209153,
+          "p90_color_L1": 0.1542483660130719,
+          "point_depth_above_10x_far": 9
+        },
+        {
+          "camera": "cam19",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32383,
+          "foreground_grid_samples": 20089,
+          "median_color_L1": 0.035294117647058844,
+          "p90_color_L1": 0.18039215686274512,
+          "point_depth_above_10x_far": 7
+        },
+        {
+          "camera": "cam20",
+          "points_in_front": 40000,
+          "points_projecting_inside": 27595,
+          "foreground_grid_samples": 18499,
+          "median_color_L1": 0.049673202614379054,
+          "p90_color_L1": 0.20130718954248364,
+          "point_depth_above_10x_far": 8
+        }
+      ],
+      "projection_scope": "Sparse 4px z-buffer RGB consistency under the existing S2GS loader. Diagnostic only; not feature reprojection error or proof of geometric accuracy.",
+      "retained_original_colmap_model": false,
+      "retained_fullres_undistorted_300": false,
+      "dense_fused_points_reported": 875198,
+      "farthest_sampling_reported": true,
+      "source_metadata_sha256": {
+        "poses_bounds.npy": "db9a4bf02491c67f583a1b9083af86b947599f8dcfa1ebf303a2b3ed013f5481",
+        "points3D_downsample2.ply": "2d65dae65c4c5793dc7aa57a023b8e06611e767c342ead9eb022d357f8cdb183"
+      },
+      "raw_cam00_video": {
+        "width": 2704,
+        "height": 2028,
+        "r_frame_rate": "30/1",
+        "duration": "40.000000",
+        "nb_frames": "1200"
+      },
+      "elapsed_seconds": 14.444699168991065
+    },
+    {
+      "scene": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result",
+      "cameras": [
+        "cam00",
+        "cam01",
+        "cam02",
+        "cam03",
+        "cam04",
+        "cam05",
+        "cam06",
+        "cam07",
+        "cam08",
+        "cam09",
+        "cam10",
+        "cam11",
+        "cam12",
+        "cam13",
+        "cam14",
+        "cam15",
+        "cam16",
+        "cam17",
+        "cam18",
+        "cam19",
+        "cam20"
+      ],
+      "frames_per_camera": 300,
+      "images": 6300,
+      "image_size": [
+        1345,
+        1008
+      ],
+      "initial_points": 40000,
+      "name": "flame_steak",
+      "png_crc_checked": 6300,
+      "png_crc_failures": [],
+      "test_camera": "cam00",
+      "train_cameras": 20,
+      "missing_camera_ids_from_raw": [],
+      "geometry": {
+        "points": 40000,
+        "unique_points": 40000,
+        "finite": true,
+        "orthogonality_max_error": 4.440892098500626e-16,
+        "determinant_min": 0.9999999999999997,
+        "camera_extent": 6.493634615837971,
+        "point_radius_quantiles": {
+          "p50": 9.618773780694127,
+          "p99": 18.53970714418173,
+          "p999": 21.829118439348456,
+          "max": 26.194377160832957
+        },
+        "far_points_over_10_camera_extents": 0,
+        "extreme_to_median_radius": 2.723255350220189,
+        "focal_range": [
+          1460.8872529673645,
+          1460.8872529673645
+        ],
+        "calibrated_dimensions": [
+          2689.0,
+          2016.0
+        ]
+      },
+      "decoded_sample_images": 63,
+      "projection_diagnostics": [
+        {
+          "camera": "cam00",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33567,
+          "foreground_grid_samples": 24027,
+          "median_color_L1": 0.019607843137254898,
+          "p90_color_L1": 0.07320261437908497,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam01",
+          "points_in_front": 40000,
+          "points_projecting_inside": 27170,
+          "foreground_grid_samples": 17954,
+          "median_color_L1": 0.02875816993464052,
+          "p90_color_L1": 0.1137254901960784,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam02",
+          "points_in_front": 40000,
+          "points_projecting_inside": 28670,
+          "foreground_grid_samples": 19152,
+          "median_color_L1": 0.033986928104575174,
+          "p90_color_L1": 0.09542483660130718,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam03",
+          "points_in_front": 40000,
+          "points_projecting_inside": 29952,
+          "foreground_grid_samples": 20183,
+          "median_color_L1": 0.04575163398692813,
+          "p90_color_L1": 0.10718954248366015,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam04",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31108,
+          "foreground_grid_samples": 21352,
+          "median_color_L1": 0.022222222222222223,
+          "p90_color_L1": 0.08235294117647059,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam05",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32002,
+          "foreground_grid_samples": 22435,
+          "median_color_L1": 0.022222222222222237,
+          "p90_color_L1": 0.08235294117647059,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam06",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34025,
+          "foreground_grid_samples": 24514,
+          "median_color_L1": 0.024836601307189538,
+          "p90_color_L1": 0.0849673202614379,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam07",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35309,
+          "foreground_grid_samples": 25338,
+          "median_color_L1": 0.022222222222222223,
+          "p90_color_L1": 0.08496732026143793,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam08",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34524,
+          "foreground_grid_samples": 24381,
+          "median_color_L1": 0.022222222222222216,
+          "p90_color_L1": 0.09281045751633987,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam09",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31567,
+          "foreground_grid_samples": 22317,
+          "median_color_L1": 0.04052287581699346,
+          "p90_color_L1": 0.11241830065359476,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam10",
+          "points_in_front": 39991,
+          "points_projecting_inside": 29523,
+          "foreground_grid_samples": 20587,
+          "median_color_L1": 0.030065359477124187,
+          "p90_color_L1": 0.12418300653594772,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam11",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34548,
+          "foreground_grid_samples": 23954,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.11633986928104577,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam12",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34663,
+          "foreground_grid_samples": 24827,
+          "median_color_L1": 0.02875816993464053,
+          "p90_color_L1": 0.11633986928104573,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam13",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31995,
+          "foreground_grid_samples": 21685,
+          "median_color_L1": 0.04705882352941174,
+          "p90_color_L1": 0.1084967320261438,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam14",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32651,
+          "foreground_grid_samples": 22507,
+          "median_color_L1": 0.03529411764705883,
+          "p90_color_L1": 0.09150326797385622,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam15",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34707,
+          "foreground_grid_samples": 24709,
+          "median_color_L1": 0.02091503267973856,
+          "p90_color_L1": 0.09150326797385622,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam16",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35305,
+          "foreground_grid_samples": 25315,
+          "median_color_L1": 0.023529411764705892,
+          "p90_color_L1": 0.09411764705882354,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam17",
+          "points_in_front": 40000,
+          "points_projecting_inside": 36168,
+          "foreground_grid_samples": 25766,
+          "median_color_L1": 0.02091503267973856,
+          "p90_color_L1": 0.09542483660130723,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam18",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35927,
+          "foreground_grid_samples": 25354,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.1019607843137255,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam19",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33911,
+          "foreground_grid_samples": 23663,
+          "median_color_L1": 0.026143790849673203,
+          "p90_color_L1": 0.1215686274509804,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam20",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33314,
+          "foreground_grid_samples": 22803,
+          "median_color_L1": 0.03529411764705883,
+          "p90_color_L1": 0.12418300653594772,
+          "point_depth_above_10x_far": 0
+        }
+      ],
+      "projection_scope": "Sparse 4px z-buffer RGB consistency under the existing S2GS loader. Diagnostic only; not feature reprojection error or proof of geometric accuracy.",
+      "retained_original_colmap_model": true,
+      "retained_fullres_undistorted_300": true,
+      "source_metadata_sha256": {
+        "poses_bounds.npy": "531b34bc81785455145de89e2d4b8450dfb85c31b37d95d6b00d34cdd2629999",
+        "points3D_downsample2.ply": "d227fe877d84a12eeaf50c0fe508694aea63324350910e7daf8f4a9087b8db3b"
+      },
+      "raw_cam00_video": {
+        "width": 2704,
+        "height": 2028,
+        "r_frame_rate": "30/1",
+        "duration": "10.000000",
+        "nb_frames": "300"
+      },
+      "elapsed_seconds": 13.502262227993924
+    },
+    {
+      "scene": "/home/gamer-02/Documents/DeepLearning/data/n3dv/sear_steak_result",
+      "cameras": [
+        "cam00",
+        "cam01",
+        "cam02",
+        "cam03",
+        "cam04",
+        "cam05",
+        "cam06",
+        "cam07",
+        "cam08",
+        "cam09",
+        "cam10",
+        "cam11",
+        "cam12",
+        "cam13",
+        "cam14",
+        "cam15",
+        "cam16",
+        "cam17",
+        "cam18",
+        "cam19",
+        "cam20"
+      ],
+      "frames_per_camera": 300,
+      "images": 6300,
+      "image_size": [
+        1344,
+        1007
+      ],
+      "initial_points": 40000,
+      "name": "sear_steak",
+      "png_crc_checked": 6300,
+      "png_crc_failures": [],
+      "test_camera": "cam00",
+      "train_cameras": 20,
+      "missing_camera_ids_from_raw": [],
+      "geometry": {
+        "points": 40000,
+        "unique_points": 40000,
+        "finite": true,
+        "orthogonality_max_error": 4.440892098500626e-16,
+        "determinant_min": 0.9999999999999994,
+        "camera_extent": 6.498720294251178,
+        "point_radius_quantiles": {
+          "p50": 9.576764946843516,
+          "p99": 18.589182769017114,
+          "p999": 22.281613774886587,
+          "max": 26.58731717655677
+        },
+        "far_points_over_10_camera_extents": 0,
+        "extreme_to_median_radius": 2.776231569233606,
+        "focal_range": [
+          1461.8266929006918,
+          1461.8266929006918
+        ],
+        "calibrated_dimensions": [
+          2687.0,
+          2014.0
+        ]
+      },
+      "decoded_sample_images": 63,
+      "projection_diagnostics": [
+        {
+          "camera": "cam00",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33464,
+          "foreground_grid_samples": 23939,
+          "median_color_L1": 0.020915032679738543,
+          "p90_color_L1": 0.07450980392156864,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam01",
+          "points_in_front": 40000,
+          "points_projecting_inside": 27267,
+          "foreground_grid_samples": 17977,
+          "median_color_L1": 0.028758169934640514,
+          "p90_color_L1": 0.10980392156862745,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam02",
+          "points_in_front": 40000,
+          "points_projecting_inside": 28764,
+          "foreground_grid_samples": 19206,
+          "median_color_L1": 0.032679738562091554,
+          "p90_color_L1": 0.09150326797385622,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam03",
+          "points_in_front": 40000,
+          "points_projecting_inside": 30045,
+          "foreground_grid_samples": 20186,
+          "median_color_L1": 0.04575163398692812,
+          "p90_color_L1": 0.1098039215686275,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam04",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31192,
+          "foreground_grid_samples": 21529,
+          "median_color_L1": 0.022222222222222237,
+          "p90_color_L1": 0.08235294117647061,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam05",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31986,
+          "foreground_grid_samples": 22327,
+          "median_color_L1": 0.023529411764705854,
+          "p90_color_L1": 0.08104575163398692,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam06",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33830,
+          "foreground_grid_samples": 24136,
+          "median_color_L1": 0.026143790849673183,
+          "p90_color_L1": 0.0849673202614379,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam07",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35112,
+          "foreground_grid_samples": 25125,
+          "median_color_L1": 0.02352941176470587,
+          "p90_color_L1": 0.08627450980392155,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam08",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34352,
+          "foreground_grid_samples": 24184,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.0980392156862745,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam09",
+          "points_in_front": 40000,
+          "points_projecting_inside": 31483,
+          "foreground_grid_samples": 22157,
+          "median_color_L1": 0.040522875816993466,
+          "p90_color_L1": 0.11241830065359476,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam10",
+          "points_in_front": 39991,
+          "points_projecting_inside": 29449,
+          "foreground_grid_samples": 20412,
+          "median_color_L1": 0.03398692810457516,
+          "p90_color_L1": 0.1279738562091522,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam11",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34364,
+          "foreground_grid_samples": 23808,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.1189542483660131,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam12",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34562,
+          "foreground_grid_samples": 24727,
+          "median_color_L1": 0.03006535947712417,
+          "p90_color_L1": 0.12026143790849673,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam13",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32117,
+          "foreground_grid_samples": 21826,
+          "median_color_L1": 0.04444444444444445,
+          "p90_color_L1": 0.1084967320261438,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam14",
+          "points_in_front": 40000,
+          "points_projecting_inside": 32704,
+          "foreground_grid_samples": 22641,
+          "median_color_L1": 0.0326797385620915,
+          "p90_color_L1": 0.09411764705882354,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam15",
+          "points_in_front": 40000,
+          "points_projecting_inside": 34629,
+          "foreground_grid_samples": 24513,
+          "median_color_L1": 0.0222222222222222,
+          "p90_color_L1": 0.09542483660130717,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam16",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35237,
+          "foreground_grid_samples": 25119,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.09542483660130723,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam17",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35997,
+          "foreground_grid_samples": 25609,
+          "median_color_L1": 0.02091503267973858,
+          "p90_color_L1": 0.10091503267973953,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam18",
+          "points_in_front": 40000,
+          "points_projecting_inside": 35730,
+          "foreground_grid_samples": 25110,
+          "median_color_L1": 0.024836601307189548,
+          "p90_color_L1": 0.10457516339869281,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam19",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33784,
+          "foreground_grid_samples": 23336,
+          "median_color_L1": 0.026143790849673183,
+          "p90_color_L1": 0.11372549019607843,
+          "point_depth_above_10x_far": 0
+        },
+        {
+          "camera": "cam20",
+          "points_in_front": 40000,
+          "points_projecting_inside": 33127,
+          "foreground_grid_samples": 22651,
+          "median_color_L1": 0.03529411764705883,
+          "p90_color_L1": 0.12156862745098036,
+          "point_depth_above_10x_far": 0
+        }
+      ],
+      "projection_scope": "Sparse 4px z-buffer RGB consistency under the existing S2GS loader. Diagnostic only; not feature reprojection error or proof of geometric accuracy.",
+      "retained_original_colmap_model": false,
+      "retained_fullres_undistorted_300": false,
+      "dense_fused_points_reported": 929333,
+      "farthest_sampling_reported": true,
+      "source_metadata_sha256": {
+        "poses_bounds.npy": "a7087970dac5cc4b53cd38751a0526734a52cdc746c84cd2baf999496e386079",
+        "points3D_downsample2.ply": "4b37627f28dd259ccee199e78b0b02406609475efc2f7fa0b2d2c9b54adcabea"
+      },
+      "raw_cam00_video": {
+        "width": 2704,
+        "height": 2028,
+        "r_frame_rate": "30/1",
+        "duration": "10.000000",
+        "nb_frames": "300"
+      },
+      "elapsed_seconds": 13.807350487011718
+    }
+  ],
+  "total_pngs": 36000,
+  "all_png_crc_passed": true,
+  "pointclouds_finite": true,
+  "training_started": false,
+  "source_data_modified": false,
+  "caveat": "Five processed scenes retain LLFF poses and downsampled PLY but have deleted original COLMAP/dense intermediates. Structural checks and color-projection diagnostics do not certify full SfM/MVS accuracy.",
+  "flame_calibration_crosscheck": {
+    "rotation_max_abs_difference": 2.220446049250313e-16,
+    "camera_center_max_abs_difference": 8.881784197001252e-16,
+    "intrinsics": [
+      {
+        "model": "PINHOLE",
+        "width": 2689,
+        "height": 2016,
+        "parameters": [
+          1460.8872529673645,
+          1455.3858514809303,
+          1344.5,
+          1008.0
+        ]
+      }
+    ],
+    "note": "Known original COLMAP model confirms pose row ordering and LLFF axis recovery. poses_bounds keeps fx only; fx and fy are not identical in the original PINHOLE model."
+  },
+  "native_my4dgs_adapters": {
+    "coffee_martini": false,
+    "cook_spinach": false,
+    "cut_roasted_beef": false,
+    "flame_salmon_1": false,
+    "flame_steak": true,
+    "sear_steak": false
+  },
+  "native_firstframe_checkpoints": [
+    "/home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth",
+    "/home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_1345x1008/20261006T104248_5768e2/ckpt-0-15000.pth"
+  ],
+  "known_firstframe_only_input": {
+    "path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/cook_spinach/recongs_first_frame_20260919",
+    "full_sequence_ready": false,
+    "reason": "Only frame0000 contains real images; later directories are metadata placeholders, as stated in its README."
+  },
+  "warnings": [
+    "coffee_martini and flame_salmon_1 have a substantial extreme-distance tail in the 40000-point FPS seed cloud; inspect multi-view support/depth before constructing cleaned variants. Distance alone is not an automatic delete rule.",
+    "Only flame_steak preserves the original undistorted COLMAP model and complete full-size undistorted frames. Five scenes retain processed half-resolution LLFF inputs, not the exact original per-camera PINHOLE intrinsics or MVS intermediates.",
+    "Current 1600x1199 flame_steak results use a different resolution from the approximately 1345-wide S2GS training data; align the full-dataset protocol before combining results.",
+    "Five scenes still need matching native first-frame Gaussian checkpoints and loader adapters before dynamic my4dgs training."
+  ]
+}

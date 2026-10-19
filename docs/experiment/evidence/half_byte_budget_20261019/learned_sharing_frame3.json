@@ -1,0 +1,42 @@
+{
+  "frame": 3,
+  "step": 200,
+  "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_v1/20261019T015438_7f571f/rigid-ckpt-3-200.pth",
+  "checkpoint_sha256": "dd05a9623c1408549b6ecd27ec5ec3cf6cfd0b698202a27ae89b9a9cdfafd8ac",
+  "checkpoint_unchanged": true,
+  "scope": "Prebirth motion packets only. Same quantized total motion and reference, with production encode/decode checks. Fitted coarse predictors minimize the existing rate/L1 proxy; this is representation diagnosis, not a retrained ablation or exact entropy optimum.",
+  "rows": [
+    {
+      "representation": "actual_learned_hierarchy",
+      "packet_bytes": 35394,
+      "selected_regions": 140,
+      "gs_translation_blocks": 11628,
+      "integer_total_motion_unchanged": true,
+      "max_float_pose_roundoff": 0.0
+    },
+    {
+      "representation": "same_motion_existing_eight_coarse",
+      "packet_bytes": 134071,
+      "selected_regions": 8,
+      "gs_translation_blocks": 99372,
+      "integer_total_motion_unchanged": true,
+      "max_float_pose_roundoff": 7.62939453125e-06
+    },
+    {
+      "representation": "same_motion_rate_l1_refitted_eight_coarse",
+      "packet_bytes": 114047,
+      "selected_regions": 8,
+      "gs_translation_blocks": 72657,
+      "integer_total_motion_unchanged": true,
+      "max_float_pose_roundoff": 7.62939453125e-06
+    },
+    {
+      "representation": "same_motion_all_gs_without_shared_predictor",
+      "packet_bytes": 171347,
+      "selected_regions": 8,
+      "gs_translation_blocks": 204500,
+      "integer_total_motion_unchanged": true,
+      "max_float_pose_roundoff": 3.814697265625e-06
+    }
+  ]
+}

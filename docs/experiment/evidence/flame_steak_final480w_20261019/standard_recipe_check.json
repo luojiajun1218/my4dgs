@@ -1,0 +1,10 @@
+{
+  "status": "matched",
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563",
+  "module_trainer_data_match_standard": true,
+  "no_dynamic_prefix": true,
+  "checkpoint_match_standard": true,
+  "bootstrap_reference_sha256": "bf7b822c4a53d66704a52c180342422b0c10037b251d09ddae24a8841214d3c3",
+  "bootstrap_reference_identical_to_previous": true,
+  "unchanged_training_source_files": 467
+}

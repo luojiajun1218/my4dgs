@@ -1,0 +1,61 @@
+{
+  "scope": "Same dynamic frames 1..29; diagnostics only, not a resolution-only controlled experiment.",
+  "pixel_count_old": 1918400,
+  "pixel_count_new": 1355760,
+  "pixel_reduction_fraction": 0.2932860717264387,
+  "initial_gaussians_old": 206237,
+  "initial_gaussians_new": 228432,
+  "mean_gaussians_old": 202390.1379310345,
+  "mean_gaussians_new": 223916.89655172414,
+  "train_seconds_old": 33.08102462331038,
+  "train_seconds_new": 31.285357302549528,
+  "train_seconds_frames2_29_old": 33.02561499539297,
+  "train_seconds_frames2_29_new": 29.32789554185417,
+  "first_dynamic_seconds_new": 86.09428660201957,
+  "psnr_old": 34.36111752740268,
+  "psnr_new": 34.07298620815935,
+  "open_gates_old": 41.93103448275862,
+  "open_gates_new": 43.55172413793103,
+  "regions_old": 127.03448275862068,
+  "regions_new": 133.3793103448276,
+  "residual_points_old": 14602.965517241379,
+  "residual_points_new": 17644.55172413793,
+  "residual_fraction_old": 0.07218004052783336,
+  "residual_fraction_new": 0.07883810203199641,
+  "new_gaussians_old": 77.06896551724138,
+  "new_gaussians_new": 109.48275862068965,
+  "native_firstframe_psnr_old": 34.01131820678711,
+  "native_firstframe_psnr_new_before_pruning": 32.99122619628906,
+  "components_mean_kb": {
+    "motion_bytes": {
+      "old": 43.05620689655172,
+      "new": 51.57372413793104
+    },
+    "opacity_bytes": {
+      "old": 5.184241379310345,
+      "new": 6.085413793103449
+    },
+    "feature_bytes": {
+      "old": 0.25351724137931037,
+      "new": 0.25489655172413794
+    },
+    "birth_bytes": {
+      "old": 1.6280689655172413,
+      "new": 2.3447586206896553
+    },
+    "manifest_bytes": {
+      "old": 0.6573793103448275,
+      "new": 0.6583103448275862
+    }
+  },
+  "complete_update_kb_old": 50.77941379310345,
+  "complete_update_kb_new": 60.91710344827586,
+  "rate_normalization_formula": "rate_loss_weight * estimated_bytes / (24 * initial_retained_gs_count)",
+  "rate_loss_weight_both": 0.002,
+  "byte_penalty_old": 4.040658724347878e-10,
+  "byte_penalty_new": 3.6480586491092903e-10,
+  "byte_penalty_reduction_fraction": 0.09716239406037674,
+  "quantization_translation_step_world_both": 0.00038961812970228493,
+  "view_schedule_both": "300 optimizer steps: 200 motion steps with 2 views, then 100 birth steps with 1 view",
+  "interpretation": "Measured differences accompany both changed image resolution and a freshly trained first frame; no single-cause attribution is established."
+}

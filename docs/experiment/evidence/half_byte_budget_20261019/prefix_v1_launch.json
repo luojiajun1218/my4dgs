@@ -1,0 +1,21 @@
+{
+  "pid": 1479350,
+  "started_at_utc": "2026-10-18T17:54:36.133467+00:00",
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/run_prefix.py",
+    "--source",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1",
+    "--config",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1/config/n3dv/flame_steak_half_byte_budget_20261019.yaml",
+    "--through-frame",
+    "3",
+    "--status",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/prefix_v1_status.json"
+  ],
+  "source": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1",
+  "config_sha256": "4b18824d5cd6a8a02bd41ee5e5b44a0eda74f7f506618708e2d3fd3f151fc661",
+  "goal": "Absolute byte baseline with unchanged shared discovery; planned data remains 300 frames, stopping after completed frame3.",
+  "tests": "346 tests passed",
+  "gpu_power_limit_watts": 350
+}

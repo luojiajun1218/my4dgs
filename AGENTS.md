@@ -3,6 +3,20 @@
 本地 data/colmap4d/flame_steak 指向 /home/gamer-02/Documents/DeepLearning/ReCon-GS/data/colmap4d/flame_steak；其帧图像与 COLMAP 文件链接到 /home/gamer-02/Documents/DeepLearning/S2GS/data/standard_flame_steak_300。当前 配置使用 resolution: -1、num_frames: 300，并加载共享首帧；libgs 会自动缩小宽图。
 output 中历史结果仅用于读取；目录可能包含软链接，不修改链接目标。新实验使用新的 experiment_name。Git 不保存原始训练产物。
 
+## N3DV 全场景数据检查（2026-10-18）
+
+共享数据根目录为 `/home/gamer-02/Documents/DeepLearning/data/n3dv`，六景处理结果在 `<scene>_result`，每相机 300 帧，去畸变后半分辨率宽约 1341–1345。完整检查见 `docs/experiment/20261018_n3dv_preprocessing_audit.md`。图像完整性已通过，但 coffee_martini、flame_salmon_1 的种子点云存在远距离长尾，仍需核实。只有 flame 保留原去畸变 COLMAP 模型，不能混用不同版本的位姿和 PLY。
+
+作者要求本轮六景首帧全部重新训练，不复用历史首帧检查点。旧 flame 的 1600×1199 指标独立保留，半分辨率需要重新统计。`config/n3dv/flame_steak_half_frame0.yaml` 使用 native ReCon-GS 入口，只训练新首帧；当前 my4dgs 动态入口仍要求完成的 native 首帧 checkpoint。
+
+新的 flame 首帧已完成：`output/n3dv_half_fresh_frame0_20261018/flame_steak/20261018T224824_9ca22a/ckpt-0-15000.pth`，1345×1008、15000 步、237495 GS，cam00 PSNR 32.991226 dB；已用 my4dgs 渲染器独立读取核对。这是首帧指标，完整六景动态训练尚未启动。
+
+flame 半分辨率连续 300 帧已于 2026-10-19 完成：配置 `config/n3dv/flame_steak_half_fresh_full300.yaml` 使用 `resolution: 1` 和新首帧；第 0–299 帧平均 PSNR 34.265514 dB，动态完整更新 60.913512 KB/帧，纯渲染 291.513 FPS，训练及评估 29.7221 秒/动态帧。输出 `output/n3dv_flame_steak_half_fresh_full300_20261018/20261018T231032_84d9ab`，详见 `docs/experiment/20261018_flame_steak_half_fresh_full300.md`。存储目标尚未达到；每字节惩罚按初始保留 GS 数归一化，跨分辨率/场景比较需留意点数变化。其余五景尚未启动完整动态训练。
+
+2026-10-19 半分辨率改进已完成连续 300 帧及独立顺序解码：**34.208911 dB、50.796388 KB/动态帧、291.792 纯渲染 FPS**，训练评估 29.4643 秒/动态帧。相比同分辨率基线存储少 16.61%，PSNR 低 0.056603 dB；达到画质、约 50 KB 和纯渲染目标，严格 ≤50 KB 尚未达到。新增可选 `rate_normalization: budget` / `rate_budget_bytes: 50000`，只是损失单位；本次每字节系数 6e-10，比基线提高 64.47%，不能把收益仅归因于归一化。使用原本新训练的 15000 步半分辨率首帧，未采用动态表现更差的 17000 步精修参考。284/299 动态帧存在有效细分，94.688% 旧 GS 无逐点平移残差。输出 `output/fs_goal_half_budget_20261019/absolute_bytes_full300/20261019T023630_678e85`，统计 `output/fs_goal_half_budget_20261019/measurement_full300`，冻结源码 `output/fs_goal_half_budget_20261019/source_v1`；详见 `docs/experiment/20261019_half_byte_budget_full300.md`，前期短测见 `docs/experiment/20261019_half_byte_budget.md`。从首帧复现用 `config/n3dv/flame_steak_half_byte_budget_20261019.yaml`，实际完整输出配置则包含第 29 帧续跑指针。实验及 FPS 测量时为 350 W；作者提供管理员认证后，已于 2026-10-19 恢复默认 480 W，NVML 配置/生效上限均为 480 W，限功率服务 inactive/disabled，遥测服务保持 active/enabled。恢复记录见 `output/fs_goal_half_budget_20261019/power_restore_success.json`；既有 291.792 FPS 仍应标注为 350 W 测得。其余五景完整训练尚未启动。
+
+2026-10-19 作者指定的 **480 W 最终正式复跑已完成并核验**：标准 1345×1008、300 帧、cam00，**34.211170 dB / 51.027672 KB/动态完整更新 / 292.205 纯渲染 FPS**，训练与评估 29.4586 秒/动态帧。今后 flame_steak 最终指标以此次为准，不使用此前 350 W 的结果替代。固定原字节代价配方，加载本轮此前新训的 15000 步半分辨率首帧，从第 0 帧参考开始，未继承动态前缀、未改训练参数。推荐配置 `config/n3dv/flame_steak_half_final480w.yaml`；输出 `output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563`；逐帧统计在 `output/n3dv_flame_steak_half_final480w_20261019/measurement`；最终结果指针 `output/n3dv_flame_steak_half_final480w_20261019/final_result.json`。记录 `docs/experiment/20261019_flame_steak_final480w_full300.md`，含独立顺序解码、15000 次渲染计时及源码摘要。质量与纯渲染速度达标，存储比严格 50 KB 高约 2.06%；纯渲染 FPS 不含解码/上传，首帧参考另计。291/299 动态帧存在有效细分，94.705% 旧 GS 无逐点平移残差。其余五景完整训练尚未开始。
+
 # 特别须知
 实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档（别乱写文档，做完实验 再写文档），
 文档中记录这次实验的核心idea，以及对应的代码改动（简要版的，不需要特别详细，可以渐进式披露），运行的结果分析，以及可能造成这种结果的原因。

@@ -1,0 +1,62 @@
+{
+  "half_baseline": {
+    "psnr": 33.926753997802734,
+    "complete_kb": 102.996,
+    "residual_points": 31673,
+    "regions": 229.33333333333334,
+    "gaussians": 224585,
+    "by_frame": [
+      {
+        "frame": 1,
+        "psnr": 33.87789535522461,
+        "complete_kb": 182.03,
+        "residual_points": 59394,
+        "regions": 351
+      },
+      {
+        "frame": 2,
+        "psnr": 33.74562072753906,
+        "complete_kb": 69.295,
+        "residual_points": 19669,
+        "regions": 162
+      },
+      {
+        "frame": 3,
+        "psnr": 34.15674591064453,
+        "complete_kb": 57.663,
+        "residual_points": 15956,
+        "regions": 175
+      }
+    ]
+  },
+  "absolute_bytes_v1": {
+    "psnr": 33.993265787760414,
+    "complete_kb": 89.187,
+    "residual_points": 26127.666666666668,
+    "regions": 185,
+    "gaussians": 224577,
+    "by_frame": [
+      {
+        "frame": 1,
+        "psnr": 33.97974395751953,
+        "complete_kb": 164.201,
+        "residual_points": 51791,
+        "regions": 295
+      },
+      {
+        "frame": 2,
+        "psnr": 33.87397384643555,
+        "complete_kb": 56.759,
+        "residual_points": 14964,
+        "regions": 120
+      },
+      {
+        "frame": 3,
+        "psnr": 34.12607955932617,
+        "complete_kb": 46.601,
+        "residual_points": 11628,
+        "regions": 140
+      }
+    ]
+  }
+}

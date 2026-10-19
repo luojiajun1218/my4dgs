@@ -1,0 +1,21 @@
+{
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source/scripts/benchmark_rigid_residual_tree.py",
+    "--run=/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563",
+    "--sequence",
+    "--mode=stream",
+    "--sequence-warmups=10",
+    "--sequence-renders=50",
+    "--segment-size=30",
+    "--gpu-check-interval=30",
+    "--psnr-tolerance=0.00001",
+    "--ssim-tolerance=0.000001",
+    "--l1-tolerance=0.000001",
+    "--output=/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/measurement/decoded_sequence.json"
+  ],
+  "benchmark_sha256": "6994c4638eb7c7f8022ecf08de0e5da13951388f38774d1c9cb82a037b13c9c6",
+  "pipeline_source": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source",
+  "power_before": "480.00 W, 134.60 W, 51",
+  "power_after": "480.00 W, 168.51 W, 48"
+}

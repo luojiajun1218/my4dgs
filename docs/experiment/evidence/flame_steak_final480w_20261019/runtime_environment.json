@@ -1,0 +1,14 @@
+{
+  "python": "3.11.16",
+  "packages": {
+    "torch": "2.5.1+cu121",
+    "torchvision": "0.20.1+cu121",
+    "numpy": "1.26.4",
+    "Pillow": "12.3.0",
+    "omegaconf": "2.3.1",
+    "libgs": "0.0.1",
+    "lpips": "not distributed under this name"
+  },
+  "gpu": "NVIDIA GeForce RTX 3090 Ti, 595.99.02, 480.00 W",
+  "environment": "ReConGS"
+}

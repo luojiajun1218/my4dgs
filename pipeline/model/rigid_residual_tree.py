@@ -41,6 +41,7 @@ class RigidTreeConfig:
     codec_rate_interval: int = 20
     codec_rate_initial_steps: int = 20
     rate_normalization: str = 'frame'
+    rate_budget_bytes: Optional[int] = None
     relative_motion_loss_weight: float = 0.001
     relative_motion_units: str = 'extent_radians'
     rate_warmup_steps: int = 0
@@ -124,8 +125,14 @@ class RigidTreeConfig:
         if window is not None and (isinstance(window, bool) or
                 not isinstance(window, int) or not 1 <= window <= self.motion_steps):
             raise ValueError('Motion fit window must be a positive integer within the motion phase')
-        if self.rate_normalization not in ('frame', 'reference'):
-            raise ValueError('rate_normalization must be frame or reference')
+        if self.rate_normalization not in ('frame', 'reference', 'budget'):
+            raise ValueError('rate_normalization must be frame, reference, or budget')
+        if self.rate_normalization == 'budget':
+            if (isinstance(self.rate_budget_bytes, bool) or
+                    not isinstance(self.rate_budget_bytes, int) or self.rate_budget_bytes < 1):
+                raise ValueError('Budget normalization requires positive integer rate_budget_bytes')
+        elif self.rate_budget_bytes is not None:
+            raise ValueError('rate_budget_bytes requires budget normalization')
         if self.relative_motion_units != 'extent_radians':
             raise ValueError('Active motion fitting uses extent-normalized translation and radians')
         for name in ('motion_xyz_step_extent', 'motion_rotation_step_rad',
@@ -397,6 +404,11 @@ class MotionBase(nn.Module):
 
     @property
     def rate_normalization_bytes(self):
+        # An explicit byte baseline keeps the cost of a byte independent of
+        # initialization density and later births. It is a loss scale, not a
+        # hard packet-size constraint; actual complete packets are measured.
+        if self.config.rate_normalization == 'budget':
+            return self.config.rate_budget_bytes
         return max(1, self.rate_normalization_count * 24)
 
 

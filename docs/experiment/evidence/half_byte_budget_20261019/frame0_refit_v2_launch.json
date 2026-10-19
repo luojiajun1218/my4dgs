@@ -1,0 +1,17 @@
+{
+  "pid": 1485470,
+  "started_at_utc": "2026-10-18T18:02:24.165773+00:00",
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/run_native_refit.py",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/config/n3dv/flame_steak_half_frame0_refit_20261019.yaml"
+  ],
+  "config_sha256": "f28366258ff47285c2f21ff3b39ee144a10f62252babd09c5968d206c1bc6cba",
+  "runner_sha256": "9892cd70ce5fddf2ccc890f43e3f3253a9e22d91c5c592b690482546cffc9872",
+  "training_changes": {
+    "additional_steps": 2000,
+    "noise_scale": 0,
+    "densification": false
+  },
+  "reason": "Native resume skipped frame timer initialization, causing final timer.stop to fail before checkpoint save. Retry initializes only that timer; prior failed run is preserved."
+}

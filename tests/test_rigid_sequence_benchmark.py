@@ -29,6 +29,33 @@ def frame_row(frame, seconds, psnr, decode_seconds=0., motion_bytes=0,
 
 
 class SequenceAggregationTests(unittest.TestCase):
+    def test_prefix_measurement_never_changes_the_planned_dataset(self):
+        self.assertEqual(benchmark._sequence_frame_count(300, None), 300)
+        self.assertEqual(benchmark._sequence_frame_count(300, 29), 30)
+        self.assertEqual(benchmark._sequence_frame_count(300, 299), 300)
+        for invalid in (-1, 0, 300, True, 1.5):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'through-frame'):
+                benchmark._sequence_frame_count(300, invalid)
+        with self.assertRaises(ValueError):
+            benchmark._sequence_frame_count(1, None)
+
+    def test_quality_validation_uses_configured_resolution(self):
+        half = SimpleNamespace(expected_image_size=[1345, 1008])
+        full = SimpleNamespace(expected_image_size=[1600, 1199])
+        image = torch.zeros(3, 1008, 1345)
+        shape = benchmark._configured_image_shape(half)
+        self.assertEqual(shape, (3, 1008, 1345))
+        benchmark._validate_quality_input(image, shape)
+        with self.assertRaisesRegex(ValueError, 'cam00 input'):
+            benchmark._validate_quality_input(image, benchmark._configured_image_shape(full))
+        for value in (float('nan'), -0.1, 1.1):
+            image[0, 0, 0] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'finite RGB'):
+                benchmark._validate_quality_input(image, shape)
+        for invalid in (None, [0, 1008], [1345], [True, 1008]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'expected_image_size'):
+                benchmark._configured_image_shape(SimpleNamespace(expected_image_size=invalid))
+
     def test_render_fps_uses_total_renders_and_only_render_seconds(self):
         rows = [frame_row(0, 1., 30., 100.),
                 frame_row(1, 2., 31., 200.),

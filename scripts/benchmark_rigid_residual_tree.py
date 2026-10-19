@@ -233,15 +233,30 @@ def _render_checked(module, view):
     return rendered.clamp(0., 1.)
 
 
+def _configured_image_shape(data_config):
+    size = getattr(data_config, 'expected_image_size', None)
+    if (size is None or len(size) != 2 or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in size)):
+        raise ValueError('Benchmark requires explicit positive expected_image_size [width, height]')
+    return (3, size[1], size[0])
+
+
+def _validate_quality_input(image, expected_shape):
+    import torch
+
+    if (tuple(image.shape) != tuple(expected_shape) or
+            not bool(torch.isfinite(image).all()) or
+            bool((image < -1e-6).any()) or
+            bool((image > 1 + 1e-6).any())):
+        raise ValueError(f'cam00 input must be finite RGB in [0,1] with shape {expected_shape}')
+
+
 def _quality(module, view, expected, tolerance):
     import torch
     from libgs.metric import psnr, ssim
 
-    if (view.image.shape != (3, 1199, 1600) or
-            not bool(torch.isfinite(view.image).all()) or
-            bool((view.image < -1e-6).any()) or
-            bool((view.image > 1 + 1e-6).any())):
-        raise ValueError('cam00 input must be finite RGB in [0,1] at 1600x1199')
+    _validate_quality_input(view.image, _configured_image_shape(module.datamodule.config))
     image = _render_checked(module, view)
     measured = dict(psnr=float(psnr(image, view.image)),
                     ssim=float(ssim(image, view.image)),
@@ -547,6 +562,17 @@ def _selected_render_cache(module, args):
             args.render_attribute_cache)
 
 
+def _sequence_frame_count(planned_frames, through_frame):
+    if planned_frames < 2:
+        raise ValueError('Sequence needs frame0 and dynamic frames')
+    if through_frame is None:
+        return planned_frames
+    if (isinstance(through_frame, bool) or not isinstance(through_frame, int) or
+            not 1 <= through_frame < planned_frames):
+        raise ValueError('through-frame must select a dynamic frame inside the planned sequence')
+    return through_frame + 1
+
+
 def _run_sequence(args, config, run, device, first_gpu_check):
     import torch
 
@@ -560,9 +586,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
     stream = args.stream_dir or run / 'frame_storage' / 'rigid_tree'
     reference = (args.reference or stream / 'reference_frame0.npz').resolve()
     module, datamodule = _make_module(config, device)
-    num_frames = datamodule.num_frames
-    if num_frames < 2:
-        raise ValueError('Complete sequence needs frame0 and dynamic frames')
+    planned_frames = datamodule.num_frames
+    num_frames = _sequence_frame_count(planned_frames, getattr(args, 'through_frame', None))
     for frame in range(1, num_frames):
         for path in (stream / f'motion_{frame:03d}.bin',
                      stream / f'frame_{frame:03d}.json',
@@ -634,10 +659,13 @@ def _run_sequence(args, config, run, device, first_gpu_check):
                                status=check_gpu_exclusivity()))
         del view
     groups = _sequence_groups(rows, args.segment_size)
-    result = dict(schema='rigid_residual_tree_complete_sequence_benchmark_v1',
+    complete = num_frames == planned_frames
+    result = dict(schema=('rigid_residual_tree_complete_sequence_benchmark_v1' if complete else
+                          'rigid_residual_tree_sequence_prefix_benchmark_v1'),
         run=str(run), stream_dir=str(stream.resolve()), reference=str(reference),
         expected_frames=num_frames, measured_frames=len(rows),
-        image_shape=[3, 1199, 1600], cache_enabled=cache_enabled,
+        planned_frames=planned_frames, sequence_complete=complete,
+        image_shape=list(_configured_image_shape(config.data)), cache_enabled=cache_enabled,
         gpu_name=torch.cuda.get_device_name(device),
         storage=_summarize_sequence_storage(rows, reference_bytes),
         timing_protocol=dict(warmups_per_frame=args.sequence_warmups,
@@ -674,6 +702,8 @@ def main():
     frame_selection.add_argument('--frame', type=int)
     frame_selection.add_argument('--sequence', action='store_true',
                                  help='Evaluate every frame from reference frame0')
+    parser.add_argument('--through-frame', type=int,
+                        help='With --sequence, explicitly measure only a completed prefix; keep planned data unchanged')
     parser.add_argument('--mode', choices=('auto', 'checkpoint', 'stream', 'both'),
                         default='auto')
     parser.add_argument('--checkpoint', type=Path)
@@ -698,6 +728,8 @@ def main():
     parser.add_argument('--l1-tolerance', type=float, default=0.0001)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if args.through_frame is not None and not args.sequence:
+        parser.error('--through-frame requires --sequence')
     if args.output.exists():
         raise FileExistsError(args.output)
     if args.frame is not None and args.frame < 1:
@@ -713,8 +745,7 @@ def main():
     first_gpu_check = check_gpu_exclusivity()
     run = args.run.resolve()
     config = _load_config(run)
-    if config.data.resolution != -1 or config.data.expected_image_size != [1600, 1199]:
-        raise ValueError('Benchmark requires full-resolution 1600x1199 configuration')
+    expected_shape = _configured_image_shape(config.data)
     if args.sequence:
         _run_sequence(args, config, run, device, first_gpu_check)
         return
@@ -735,7 +766,7 @@ def main():
         raise ValueError('--checkpoint is unused in stream mode')
     module, datamodule = _make_module(config, device)
     view, test_views = _cam00(datamodule, args.frame, device)
-    if tuple(view.image.shape) != (3, 1199, 1600):
+    if tuple(view.image.shape) != expected_shape:
         raise ValueError(f'cam00 loaded at unexpected shape {tuple(view.image.shape)}')
 
     expected = None

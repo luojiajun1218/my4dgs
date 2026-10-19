@@ -1173,6 +1173,7 @@ class SpatialGatedMotion(MotionBase):
             result.update(self._support_diagnostics(probabilities))
             result.update(rate_bytes_hard=self._hard_motion_bytes() + self._metadata_bytes(),
                 rate_normalization_gs_count=self.base_xyz.new_tensor(self.rate_normalization_count),
+                rate_normalization_bytes=self.base_xyz.new_tensor(self.rate_normalization_bytes),
                 rate_byte_price=self.base_xyz.new_tensor(self.config.rate_loss_weight * ramp / self.rate_normalization_bytes))
             if codec:
                 result.update(rate_bytes_raw=result['rate_bytes_hard'],

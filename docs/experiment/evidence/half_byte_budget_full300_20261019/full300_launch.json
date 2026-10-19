@@ -1,0 +1,17 @@
+{
+  "pid": 1516189,
+  "started_at_utc": "2026-10-18T18:36:28.115260+00:00",
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1/main.py",
+    "--config=/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/full300_config.yaml"
+  ],
+  "config_sha256": "e32f2d26cd8ca32bc96ddbb8b7d467a155f6f2236d3fdcee1b941c5fc6660ca9",
+  "source_manifest": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/source_v1/source_manifest.json",
+  "frozen_source_unchanged": true,
+  "prefix_frames": 30,
+  "planned_frames": 300,
+  "changes_from_verified_short_run": "Only output name and verified resume pointers. No module/trainer/data/quantization changes.",
+  "fresh_first_frame": "Original newly trained 1345x1008 15000-step first frame; historical 1600 model and 17000-step refit are not used.",
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_full300/20261019T023630_678e85"
+}

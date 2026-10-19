@@ -1,0 +1,191 @@
+# Absolute byte scale: the same byte price at every initialization density.
+# 50000 is a normalization baseline, not a hard packet-size constraint.
+output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
+experiment_name: fs_goal_half_budget_20261019/absolute_bytes_v1
+mode: train
+ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_half_fresh_frame0_20261018/flame_steak/20261018T224824_9ca22a/ckpt-0-15000.pth
+trainer:
+  cache_data_on_device: true
+  num_init_steps: 15000
+  saving_ckpt_steps:
+  - 20
+  - 70
+  - 200
+  - 300
+  saving_ckpt_frames:
+  - 1
+  - 3
+  - 29
+  - 59
+  - 89
+  - 119
+  - 149
+  - 179
+  - 209
+  - 239
+  - 269
+  - 299
+  saving_ckpt_every_n_frames: 1000
+  stage_image_camera: cam00.png
+  motion_views_per_step: 2
+data:
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d_half/flame_steak
+  resolution: 1
+  expected_image_size:
+  - 1345
+  - 1008
+  white_background: false
+  split_train_test: true
+  shuffle: true
+  training_view_seed: 0
+  canonical_training_view_order: true
+  training_camera_names: null
+  validation_camera_names: null
+  eval_train: false
+  first_frame_eval_train: false
+  eval_test: true
+  extra_dataset_kwargs:
+    num_frames: 300
+  extra_dataloader_kwargs:
+    num_workers: 2
+    pin_memory: true
+module:
+  sh_degree: 1
+  effective_motion_observations: true
+  motion_coarse_to_fine: false
+  initial_opacity_threshold: 0.0075
+  lambda_dssim: 0.2
+  photometric_loss: l1
+  num_saving_images: 2
+  lpips_required: true
+  gaussian:
+    position_lr_init: 0.00016
+    position_lr_final: 1.6e-06
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.0025
+    opacity_lr: 0.05
+    scaling_lr: 0.005
+    rotation_lr: 0.001
+    percent_dense: 0.01
+  gaussian_stage2:
+    position_lr_init: 0.0024
+    position_lr_final: 2.4e-05
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 15000
+    feature_lr: 0.075
+    opacity_lr: 0.75
+    scaling_lr: 0.075
+    rotation_lr: 0.015
+    percent_dense: 0.01
+  renderer:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug_from: -1
+    debug: false
+  rigid_tree:
+    region_count: 9
+    motion_steps: 200
+    birth_steps: 100
+    motion_xyz_step_extent: 6.0e-05
+    motion_rotation_step_rad: 0.001
+    gs_xyz_step_extent: 6.0e-05
+    gs_rotation_step_rad: 0.001
+    region_translation_lr: 0.0003246817779541016
+    region_rotation_lr: 0.0003
+    gs_translation_lr: 0.0006493635559082032
+    gs_rotation_lr: 0.0001
+    rotation_updates: false
+    amplitude_refit_steps: 100
+    motion_lr_final_ratio: 0.2
+    adam_betas:
+    - 0.9
+    - 0.999
+    adam_eps: 1.0e-08
+    rate_loss_weight: 3.0e-05
+    differentiable_rate_support: true
+    sparse_rate_width_bins: 1.0
+    proximal_gs_regularization: true
+    defer_gs_sparsity_until_gate_freeze: false
+    rate_model: raw_blocks
+    codec_rate_interval: 20
+    codec_rate_initial_steps: 20
+    rate_normalization: budget
+    relative_motion_loss_weight: 0.5
+    relative_motion_units: extent_radians
+    rate_warmup_steps: 0
+    rate_ramp_steps: 1
+    motion_fit_window_steps: 20
+    spatial_gate:
+      enabled: true
+      max_depth: 4
+      initialization: robust_median
+      initialization_distance_quantile: 0.999
+      outlier_assignment: nearest_region
+      training_schedule: joint
+      min_region_size: 2
+      learning_rate: 0.15
+      initial_logit: -0.2
+      start_step: 0
+      gate_start_step: 20
+      freeze_step: 70
+      temperature: 3.0
+      learn_region_motion: true
+      image_fit_during_gate: true
+      joint_image_gradients: true
+      region_motion: relative
+      candidate_refresh_interval: 0
+      temporal_logit_decay: 0.1
+      shared_image_recode: true
+      predictor_objective: residual_l1
+      hierarchical_private: false
+      private_full_motion: false
+      reparameterize_after_gate_freeze: false
+      image_relaxation: stochastic_ste
+      final_temperature: 0.3
+      proposal_image_weight: 0.0
+      predictor_image_weight: 0.0
+      shared_discovery: true
+    rate_budget_bytes: 50000
+  birth:
+    source_covariance_init: true
+    replace_low_opacity: false
+    rotation_updates: false
+    clone_sigma_scale: 2.0
+    densification_stats_steps: 30
+    densify_interval: 40
+    densify_grad_threshold: 0.00015
+    opacity_threshold: 0.01
+    new_max_screen_size: 20.0
+    max_new_gaussians: null
+    new_xyz_step_extent: 1.0e-05
+    new_rotation_step: 0.001
+    new_logscale_step: 0.001
+    new_opacity_step: 0.01
+    new_sh_step: 0.001
+  opacity_update:
+    enabled: true
+    step: 0.01
+    learning_rate: 0.01
+    prune_threshold: 0.01
+    proximal_regularization: true
+    mode: alpha
+    l1_weight: 0.05
+    decay_with_motion: true
+    amplitude_refit_steps: 0
+    joint_with_birth: false
+  feature_dc_update:
+    enabled: true
+    step: 0.01
+    learning_rate: 0.0025
+    l1_weight: 0.005
+    decay_with_motion: true
+    joint_with_birth: true
+    sharing: spatial_region
+    gate_joint: true
+gui_ip: 127.0.0.1
+gui_port: 6009
+gui_enabled: false
+detect_anomaly: false
+quiet: false
+random_seed: 0

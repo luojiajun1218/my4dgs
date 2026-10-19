@@ -1,0 +1,9 @@
+{
+  "status": "completed_prefix",
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_v1/20261019T015438_7f571f",
+  "last_frame": 3,
+  "planned_frames": 300,
+  "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_v1/20261019T015438_7f571f/rigid-ckpt-3-300.pth",
+  "training_recipe_unchanged": true,
+  "stop_scope": "Returned from original frame_training_loop after full validation and checkpoint save."
+}

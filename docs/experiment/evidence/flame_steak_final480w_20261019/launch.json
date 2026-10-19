@@ -1,0 +1,16 @@
+{
+  "pid": 1681931,
+  "started_at": "2026-10-19T09:16:50.897235+08:00",
+  "command": [
+    "/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/bin/python",
+    "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source/main.py",
+    "--config=/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source/config/n3dv/flame_steak_half_final480w.yaml"
+  ],
+  "source": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source",
+  "source_manifest": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/source/source_manifest.json",
+  "config_sha256": "e563ffe535a04870e2d50f83114173d657461b9caefafbbcae9f7ae83367cf57",
+  "experiment_name": "n3dv_flame_steak_half_final480w_20261019/training",
+  "planned_frames": 300,
+  "continuation": false,
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563"
+}

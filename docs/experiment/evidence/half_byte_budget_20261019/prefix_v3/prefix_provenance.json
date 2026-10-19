@@ -1,0 +1,881 @@
+{
+  "source_run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_half_budget_20261019/absolute_bytes_v1/20261019T015438_7f571f",
+  "resume_frame": 3,
+  "previous_frames": 4,
+  "extended_frames": 300,
+  "source_planned_frames": 300,
+  "decoded_sha256": "0f81cc20a8598dc4d523fa10219e512167cdcdb29e89a593d6ec7a92bf068703",
+  "raw_sha256": "6644b6c152cba2cb7e85a39c283699d1aca26af9dba8aef3e65b6a4c15e8e255",
+  "files": [
+    {
+      "relative_path": "frame_storage/rigid_tree/birth_001.bin",
+      "sha256": "198c4f1ef5e613aac6806aac34f25d404f5fdcc4b1a7a9eb522f809ffbfa9a74",
+      "bytes": 1724
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/birth_002.bin",
+      "sha256": "0172a015bbc802e57735f3351f661cca1e255b721c04348d839a90cdb75901e6",
+      "bytes": 1816
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/birth_003.bin",
+      "sha256": "c0c8ff2aeb0669bebfe2f91d7407b0c2dc675a92b4dee84b7f035b813f69631b",
+      "bytes": 1939
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/frame_001.json",
+      "sha256": "7daedcb141b273f31fe0b78ddfe60845b1e3422bc78e255c7616adaacb19ce1f",
+      "bytes": 658
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/frame_002.json",
+      "sha256": "d4e9086e00112be93993b3a31d0b00b11cb9c882688f51fe8f2036a99f29fadf",
+      "bytes": 657
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/frame_003.json",
+      "sha256": "7c6f4fc00d7fdca81fa1cb326e3835d221533ad76e13350ab01eaa70983a566f",
+      "bytes": 657
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/motion_001.bin",
+      "sha256": "d1a0b101edcd0b3d1fafd393aeeac98d213b48518d76752f055d0dd1b2295338",
+      "bytes": 146150
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/motion_002.bin",
+      "sha256": "a5bf211f05177d231a98ce690359225b061d25cca27c55e76ee812f87e78f844",
+      "bytes": 46218
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/motion_003.bin",
+      "sha256": "b3502fe6fedf46f74a5e639890b59a82a2e7c563b69a209da5afffc93893458c",
+      "bytes": 36758
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/opacity_001.bin",
+      "sha256": "1ede0228d270be3072a8198b27d2410e085df4ee61a0a7e3d2b23f390603d000",
+      "bytes": 15286
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/opacity_002.bin",
+      "sha256": "98396113c91a2dd92ac437785213f033c1edb1a09dc2a66445b0f2004d964aff",
+      "bytes": 7781
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/opacity_003.bin",
+      "sha256": "d9241daaa7988dccc80f407ef7f17ec992c1e4951ea6f9eef6a2f6a8316b25bf",
+      "bytes": 6973
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/reference_frame0.npz",
+      "sha256": "bf7b822c4a53d66704a52c180342422b0c10037b251d09ddae24a8841214d3c3",
+      "bytes": 19661738
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/shdc_001.bin",
+      "sha256": "0391af2225b14b917d943478fc415bcf090fa72019dc099aa3e84a7021d6faea",
+      "bytes": 383
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/shdc_002.bin",
+      "sha256": "3294f2f3c34d0e8719bf1281523dd8191456cb41d396a5924554a591bafee9b9",
+      "bytes": 287
+    },
+    {
+      "relative_path": "frame_storage/rigid_tree/shdc_003.bin",
+      "sha256": "98938a66fcc7085176a1092986ff723326213365016e4de0cc4efae4c800a8cb",
+      "bytes": 274
+    },
+    {
+      "relative_path": "frame_summary/frame_001.json",
+      "sha256": "f24b3f4d58f2de8c98dcd0b489f3e9be3eda40366af66663743bdb685ec656a4",
+      "bytes": 198897
+    },
+    {
+      "relative_path": "frame_summary/frame_002.json",
+      "sha256": "9ae9c5d99cb98c665fdca0a2a8104b93a6f7801ae1f231075a22539a24769689",
+      "bytes": 126626
+    },
+    {
+      "relative_path": "frame_summary/frame_003.json",
+      "sha256": "f6c9082b39f013aa882436f0df30d0f924a53dd7e32fe67321efd1b1e54ba92a",
+      "bytes": 134935
+    },
+    {
+      "relative_path": "region_statistics/frame_001.json",
+      "sha256": "1be41afeee09dc1921206fe7818892a1614a7eda8295844a09a5fd546a2ae68c",
+      "bytes": 175353
+    },
+    {
+      "relative_path": "region_statistics/frame_002.json",
+      "sha256": "55846e6bcfc67222e4186f81b497aa4b82ec986c2258c2596fa47539971bea7a",
+      "bytes": 109532
+    },
+    {
+      "relative_path": "region_statistics/frame_003.json",
+      "sha256": "7339f020af23db8dba51e429eb9092e9a6363220481813539176e66e2b159588",
+      "bytes": 116983
+    }
+  ],
+  "images": [
+    {
+      "frame": 0,
+      "camera": "cam15",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam15/images/0000.png",
+      "device": 66306,
+      "inode": 14549565,
+      "bytes": 1139881,
+      "mtime_ns": 1790082218374934954
+    },
+    {
+      "frame": 0,
+      "camera": "cam07",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam07/images/0000.png",
+      "device": 66306,
+      "inode": 14549549,
+      "bytes": 1195659,
+      "mtime_ns": 1790082201418064163
+    },
+    {
+      "frame": 1,
+      "camera": "cam20",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam20/images/0001.png",
+      "device": 66306,
+      "inode": 14549582,
+      "bytes": 1098275,
+      "mtime_ns": 1790082238957945481
+    },
+    {
+      "frame": 3,
+      "camera": "cam13",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam13/images/0003.png",
+      "device": 66306,
+      "inode": 14549617,
+      "bytes": 1171443,
+      "mtime_ns": 1790082281578396854
+    },
+    {
+      "frame": 2,
+      "camera": "cam06",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam06/images/0002.png",
+      "device": 66306,
+      "inode": 14549599,
+      "bytes": 1098254,
+      "mtime_ns": 1790082259683159447
+    },
+    {
+      "frame": 3,
+      "camera": "cam12",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam12/images/0003.png",
+      "device": 66306,
+      "inode": 14549621,
+      "bytes": 1288911,
+      "mtime_ns": 1790082285945092165
+    },
+    {
+      "frame": 2,
+      "camera": "cam14",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam14/images/0002.png",
+      "device": 66306,
+      "inode": 14549594,
+      "bytes": 1146777,
+      "mtime_ns": 1790082254344469416
+    },
+    {
+      "frame": 3,
+      "camera": "cam08",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam08/images/0003.png",
+      "device": 66306,
+      "inode": 14549626,
+      "bytes": 1217663,
+      "mtime_ns": 1790082291351729704
+    },
+    {
+      "frame": 1,
+      "camera": "cam05",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam05/images/0001.png",
+      "device": 66306,
+      "inode": 14549568,
+      "bytes": 1072621,
+      "mtime_ns": 1790082223992206252
+    },
+    {
+      "frame": 0,
+      "camera": "cam06",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam06/images/0000.png",
+      "device": 66306,
+      "inode": 14549557,
+      "bytes": 1070927,
+      "mtime_ns": 1790082209894955934
+    },
+    {
+      "frame": 0,
+      "camera": "cam12",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam12/images/0000.png",
+      "device": 66306,
+      "inode": 14549558,
+      "bytes": 1261987,
+      "mtime_ns": 1790082210980620946
+    },
+    {
+      "frame": 0,
+      "camera": "cam13",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam13/images/0000.png",
+      "device": 66306,
+      "inode": 14549554,
+      "bytes": 1201721,
+      "mtime_ns": 1790082206675846336
+    },
+    {
+      "frame": 2,
+      "camera": "cam11",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam11/images/0002.png",
+      "device": 66306,
+      "inode": 14549590,
+      "bytes": 1214137,
+      "mtime_ns": 1790082250069944530
+    },
+    {
+      "frame": 2,
+      "camera": "cam03",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam03/images/0002.png",
+      "device": 66306,
+      "inode": 14549597,
+      "bytes": 1124716,
+      "mtime_ns": 1790082257550578593
+    },
+    {
+      "frame": 0,
+      "camera": "cam02",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam02/images/0000.png",
+      "device": 66306,
+      "inode": 14549545,
+      "bytes": 1087170,
+      "mtime_ns": 1790082197134775391
+    },
+    {
+      "frame": 2,
+      "camera": "cam13",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam13/images/0002.png",
+      "device": 66306,
+      "inode": 14549596,
+      "bytes": 1163193,
+      "mtime_ns": 1790082256472421912
+    },
+    {
+      "frame": 0,
+      "camera": "cam18",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam18/images/0000.png",
+      "device": 66306,
+      "inode": 14549560,
+      "bytes": 1245403,
+      "mtime_ns": 1790082213121065771
+    },
+    {
+      "frame": 0,
+      "camera": "cam14",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam14/images/0000.png",
+      "device": 66306,
+      "inode": 14549552,
+      "bytes": 1122751,
+      "mtime_ns": 1790082204527773205
+    },
+    {
+      "frame": 3,
+      "camera": "cam16",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam16/images/0003.png",
+      "device": 66306,
+      "inode": 14549616,
+      "bytes": 1201900,
+      "mtime_ns": 1790082280521360856
+    },
+    {
+      "frame": 3,
+      "camera": "cam15",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam15/images/0003.png",
+      "device": 66306,
+      "inode": 14549628,
+      "bytes": 1174179,
+      "mtime_ns": 1790082293577805520
+    },
+    {
+      "frame": 1,
+      "camera": "cam03",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam03/images/0001.png",
+      "device": 66306,
+      "inode": 14549576,
+      "bytes": 1113241,
+      "mtime_ns": 1790082232532328029
+    },
+    {
+      "frame": 1,
+      "camera": "cam14",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam14/images/0001.png",
+      "device": 66306,
+      "inode": 14549573,
+      "bytes": 1134832,
+      "mtime_ns": 1790082229323617435
+    },
+    {
+      "frame": 0,
+      "camera": "cam11",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam11/images/0000.png",
+      "device": 66306,
+      "inode": 14549548,
+      "bytes": 1250448,
+      "mtime_ns": 1790082200366839298
+    },
+    {
+      "frame": 1,
+      "camera": "cam17",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam17/images/0001.png",
+      "device": 66306,
+      "inode": 14549580,
+      "bytes": 1253421,
+      "mtime_ns": 1790082236846842266
+    },
+    {
+      "frame": 2,
+      "camera": "cam16",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam16/images/0002.png",
+      "device": 66306,
+      "inode": 14549595,
+      "bytes": 1197762,
+      "mtime_ns": 1790082255432506467
+    },
+    {
+      "frame": 3,
+      "camera": "cam03",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam03/images/0003.png",
+      "device": 66306,
+      "inode": 14549618,
+      "bytes": 1135125,
+      "mtime_ns": 1790082282683434488
+    },
+    {
+      "frame": 2,
+      "camera": "cam15",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam15/images/0002.png",
+      "device": 66306,
+      "inode": 14549607,
+      "bytes": 1167337,
+      "mtime_ns": 1790082268273951046
+    },
+    {
+      "frame": 3,
+      "camera": "cam19",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam19/images/0003.png",
+      "device": 66306,
+      "inode": 14549613,
+      "bytes": 1174679,
+      "mtime_ns": 1790082277262249864
+    },
+    {
+      "frame": 3,
+      "camera": "cam11",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam11/images/0003.png",
+      "device": 66306,
+      "inode": 14549611,
+      "bytes": 1215242,
+      "mtime_ns": 1790082275095176063
+    },
+    {
+      "frame": 2,
+      "camera": "cam20",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam20/images/0002.png",
+      "device": 66306,
+      "inode": 14549603,
+      "bytes": 1109540,
+      "mtime_ns": 1790082263950796543
+    },
+    {
+      "frame": 3,
+      "camera": "cam01",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam01/images/0003.png",
+      "device": 66306,
+      "inode": 14549627,
+      "bytes": 1178107,
+      "mtime_ns": 1790082292469767782
+    },
+    {
+      "frame": 0,
+      "camera": "cam05",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam05/images/0000.png",
+      "device": 66306,
+      "inode": 14549547,
+      "bytes": 1053472,
+      "mtime_ns": 1790082199272622857
+    },
+    {
+      "frame": 2,
+      "camera": "cam19",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam19/images/0002.png",
+      "device": 66306,
+      "inode": 14549592,
+      "bytes": 1166209,
+      "mtime_ns": 1790082252217072873
+    },
+    {
+      "frame": 2,
+      "camera": "cam10",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam10/images/0002.png",
+      "device": 66306,
+      "inode": 14549588,
+      "bytes": 1253680,
+      "mtime_ns": 1790082247937270346
+    },
+    {
+      "frame": 1,
+      "camera": "cam15",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam15/images/0001.png",
+      "device": 66306,
+      "inode": 14549586,
+      "bytes": 1159517,
+      "mtime_ns": 1790082243291093028
+    },
+    {
+      "frame": 3,
+      "camera": "cam20",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam20/images/0003.png",
+      "device": 66306,
+      "inode": 14549624,
+      "bytes": 1120385,
+      "mtime_ns": 1790082289182655831
+    },
+    {
+      "frame": 2,
+      "camera": "cam05",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam05/images/0002.png",
+      "device": 66306,
+      "inode": 14549589,
+      "bytes": 1078819,
+      "mtime_ns": 1790082248992706589
+    },
+    {
+      "frame": 1,
+      "camera": "cam11",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam11/images/0001.png",
+      "device": 66306,
+      "inode": 14549569,
+      "bytes": 1199214,
+      "mtime_ns": 1790082225062351477
+    },
+    {
+      "frame": 2,
+      "camera": "cam02",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam02/images/0002.png",
+      "device": 66306,
+      "inode": 14549587,
+      "bytes": 1123592,
+      "mtime_ns": 1790082246846214085
+    },
+    {
+      "frame": 1,
+      "camera": "cam12",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam12/images/0001.png",
+      "device": 66306,
+      "inode": 14549579,
+      "bytes": 1275956,
+      "mtime_ns": 1790082235763708088
+    },
+    {
+      "frame": 1,
+      "camera": "cam10",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam10/images/0001.png",
+      "device": 66306,
+      "inode": 14549567,
+      "bytes": 1244184,
+      "mtime_ns": 1790082222945400265
+    },
+    {
+      "frame": 1,
+      "camera": "cam18",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam18/images/0001.png",
+      "device": 66306,
+      "inode": 14549581,
+      "bytes": 1256508,
+      "mtime_ns": 1790082237936906596
+    },
+    {
+      "frame": 1,
+      "camera": "cam07",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam07/images/0001.png",
+      "device": 66306,
+      "inode": 14549570,
+      "bytes": 1210707,
+      "mtime_ns": 1790082226137803584
+    },
+    {
+      "frame": 0,
+      "camera": "cam10",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam10/images/0000.png",
+      "device": 66306,
+      "inode": 14549546,
+      "bytes": 1293257,
+      "mtime_ns": 1790082198251172604
+    },
+    {
+      "frame": 1,
+      "camera": "cam06",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam06/images/0001.png",
+      "device": 66306,
+      "inode": 14549578,
+      "bytes": 1089482,
+      "mtime_ns": 1790082234660107523
+    },
+    {
+      "frame": 2,
+      "camera": "cam08",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam08/images/0002.png",
+      "device": 66306,
+      "inode": 14549605,
+      "bytes": 1215065,
+      "mtime_ns": 1790082266090778635
+    },
+    {
+      "frame": 0,
+      "camera": "cam20",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam20/images/0000.png",
+      "device": 66306,
+      "inode": 14549561,
+      "bytes": 1077521,
+      "mtime_ns": 1790082214125781268
+    },
+    {
+      "frame": 3,
+      "camera": "cam18",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam18/images/0003.png",
+      "device": 66306,
+      "inode": 14549623,
+      "bytes": 1269103,
+      "mtime_ns": 1790082288140461550
+    },
+    {
+      "frame": 2,
+      "camera": "cam04",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam04/images/0002.png",
+      "device": 66306,
+      "inode": 14549593,
+      "bytes": 1092538,
+      "mtime_ns": 1790082253273438972
+    },
+    {
+      "frame": 1,
+      "camera": "cam13",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam13/images/0001.png",
+      "device": 66306,
+      "inode": 14549575,
+      "bytes": 1148615,
+      "mtime_ns": 1790082231448689792
+    },
+    {
+      "frame": 1,
+      "camera": "cam19",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam19/images/0001.png",
+      "device": 66306,
+      "inode": 14549571,
+      "bytes": 1159216,
+      "mtime_ns": 1790082227196545010
+    },
+    {
+      "frame": 0,
+      "camera": "cam16",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam16/images/0000.png",
+      "device": 66306,
+      "inode": 14549553,
+      "bytes": 1171166,
+      "mtime_ns": 1790082205594533959
+    },
+    {
+      "frame": 3,
+      "camera": "cam02",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam02/images/0003.png",
+      "device": 66306,
+      "inode": 14549608,
+      "bytes": 1134533,
+      "mtime_ns": 1790082271856065754
+    },
+    {
+      "frame": 0,
+      "camera": "cam17",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam17/images/0000.png",
+      "device": 66306,
+      "inode": 14549559,
+      "bytes": 1242647,
+      "mtime_ns": 1790082212048029238
+    },
+    {
+      "frame": 3,
+      "camera": "cam06",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam06/images/0003.png",
+      "device": 66306,
+      "inode": 14549620,
+      "bytes": 1104703,
+      "mtime_ns": 1790082284844598875
+    },
+    {
+      "frame": 0,
+      "camera": "cam09",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam09/images/0000.png",
+      "device": 66306,
+      "inode": 14549556,
+      "bytes": 1122035,
+      "mtime_ns": 1790082208838919981
+    },
+    {
+      "frame": 0,
+      "camera": "cam08",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam08/images/0000.png",
+      "device": 66306,
+      "inode": 14549563,
+      "bytes": 1245717,
+      "mtime_ns": 1790082216258172581
+    },
+    {
+      "frame": 1,
+      "camera": "cam09",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam09/images/0001.png",
+      "device": 66306,
+      "inode": 14549577,
+      "bytes": 1064928,
+      "mtime_ns": 1790082233582519506
+    },
+    {
+      "frame": 0,
+      "camera": "cam03",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam03/images/0000.png",
+      "device": 66306,
+      "inode": 14549555,
+      "bytes": 1093522,
+      "mtime_ns": 1790082207732874549
+    },
+    {
+      "frame": 2,
+      "camera": "cam18",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam18/images/0002.png",
+      "device": 66306,
+      "inode": 14549602,
+      "bytes": 1261757,
+      "mtime_ns": 1790082262925460742
+    },
+    {
+      "frame": 2,
+      "camera": "cam17",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam17/images/0002.png",
+      "device": 66306,
+      "inode": 14549601,
+      "bytes": 1262644,
+      "mtime_ns": 1790082261845442059
+    },
+    {
+      "frame": 1,
+      "camera": "cam16",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam16/images/0001.png",
+      "device": 66306,
+      "inode": 14549574,
+      "bytes": 1189098,
+      "mtime_ns": 1790082230410891638
+    },
+    {
+      "frame": 0,
+      "camera": "cam04",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam04/images/0000.png",
+      "device": 66306,
+      "inode": 14549551,
+      "bytes": 1056096,
+      "mtime_ns": 1790082203487565531
+    },
+    {
+      "frame": 3,
+      "camera": "cam04",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam04/images/0003.png",
+      "device": 66306,
+      "inode": 14549614,
+      "bytes": 1098307,
+      "mtime_ns": 1790082278341151406
+    },
+    {
+      "frame": 1,
+      "camera": "cam02",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam02/images/0001.png",
+      "device": 66306,
+      "inode": 14549566,
+      "bytes": 1113313,
+      "mtime_ns": 1790082221872363730
+    },
+    {
+      "frame": 1,
+      "camera": "cam04",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam04/images/0001.png",
+      "device": 66306,
+      "inode": 14549572,
+      "bytes": 1079761,
+      "mtime_ns": 1790082228262000576
+    },
+    {
+      "frame": 3,
+      "camera": "cam10",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam10/images/0003.png",
+      "device": 66306,
+      "inode": 14549609,
+      "bytes": 1260307,
+      "mtime_ns": 1790082272948563975
+    },
+    {
+      "frame": 2,
+      "camera": "cam07",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam07/images/0002.png",
+      "device": 66306,
+      "inode": 14549591,
+      "bytes": 1216884,
+      "mtime_ns": 1790082251159703268
+    },
+    {
+      "frame": 0,
+      "camera": "cam19",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam19/images/0000.png",
+      "device": 66306,
+      "inode": 14549550,
+      "bytes": 1142659,
+      "mtime_ns": 1790082202456888981
+    },
+    {
+      "frame": 2,
+      "camera": "cam01",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam01/images/0002.png",
+      "device": 66306,
+      "inode": 14549606,
+      "bytes": 1170566,
+      "mtime_ns": 1790082267184906679
+    },
+    {
+      "frame": 2,
+      "camera": "cam09",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam09/images/0002.png",
+      "device": 66306,
+      "inode": 14549598,
+      "bytes": 1081779,
+      "mtime_ns": 1790082258610614691
+    },
+    {
+      "frame": 1,
+      "camera": "cam01",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam01/images/0001.png",
+      "device": 66306,
+      "inode": 14549585,
+      "bytes": 1156868,
+      "mtime_ns": 1790082242202055946
+    },
+    {
+      "frame": 3,
+      "camera": "cam17",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam17/images/0003.png",
+      "device": 66306,
+      "inode": 14549622,
+      "bytes": 1267881,
+      "mtime_ns": 1790082287042434208
+    },
+    {
+      "frame": 3,
+      "camera": "cam07",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam07/images/0003.png",
+      "device": 66306,
+      "inode": 14549612,
+      "bytes": 1219836,
+      "mtime_ns": 1790082276179212980
+    },
+    {
+      "frame": 2,
+      "camera": "cam12",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam12/images/0002.png",
+      "device": 66306,
+      "inode": 14549600,
+      "bytes": 1285525,
+      "mtime_ns": 1790082260765688078
+    },
+    {
+      "frame": 3,
+      "camera": "cam09",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam09/images/0003.png",
+      "device": 66306,
+      "inode": 14549619,
+      "bytes": 1087094,
+      "mtime_ns": 1790082283755470998
+    },
+    {
+      "frame": 1,
+      "camera": "cam08",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam08/images/0001.png",
+      "device": 66306,
+      "inode": 14549584,
+      "bytes": 1197617,
+      "mtime_ns": 1790082241102412688
+    },
+    {
+      "frame": 0,
+      "camera": "cam01",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam01/images/0000.png",
+      "device": 66306,
+      "inode": 14549564,
+      "bytes": 1133965,
+      "mtime_ns": 1790082217324096785
+    },
+    {
+      "frame": 3,
+      "camera": "cam14",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam14/images/0003.png",
+      "device": 66306,
+      "inode": 14549615,
+      "bytes": 1149941,
+      "mtime_ns": 1790082279422323426
+    },
+    {
+      "frame": 3,
+      "camera": "cam05",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam05/images/0003.png",
+      "device": 66306,
+      "inode": 14549610,
+      "bytes": 1089856,
+      "mtime_ns": 1790082274014139247
+    },
+    {
+      "frame": 3,
+      "camera": "cam00",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam00/images/0003.png",
+      "device": 66306,
+      "inode": 14549625,
+      "bytes": 1127097,
+      "mtime_ns": 1790082290268692819
+    },
+    {
+      "frame": 1,
+      "camera": "cam00",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam00/images/0001.png",
+      "device": 66306,
+      "inode": 14549583,
+      "bytes": 1108883,
+      "mtime_ns": 1790082240033933983
+    },
+    {
+      "frame": 2,
+      "camera": "cam00",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam00/images/0002.png",
+      "device": 66306,
+      "inode": 14549604,
+      "bytes": 1119136,
+      "mtime_ns": 1790082265016551160
+    },
+    {
+      "frame": 0,
+      "camera": "cam00",
+      "resolved_path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/flame_steak_result/cam00/images/0000.png",
+      "device": 66306,
+      "inode": 14549562,
+      "bytes": 1092208,
+      "mtime_ns": 1790082215168135468
+    }
+  ],
+  "identity_scope": "current_resolved_dataset_paths_no_historical_image_hash",
+  "past_frames_reencoded": false
+}
