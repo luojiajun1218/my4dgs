@@ -1,7 +1,7 @@
 运行项目前记得 conda activate ReConGS
 数据通过软链接访问，不复制大型数据。
 本地 data/colmap4d/flame_steak 指向 /home/gamer-02/Documents/DeepLearning/ReCon-GS/data/colmap4d/flame_steak；其帧图像与 COLMAP 文件链接到 /home/gamer-02/Documents/DeepLearning/S2GS/data/standard_flame_steak_300。当前 配置使用 resolution: -1、num_frames: 300，并加载共享首帧；libgs 会自动缩小宽图。
-output 目前仅保留最终正式版 `final/` 及说明文件；正式结果只读，目录可能包含软链接，不修改数据链接目标。新实验使用新的 experiment_name，避免写入 `output/final`。Git 不保存原始训练产物。
+既有正式结果保存在 `output/final/`，本轮其他 N3DV 场景的预处理核验与新首帧另存新实验目录；正式结果只读，目录可能包含软链接，不修改数据链接目标。新实验使用新的 experiment_name，避免写入 `output/final`。Git 不保存原始训练产物。
 
 ## N3DV 全场景数据检查（2026-10-18）
 
@@ -24,6 +24,16 @@ flame 半分辨率连续 300 帧已于 2026-10-19 完成：配置 `config/n3dv/f
 可选 `terminal_motion_proximal: true` 在第 200 步幅值精修结束时额外检查一次低收益 GS 残差块，默认关闭。已完成 0–29 帧及独立解码，同段 PSNR 34.024045 → 34.045450 dB、完整动态更新 51.176414 → 50.324724 KB；只是短测改善信号，未替代正式 300 帧配置或指标。见 `docs/experiment/20261019_timing_cleanup_and_terminal_prox.md`，输出 `output/fs_timing_efficiency_20261019/terminal300_prefix30/20261019T121036_d1b10a`。
 
 正式结果的统一保留入口为 `output/final/README.md`。`run/`、`measurement/`、`source/`、`frame0/` 已迁入该目录；`stream/` 和首帧/终态入口使用内部相对软链接。保留全部码流、图片、逐帧指标、冻结源码与首末检查点，47 个中间检查点及其他实验原始输出已按作者要求删除。`preservation_manifest.json` 记录摘要，`cleanup_manifest.json` 记录迁移与清理校验。历史元数据中的绝对路径原样保留，当前入口以 `final_result.json` 为准；推荐配置已更新首帧位置并使用新的复现实验名。不要将此正式版入口改指开发短测。
+
+## 其余五景从原视频重新生成（2026-10-19）
+
+已找到并核验其余五景原始 `cam*.mp4`，共 99 路、2704×2028/30 FPS，与原下载包核对 CRC/文件大小并保存 SHA256。旧五景缺少完整原始相机模型，不能用单焦距 LLFF 信息代替精确 fx/fy。当前使用 `scripts/prepare_n3dv_from_videos.py` 从原尺寸第 0 帧重新执行 SfM、去畸变与几何一致性 MVS，再采样 40000 点；后续帧统一沿用本次标定去畸变、缩小 50%，按实际尺寸分别缩放内参，三维坐标保持不变。salmon 取原视频的前 300 帧。原视频及旧数据未修改或复制。
+
+新数据根目录 `/home/gamer-02/Documents/DeepLearning/data/n3dv/my4dgs_standard_20261019/<scene>`；训练适配入口 `data/colmap4d_half/<scene>`，首帧入口 `<scene>_frame0`。审计目录 `output/n3dv_prepare_other5_20261019/`，新首帧 `output/n3dv_standard_other5_20261019/<scene>/frame0.pth`。最新进度以 `ready_scenes.json`、`fresh_frame0_results.json` 和 `frame0_my4dgs_checks.json` 为准；全部完成后才生成 `completed_summary.json` 和对应实验文档。每景首帧从本次 40000 点重新训练 15000 步，不复用旧 checkpoint；独立 my4dgs 渲染核对 native cam00 PSNR。完整动态训练尚未启动。
+
+截至恢复任务时，cook_spinach 已完成全部 6300 张图及新首帧：1345×1008、247584 GS、首帧 cam00 PSNR 33.525894 dB；实际训练加载、原视频独立抽帧及点云支持检查均通过。cut_roasted_beef 在稠密匹配阶段遇到真实掉卡后续跑，保留已完成标定，仅清理并重算不完整深度/法线缓存；其余三景随后顺序执行。`--resume` 会校验原输入、保留完成阶段、核验已完成场景元数据，不覆盖链接目标。
+
+2026-10-19 19:04:28 的掉卡为 Xid 79/154；当时上限 **480 W**，19:04:23 最后正常采样为 230.84 W、57°C。不能据此归因于设置 350 W，也未证明限到 350 W 可以防止故障。作者恢复显卡后已确认上限仍为 480 W、350 W 服务 disabled，并恢复上述任务。诊断与恢复证据见审计目录的 `gpu_recovery_audit.json`、`resume_launch_provenance.json` 和 `gpu_resume_telemetry.csv`。功率限制仅在触发限功率降频时影响 GPU 执行速度；旧 350/480 W 的 29.4643/29.4586 秒是不同运行的训练加评估时间，不能视为纯训练功率对照。
 
 # 特别须知
 实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档（别乱写文档，做完实验 再写文档），
