@@ -3,7 +3,7 @@
 output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output
 experiment_name: fs_goal_half_budget_20261019/absolute_bytes_v1
 mode: train
-ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv_half_fresh_frame0_20261018/flame_steak/20261018T224824_9ca22a/ckpt-0-15000.pth
+ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/final/frame0.pth
 trainer:
   cache_data_on_device: true
   num_init_steps: 15000

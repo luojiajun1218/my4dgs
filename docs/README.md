@@ -2,6 +2,8 @@
 
 **当前最终正式结果：[480 W 标准半分辨率完整300帧](experiment/20261019_flame_steak_final480w_full300.md)。** flame_steak 为 **34.211170 dB / 51.027672 KB/动态完整更新 / 292.205 纯渲染 FPS**。统一输出入口为 `output/final/README.md`，包含原始结果、当时冻结源码、首帧、配置、完整码流和逐帧统计；源码基线提交 `2196e6a`，标签 `flame-steak-half-480w-final-20261019`。推荐配置为 `config/n3dv/flame_steak_half_final480w.yaml`，后续短测未替代此正式结果。训练及评估合计 29.458647 秒/动态帧，未独立记录纯训练时间。
 
+2026-10-19 按作者要求清理 `output`：仅保留 `final/`，正式版依赖已迁入其中，首帧入口为 `output/final/frame0.pth`。其他实验原始输出和正式版中间检查点已删除；下列历史文档中的旧输出路径仅用于溯源，轻量实验记录与指标证据仍保留。
+
 **特别重要：[34.0547dB / 38.19KB / 233FPS 完整300帧基线](experiment/20261017_all_rotation_off_full300.md)。** 对应Git标签为 `important-full300-34.0547db-38.19kb-20261017`；配置、指标口径和保留规则见[重要版本索引](IMPORTANT_BASELINES.md)。
 
 此前1600分辨率的完整序列为[共享发现与learnable gate](experiment/20261018_shared_discovery_full300.md)：**300帧34.244412dB，动态完整更新50.917187KB，纯渲染226.931FPS**。全部299个动态帧独立顺序解码、画质与实际文件大小核验通过。PSNR和FPS达标；存储比50KB高1.83%，按允许略微放宽的“约50KB”口径报告，严格≤50KB标记仍为false。一次性参考另计。历史入口为`config/fs_shared_discovery_depth4_full300_20261018.yaml`，原始共享首帧起步，使用新实验名。

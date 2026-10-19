@@ -72,9 +72,11 @@ PSNR ≥34.2 dB：达到；纯渲染 FPS >200：达到；动态完整更新严�
 
 ## 输出与复现
 
-统一保留入口：`output/final/README.md`。其中 `run/` 指向完整训练结果，`stream/` 指向完整码流，`measurement/` 包含逐帧统计，`source/` 指向当时实际运行的冻结源码，另保留实际配置、新训首帧和第299帧终态检查点。均使用软链接，不搬动或改写原始产物；`preservation_manifest.json` 记录文件摘要与完整性检查。该入口固定对应本次正式结果。
+统一保留入口：`output/final/README.md`。`run/`、`measurement/`、`source/` 和 `frame0/` 已迁入此目录，分别保存训练结果、逐帧统计、实际运行的冻结源码和新训首帧；`stream/` 使用内部相对软链接。首帧和第 299 帧检查点、全部训练图片、完整码流均保留；`preservation_manifest.json` 记录文件摘要与完整性检查。该入口固定对应本次正式结果。
 
-原始输出：`output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563`。统计：`output/n3dv_flame_steak_half_final480w_20261019/measurement`。
+当前输出：`output/final/run`。统计：`output/final/measurement`。原输出位置为 `output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563`，仅作为历史路径记录。
+
+2026-10-19 按作者要求删除其他实验输出及本正式版 47 个中间检查点，释放约 23.6 GB；轻量历史实验记录仍在 Git。迁移前后核对了全部 1496 个码流文件、525 个冻结源码文件、首末检查点及测量结果的摘要，并从新位置解码到第 3 帧通过验证。原始元数据与配置中的历史路径保留，原启动记录移至 `output/final/provenance/`；当前复现配置已更新首帧位置，训练参数未变。[清理摘要](evidence/flame_steak_final480w_20261019/cleanup_summary.json) 随代码保留，完整明细见 `output/final/cleanup_manifest.json`。
 
 ```bash
 conda activate ReConGS
