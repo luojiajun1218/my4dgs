@@ -68,7 +68,8 @@ def main():
         with log.open('a') as file:
             child = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL,
                 stdout=file, stderr=subprocess.STDOUT, start_new_session=True,
-                env=dict(os.environ, OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads),
+                env=dict(os.environ, N3DV_GPU_LOCK=str(OUTPUT / 'gpu.lock'),
+                         OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads),
                          OPENBLAS_NUM_THREADS=str(threads)))
         children.append(child)
         return child

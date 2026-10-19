@@ -9,7 +9,7 @@ Type=simple
 User=gamer-02
 Group=gamer-02
 WorkingDirectory=/home/gamer-02/Documents/DeepLearning/my4dgs
-ExecStartPre=+/usr/bin/nvidia-smi --power-limit=350
+ExecStartPre=+/bin/bash -c 'for attempt in {1..30}; do /usr/bin/nvidia-smi --power-limit=350 && exit 0; sleep 2; done; exit 1'
 ExecStart=/bin/bash -lc 'source /home/gamer-02/Documents/Codex/miniforge3/etc/profile.d/conda.sh; conda activate ReConGS; exec python -u scripts/resume_n3dv_after_reboot.py'
 ExecStopPost=+/usr/bin/nvidia-smi --power-limit=480
 Restart=no

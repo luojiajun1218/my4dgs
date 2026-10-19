@@ -8,8 +8,9 @@ or holding a second complete image sequence on disk.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import datetime
+import fcntl
 import hashlib
 import io
 import json
@@ -187,9 +188,14 @@ def prepare_scene(raw, destination, args):
             return
         start = time.perf_counter()
         update(stage)
-        with (logs / (stage + '.log')).open('w') as log:
-            subprocess.run([str(x) for x in command], check=True, stdout=log, stderr=subprocess.STDOUT,
-                           env=dict(os.environ, QT_QPA_PLATFORM='offscreen'))
+        gpu_lock = os.environ.get('N3DV_GPU_LOCK') if stage in (
+            'feature_extraction', 'matching', 'dense_stereo') else None
+        with (Path(gpu_lock).open('a') if gpu_lock else nullcontext()) as lease:
+            if lease is not None:
+                fcntl.flock(lease, fcntl.LOCK_EX)
+            with (logs / (stage + '.log')).open('w') as log:
+                subprocess.run([str(x) for x in command], check=True, stdout=log, stderr=subprocess.STDOUT,
+                               env=dict(os.environ, QT_QPA_PLATFORM='offscreen'))
         manifest['commands'].append(dict(stage=stage, argv=[str(x) for x in command],
                                          seconds=time.perf_counter() - start))
         write_json(manifest_path, manifest)
