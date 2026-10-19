@@ -20,6 +20,7 @@ from libgs.pipeline import TrainerConfig as BaseTrainerConfig
 from .data import PairedFetcher
 from .model.birth_quantization import RAW_FIELDS, model_raw
 from .module import restore_retired_reference
+from .timing import FrameTimer
 from libgs.metric import psnr
 
 
@@ -307,6 +308,10 @@ class Trainer(BaseTrainer):
 
     def frame_training_loop(self):
         frame = self.current_frame
+        device = getattr(self, 'device', None)
+        synchronize = (lambda: torch.cuda.synchronize(device)) if (
+            device is not None and torch.device(device).type == 'cuda') else None
+        timer = FrameTimer(synchronize=synchronize)
         started = time.perf_counter()
         fetcher = self._make_fetcher()
         self._resume_fetcher(fetcher)
@@ -322,12 +327,14 @@ class Trainer(BaseTrainer):
                   bar_format='{desc}: {percentage:3.0f}%|{bar}| '
                              '{n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}') as progress_bar:
             for step in range(self.global_step + 1, self.num_steps + 1):
+                timer.switch('motion' if step <= self.module.motion_steps else 'birth')
                 self.global_step = step
                 self.module.pre_training_step()
                 pending_metrics.append(self._fit_views(fetcher, step, defer_metrics=True))
                 if (self.config.stage_image_camera is not None and
                         step in (self.module.motion_steps, self.module.total_steps)):
-                    stage_view = self._record_stage_image(step, stage_view)
+                    with timer.phase('stage_evaluation'):
+                        stage_view = self._record_stage_image(step, stage_view)
                 if step % 10 == 0 or step == self.num_steps:
                     # The progress display only refreshes every ten steps. Keep
                     # detached scalars on device until then instead of forcing
@@ -343,8 +350,11 @@ class Trainer(BaseTrainer):
                         psnr=f"{metrics_ema['psnr']:.2f}", gs=metrics['gs']), refresh=False)
                     progress_bar.update(step - progress_bar.n)
                 if self._checkpoint_due() and step != self.num_steps:
-                    self.save_checkpoint()
+                    with timer.phase('checkpoint'):
+                        self.save_checkpoint()
+        timer.switch('validation')
         evaluation = self.validation_loop()
+        timer.switch('bookkeeping')
         report = dict(self.module.frame_report or {},
             stage_image_metrics=self.module.stage_image_metrics,
             evaluation=evaluation, final_train_metrics=last_metrics,
@@ -352,12 +362,17 @@ class Trainer(BaseTrainer):
             train_loss_steps=executed_steps,
             elapsed_seconds=time.perf_counter() - started,
             checkpoint=str(self.ckpt_save_path) if self._checkpoint_due() else None)
+        if self._checkpoint_due():
+            with timer.phase('checkpoint'):
+                self.save_checkpoint()
+        timing = timer.finish()
+        report.update(timing=timing, **{name: timing[name] for name in (
+            'training_seconds', 'optimization_seconds', 'evaluation_seconds',
+            'checkpoint_seconds', 'frame_wall_seconds')})
         directory = self.output_dir / 'frame_summary'
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f'frame_{frame:03d}.json').write_text(
             json.dumps(report, indent=2, default=str))
-        if self._checkpoint_due():
-            self.save_checkpoint()
         quality = ' | '.join(
             f'{name} PSNR={row.get("psnr", float("nan")):.4f} '
             f'SSIM={row.get("ssim", float("nan")):.4f}'
@@ -365,6 +380,9 @@ class Trainer(BaseTrainer):
             for name, row in evaluation.items())
         logging.info('Frame %d | %s | %d steps | %.2fs', frame,
                      quality or 'no evaluation', executed_steps, report['elapsed_seconds'])
+        logging.info('  Time: training=%.3fs evaluation=%.3fs checkpoint=%.3fs wall=%.3fs',
+                     report['training_seconds'], report['evaluation_seconds'],
+                     report['checkpoint_seconds'], report['frame_wall_seconds'])
         logging.info('  Storage=%.2f KB | GS=%d (+%d) | regions=%d | tree edits=%d',
                      report.get('encoded_bytes', 0) / 1000,
                      report.get('total_count', last_metrics.get('gs', 0)),

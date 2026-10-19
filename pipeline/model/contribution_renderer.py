@@ -1,5 +1,6 @@
 """Collect actual motion evidence during training; inference uses the native backend."""
 
+import torch
 from libgs.renderer import Renderer
 
 from .contribution_rasterizer import GaussianRasterizer
@@ -19,6 +20,18 @@ class _CollectingRasterizer:
 class ContributionRenderer(Renderer):
     collect_contributions = False
     last_contributions = None
+
+    def create_screenspace_points(self):
+        xyz = self.gaussians.get_xyz
+        if torch.is_grad_enabled():
+            # A fresh leaf already retains its gradient. The native '+ 0'
+            # creates an unnecessary tensor/kernel before every training view.
+            return torch.zeros_like(xyz, requires_grad=True)
+        signature = (tuple(xyz.shape), xyz.device, xyz.dtype)
+        if getattr(self, '_screenspace_signature', None) != signature:
+            self._screenspace_zero = torch.zeros_like(xyz)
+            self._screenspace_signature = signature
+        return self._screenspace_zero
 
     def create_rasterizer(self, viewpoint, bg_color, scaling_modifier):
         native = super().create_rasterizer(viewpoint, bg_color, scaling_modifier)

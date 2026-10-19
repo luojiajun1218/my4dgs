@@ -32,6 +32,17 @@ from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpda
 BIRTH_ALLOCATION = 'clone_small_v1'
 
 
+def materialize_motion_evidence_counts(control):
+    """Transfer diagnostic counters once, without synchronizing each update."""
+    keys = ('motion_frustum_samples', 'motion_observed_samples')
+    values = [control.get(key, 0) for key in keys]
+    tensors = [value for value in values if torch.is_tensor(value)]
+    if tensors:
+        counts = torch.stack([torch.as_tensor(value, device=tensors[0].device)
+                              for value in values]).tolist()
+        control.update(zip(keys, counts))
+
+
 @dataclass
 class GaussianConfig:
     position_lr_init: float = 1.6e-4
@@ -318,6 +329,7 @@ class Module(BaseModule):
             getattr(self.gaussians, attr).requires_grad_(False)
 
     def on_save_checkpoint(self, ckpt):
+        materialize_motion_evidence_counts(self.birth_control)
         ckpt['birth_allocation'] = BIRTH_ALLOCATION
         ckpt['motion_image_schedule'] = MOTION_IMAGE_SCHEDULE
         ckpt['rigid_tree_version'] = 1
@@ -690,8 +702,9 @@ class Module(BaseModule):
                     raise ValueError('Motion evidence requires an aligned actual compositing mask')
                 self.motion.mark_observed(observed)
                 evidence_counts.append(torch.stack((frustum.sum(), observed.sum())))
-            # All views contribute evidence, but transfer only two final totals.
-            frustum_count, observed_count = torch.stack(evidence_counts).sum(0).tolist()
+            # These counts are diagnostics only. Keep them on device until a
+            # checkpoint or phase boundary instead of stalling every update.
+            frustum_count, observed_count = torch.stack(evidence_counts).sum(0).unbind()
             self.birth_control['motion_frustum_samples'] = (
                 self.birth_control.get('motion_frustum_samples', 0) + frustum_count)
             self.birth_control['motion_observed_samples'] = (
@@ -723,6 +736,7 @@ class Module(BaseModule):
                     self.gaussians.add_densification_stats(
                         item['viewspace_points'], item['visibility_filter'])
             if step == self.motion_steps:
+                materialize_motion_evidence_counts(self.birth_control)
                 rows = torch.arange(len(self.gaussians._xyz), device=self.device)
                 if getattr(self, 'opacity_update', None) is not None:
                     rows = self._commit_opacity_and_retire()
