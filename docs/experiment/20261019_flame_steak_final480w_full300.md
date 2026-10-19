@@ -72,6 +72,8 @@ PSNR ≥34.2 dB：达到；纯渲染 FPS >200：达到；动态完整更新严�
 
 ## 输出与复现
 
+统一保留入口：`output/final/README.md`。其中 `run/` 指向完整训练结果，`stream/` 指向完整码流，`measurement/` 包含逐帧统计，`source/` 指向当时实际运行的冻结源码，另保留实际配置、新训首帧和第299帧终态检查点。均使用软链接，不搬动或改写原始产物；`preservation_manifest.json` 记录文件摘要与完整性检查。该入口固定对应本次正式结果。
+
 原始输出：`output/n3dv_flame_steak_half_final480w_20261019/training/20261019T091653_42b563`。统计：`output/n3dv_flame_steak_half_final480w_20261019/measurement`。
 
 ```bash

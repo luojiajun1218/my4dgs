@@ -21,6 +21,8 @@ flame 半分辨率连续 300 帧已于 2026-10-19 完成：配置 `config/n3dv/f
 
 可选 `terminal_motion_proximal: true` 在第 200 步幅值精修结束时额外检查一次低收益 GS 残差块，默认关闭。已完成 0–29 帧及独立解码，同段 PSNR 34.024045 → 34.045450 dB、完整动态更新 51.176414 → 50.324724 KB；只是短测改善信号，未替代正式 300 帧配置或指标。见 `docs/experiment/20261019_timing_cleanup_and_terminal_prox.md`，输出 `output/fs_timing_efficiency_20261019/terminal300_prefix30/20261019T121036_d1b10a`。
 
+正式结果的统一保留入口为 `output/final/README.md`。`run/`、`stream/`、`measurement/`、`source/` 及首帧/终态检查点通过软链接指向上述 480 W 完整300帧正式版，保留了当时实际运行的冻结源码；不要将此入口改指开发短测。`output/final/preservation_manifest.json` 记录完整性检查和文件摘要，原始结果目录继续保留。
+
 # 特别须知
 实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档（别乱写文档，做完实验 再写文档），
 文档中记录这次实验的核心idea，以及对应的代码改动（简要版的，不需要特别详细，可以渐进式披露），运行的结果分析，以及可能造成这种结果的原因。
