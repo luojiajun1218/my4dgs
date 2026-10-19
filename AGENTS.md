@@ -37,6 +37,8 @@ flame 半分辨率连续 300 帧已于 2026-10-19 完成：配置 `config/n3dv/f
 
 2026-10-19 作者进一步要求：**五景各自完整训练第 0–299 帧并核验完毕后才停止，不要仅启动后台任务就结束。** 已启动 `scripts/run_n3dv_scenes.py`，等待全部预处理/新首帧检查完成后，顺序训练 cook_spinach、cut_roasted_beef、sear_steak、coffee_martini、flame_salmon_1；统一沿用 flame 正式版配方，覆盖数据路径、实际尺寸、新首帧与输出名。仅恢复点保存频率改为第 1 帧及每 30 帧末尾 step 300，避免保留大量 step 20/70/200 中间检查点；训练步数和优化参数不变。完整任务状态在 `output/n3dv_other5_full300_20261019/batch_status.json`，每 30 帧事件在 `progress.jsonl`；此处与只表示数据预处理进度的旧 `live_status.json` 区分。全部训练后逐景顺序解码 300 帧、每帧 10 次预热/50 次独占计时，并精确比较终态 checkpoint；只有五景均 verified 才生成完整实验文档和六景汇总。新输出不覆盖 `output/final`。纯训练/评估/checkpoint 时间分开，旧 flame 的纯训练均值未知，不补造六景纯训练平均。
 
+2026-10-19 20:17:31 显卡再次 Xid 79/154：cut_roasted_beef 新首帧在约 5710/15000 步失败，无完成 checkpoint；最后正常采样为 409.04 W、66°C、上限 480 W。标定、融合与 40000 点云均已保留，CPU 图像生成可继续，失败 native 尝试由恢复入口归档后从本次种子重新训练。已安装并启用（等待恢复重启）`n3dv-full300-recovery.service`，入口 `scripts/resume_n3dv_after_reboot.py`；仅本轮服务运行期间临时限制 350 W，退出恢复默认 480 W，原开机 350 W 服务仍 disabled。此举未证明故障根因，后续五景指标须标注实际 350 W，不能冒充 480 W 测量。恢复服务以普通项目用户运行，密码不保存。服务自动恢复预处理、新首帧和五景完整动态调度；`--resume-waiting` 只允许在动态训练尚未开始时恢复等待任务，已有动态进度不得覆盖。故障证据在审计目录的 `gpu_fault_20261019T201731.json`、`kernel_second_fault.txt`、`telemetry_second_fault.txt`；不要把本次硬件中断误报为预处理/方法画质结果。
+
 # 特别须知
 实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档（别乱写文档，做完实验 再写文档），
 文档中记录这次实验的核心idea，以及对应的代码改动（简要版的，不需要特别详细，可以渐进式披露），运行的结果分析，以及可能造成这种结果的原因。
