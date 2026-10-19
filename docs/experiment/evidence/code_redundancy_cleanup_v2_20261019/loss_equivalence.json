@@ -1,0 +1,78 @@
+{
+  "baseline_commit": "8d54c4f",
+  "cases": [
+    {
+      "fixture": "test_joint_spatial_motion",
+      "gate_frozen": false,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_joint_spatial_motion",
+      "gate_frozen": true,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_shared_image_recode",
+      "gate_frozen": false,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_shared_image_recode",
+      "gate_frozen": true,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_relative_spatial_motion",
+      "gate_frozen": false,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_relative_spatial_motion",
+      "gate_frozen": true,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_joint_image_rate",
+      "gate_frozen": false,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_joint_image_rate",
+      "gate_frozen": true,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_soft_gate_feedback",
+      "gate_frozen": false,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_soft_gate_feedback",
+      "gate_frozen": true,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_hierarchical_private",
+      "gate_frozen": false,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    },
+    {
+      "fixture": "test_hierarchical_private",
+      "gate_frozen": true,
+      "value_max_abs_difference": 0.0,
+      "gradient_max_abs_difference": 0.0
+    }
+  ],
+  "scope": "Same restored state, loss values and parameter gradients; CPU, including codec and legacy supported modes."
+}

@@ -1066,10 +1066,14 @@ class SpatialGatedMotion(MotionBase):
             predictor_r = rr[node].detach() if self.shared_image_recode else rr[node]
             candidate_t = regularized_t + shared_t.detach() - predictor_t
             candidate_r = regularized_r + shared_r.detach() - predictor_r
+            continuous_candidate_t = (continuous_t + shared_t.detach() - predictor_t
+                                      if self.joint_training else None)
+            continuous_candidate_r = (continuous_r + shared_r.detach() - predictor_r
+                                      if self.joint_training else None)
             st = support(candidate_t if self.joint_training else total_t - rt[node], gs_steps[:3],
-                continuous=(continuous_t + shared_t.detach() - predictor_t) if self.joint_training else None)
+                continuous=continuous_candidate_t)
             sr = support(candidate_r if self.joint_training else total_r - rr[node], gs_steps[3:],
-                continuous=(continuous_r + shared_r.detach() - predictor_r) if self.joint_training else None)
+                continuous=continuous_candidate_r)
             cost = (self._codec_rate.costs(candidate_t / gs_steps[:3], candidate_r / gs_steps[3:], st, sr, 1)
                     if codec else (st + sr - st * sr) * (self._gs_id_lengths + 1) + (st + sr) * 6)
             weight = 1. if weights is None else weights[:, level]
@@ -1083,8 +1087,7 @@ class SpatialGatedMotion(MotionBase):
                 # Match the continuous L1 objective handled by soft-threshold
                 # updates. In particular, sub-bin proposals no longer drift
                 # for free until they cross the half-bin boundary.
-                relative_t = continuous_t + shared_t.detach() - predictor_t
-                relative_r = continuous_r + shared_r.detach() - predictor_r
+                relative_t, relative_r = continuous_candidate_t, continuous_candidate_r
             else:
                 relative_t, relative_r = candidate_t, candidate_r
             magnitude = (relative_t / self.extent).abs().sum(-1) + relative_r.abs().sum(-1)
@@ -1125,10 +1128,11 @@ class SpatialGatedMotion(MotionBase):
         if self.private_full_motion and not self.soft_image_active and not self._hard_gate_frozen:
             selected = self._stored_region_support().to(rt)
             region_bytes = _hard_value_soft_gradient((selected * regional_cost).sum(), region_bytes)
-        soft_bytes = residual_bytes + region_bytes + self._metadata_bytes()
+        metadata_bytes = self._metadata_bytes()
+        soft_bytes = residual_bytes + region_bytes + metadata_bytes
         if discrete_joint and (not self.joint_image_gradients or self.shared_image_recode):
             selected = self._stored_region_support().to(rt)
-            hard_bytes = hard_residual_bytes + (selected * regional_cost).sum() + self._metadata_bytes()
+            hard_bytes = hard_residual_bytes + (selected * regional_cost).sum() + metadata_bytes
             # Apply STE to the complete path objective, rather than each gate
             # product, so closed ancestors do not erase descendant gradients.
             soft_bytes = (hard_bytes + (soft_bytes - soft_bytes.detach()) if gate_only_soft_cost else
@@ -1149,7 +1153,7 @@ class SpatialGatedMotion(MotionBase):
                     hst = torch.round(ht / gs_steps[:3]).ne(0).any(-1).to(ht)
                     hsr = torch.round(hr / gs_steps[3:]).ne(0).any(-1).to(hr)
                     hard_points = self._codec_rate.costs(ht / gs_steps[:3], hr / gs_steps[3:], hst, hsr, 1).sum()
-                value = codec_scale * (hard_points + hard_region + self._metadata_bytes()).detach()
+                value = codec_scale * (hard_points + hard_region + metadata_bytes).detach()
             else:
                 value = soft_bytes.new_tensor(codec_bytes)
             soft_bytes = value + codec_scale * (soft_bytes - soft_bytes.detach())
@@ -1171,7 +1175,7 @@ class SpatialGatedMotion(MotionBase):
             result['rate_codec_measured'] = self.base_xyz.new_tensor(codec_bytes is not None)
         if diagnostics:
             result.update(self._support_diagnostics(probabilities))
-            result.update(rate_bytes_hard=self._hard_motion_bytes() + self._metadata_bytes(),
+            result.update(rate_bytes_hard=self._hard_motion_bytes() + metadata_bytes,
                 rate_normalization_gs_count=self.base_xyz.new_tensor(self.rate_normalization_count),
                 rate_normalization_bytes=self.base_xyz.new_tensor(self.rate_normalization_bytes),
                 rate_byte_price=self.base_xyz.new_tensor(self.config.rate_loss_weight * ramp / self.rate_normalization_bytes))

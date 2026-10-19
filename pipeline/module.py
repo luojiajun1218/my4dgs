@@ -491,7 +491,9 @@ class Module(BaseModule):
     def make_birth_view(self):
         if not len(self.births._xyz):
             return None
-        reference = model_raw(self.gaussians)
+        # The view immediately gathers its few source rows into owned tensors;
+        # cloning every old GS attribute first only duplicates GPU traffic.
+        reference = model_raw(self.gaussians, clone=False)
         return QuantizedNewGaussianView(self.births, self.config.birth,
             self.datamodule.cameras_extent, reference,
             source_rows=self.births.source_rows)
@@ -759,24 +761,22 @@ class Module(BaseModule):
                 self.births.add_densification_stats(
                     package['viewspace_points'], visible, align='right')
                 birth_step = step - self.motion_steps
-                if step == self.motion_steps + self.config.rigid_tree.birth_steps:
+                terminal = step == self.total_steps
+                if not terminal and birth_step % self.config.birth.densify_interval == 0:
+                    result = self.births.adaptive_densify_and_prune(
+                        self.config.birth.densify_grad_threshold,
+                        self.config.birth.opacity_threshold,
+                        self.datamodule.cameras_extent,
+                        self.config.birth.new_max_screen_size,
+                        max_points=self.config.birth.max_new_gaussians)
+                    self.birth_control['split_added'] += result['added']
+                    self.birth_control['pruned'] += result['pruned']
+                self.births.optimizer.step()
+                self.births.optimizer.zero_grad(set_to_none=True)
+                if terminal:
                     # Apply the last fitted gradient before pruning replaces
                     # optimizer parameters; no new GS may be born here.
-                    self.births.optimizer.step()
-                    self.births.optimizer.zero_grad(set_to_none=True)
                     self.birth_control['pruned'] += self._prune_terminal_births()
-                else:
-                    if birth_step % self.config.birth.densify_interval == 0:
-                        result = self.births.adaptive_densify_and_prune(
-                            self.config.birth.densify_grad_threshold,
-                            self.config.birth.opacity_threshold,
-                            self.datamodule.cameras_extent,
-                            self.config.birth.new_max_screen_size,
-                            max_points=self.config.birth.max_new_gaussians)
-                        self.birth_control['split_added'] += result['added']
-                        self.birth_control['pruned'] += result['pruned']
-                    self.births.optimizer.step()
-                    self.births.optimizer.zero_grad(set_to_none=True)
             if (getattr(self, 'opacity_update', None) is not None and
                     self.config.opacity_update.joint_with_birth):
                 birth_step = step - self.motion_steps
@@ -810,7 +810,7 @@ class Module(BaseModule):
             self.feature_dc_update.finish()
         view = self.make_birth_view()
         raw, sources = materialize_quantized_gaussians(
-            model_raw(self.gaussians), view)
+            model_raw(self.gaussians, clone=False), view)
         stream_dir = self.output_dir / 'frame_storage' / 'rigid_tree'
         stream_dir.mkdir(parents=True, exist_ok=True)
         motion_path = stream_dir / f'motion_{self.current_frame:03d}.bin'

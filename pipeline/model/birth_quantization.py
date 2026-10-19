@@ -13,8 +13,10 @@ def quantized_symbols(value, step):
     return continuous + (continuous.round() - continuous).detach()
 
 
-def model_raw(model):
-    return {name: getattr(model, attr).detach().clone() for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)}
+def model_raw(model, *, clone=True):
+    """Capture owned fields, or borrow views for immediate row selection."""
+    raw = {name: getattr(model, attr).detach() for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)}
+    return {name: value.clone() for name, value in raw.items()} if clone else raw
 
 
 def reference_digest(raw):

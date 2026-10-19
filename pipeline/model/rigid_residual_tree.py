@@ -383,16 +383,32 @@ class MotionBase(nn.Module):
     @property
     def steps(self):
         """Regional translation/rotation steps (legacy public property)."""
-        return self.base_xyz.new_tensor(
-            [self.config.motion_xyz_step_extent * self.extent] * 3 +
-            [self.config.motion_rotation_step_rad] * 3)
-
+        return self._step_grid(self.config.motion_xyz_step_extent,
+                               self.config.motion_rotation_step_rad)
 
     @property
     def gs_steps(self):
-        return self.base_xyz.new_tensor([self.config.gs_xyz_step_extent * self.extent] * 3 +
-                                        [self.config.gs_rotation_step_rad] * 3)
+        return self._step_grid(self.config.gs_xyz_step_extent,
+                               self.config.gs_rotation_step_rad)
 
+    def _step_grid(self, xyz_step_extent, rotation_step):
+        """Reuse constant grids, invalidating on config, device or dtype changes."""
+        xyz_step = xyz_step_extent * self.extent
+        key = (xyz_step, rotation_step, self.base_xyz.device, self.base_xyz.dtype)
+        cache = getattr(self, '_step_grid_cache', None)
+        if cache is None:
+            self._step_grid_cache = cache = {}
+        cached = cache.get(key)
+        if cached is not None and cached[0]._version == cached[1]:
+            return cached[0]
+        grid = self.base_xyz.new_tensor([xyz_step] * 3 + [rotation_step] * 3)
+        # Inference tensors cannot track mutations and must not enter a later
+        # training graph. Normal cached constants are safe in either mode.
+        if not torch.is_inference_mode_enabled():
+            if len(cache) >= 2:
+                cache.clear()
+            cache[key] = (grid, grid._version)
+        return grid
 
     @property
     def motion_steps(self):
