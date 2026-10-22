@@ -18,7 +18,7 @@ def summarize_frame_timings(reports):
         missing = []
         for row in rows:
             timing = row.get('timing') or {}
-            if timing.get('version') != 1 or any(key not in timing for key in fields):
+            if timing.get('version') not in (1, 2) or any(key not in timing for key in fields):
                 missing.append(row['frame'])
                 continue
             values = {key: float(timing[key]) for key in fields}
@@ -33,8 +33,16 @@ def summarize_frame_timings(reports):
             measured_only_mean_seconds={key: (sum(row[key] for row in measured) / len(measured)
                                               if measured else None) for key in fields})
 
+    model_rows = [row for row in dynamic if row.get('timing', {}).get('version') == 2]
+    model_group = group(model_rows)
+    model_group.update(frame_count=len(dynamic),
+                       all_frames_measured=bool(dynamic) and len(model_rows) == len(dynamic),
+                       missing_frames=sorted(set(ids) - {row['frame'] for row in model_rows}))
+    if not model_group['all_frames_measured']:
+        model_group['mean_seconds'] = {key: None for key in fields}
     return dict(all_dynamic=group(dynamic),
         excluding_first_dynamic=group([row for row in dynamic if row['frame'] > 1]),
+        model_training=model_group,
         scope='Measured synchronized phase times only; no fallback to legacy '
               'elapsed_seconds, which combines training and evaluation. '
               'Excluding-first group omits frame 1, which may include cold startup.')
@@ -76,14 +84,24 @@ class FrameTimer:
         self.finished = True
         phases = dict(self.seconds)
         get = lambda key: phases.get(key, 0.)
-        return dict(version=1, phases=phases,
-            training_seconds=get('preparation') + get('motion') + get('birth'),
-            optimization_seconds=get('motion') + get('birth'),
+        model = get('motion') + get('birth') + get('refit')
+        preparation = get('preparation') + get('model_setup')
+        return dict(version=2, phases=phases,
+            training_seconds=model,
+            optimization_seconds=model,
+            preparation_seconds=preparation,
+            data_loading_seconds=get('data_loading'),
+            encoding_seconds=get('encoding'),
+            diagnostics_seconds=get('diagnostics'),
+            training_loop_seconds=(model + preparation + get('data_loading') +
+                                   get('encoding') + get('diagnostics')),
             evaluation_seconds=get('stage_evaluation') + get('validation'),
             checkpoint_seconds=get('checkpoint'),
             bookkeeping_seconds=get('bookkeeping'),
             frame_wall_seconds=self.updated - self.started,
-            scope='Synchronized wall time. Training includes frame/data preparation, '
-                  'optimization, mandatory quantization/encoding and progress metrics; '
-                  'excludes heldout stage renders, validation and checkpoint writes. '
+            scope='Synchronized wall time. Training is model forward/backward, '
+                  'optimizer updates and training regularization/quantization. '
+                  'Frame setup, image loading/transfers, final stream encoding, '
+                  'progress diagnostics, heldout renders, validation and checkpoint '
+                  'writes are separate. Offline video/COLMAP preprocessing is outside this timer. '
                   'Frame wall time ends before the summary JSON write and final log.')

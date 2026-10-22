@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -118,7 +119,7 @@ def main():
     parser.add_argument('--create-adapter', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    torch.set_num_threads(4)
+    torch.set_num_threads(int(os.environ.get('N3DV_CPU_THREADS', '4')))
     result = validate(args.source, args.adapter, args.create_adapter)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + '\n')

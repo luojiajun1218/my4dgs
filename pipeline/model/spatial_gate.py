@@ -33,7 +33,7 @@ class SpatialGateConfig:
     candidate_refresh_interval: int = 0
     temporal_logit_decay: float = 1.0
     shared_image_recode: bool = False
-    predictor_objective: str = 'residual_l1'
+    predictor_objective: str = 'residual_l1'  # Retained in saved configuration metadata.
     hierarchical_private: bool = False
     private_full_motion: bool = False
     reparameterize_after_gate_freeze: bool = False
@@ -97,12 +97,8 @@ class SpatialGateConfig:
                 self.training_schedule != 'joint' or
                 (self.region_motion != 'absolute' and not relative_image)):
             raise ValueError('Hierarchical private motion requires supported joint image fitting')
-        if self.predictor_objective not in ('residual_l1', 'proximal_rd'):
-            raise ValueError('Unknown shared predictor objective')
-        if self.predictor_objective == 'proximal_rd' and (
-                self.training_schedule != 'joint' or self.region_motion != 'absolute' or
-                not self.learn_region_motion or self.joint_image_gradients or self.shared_image_recode):
-            raise ValueError('Local proximal RD requires absolute joint full-motion coordinates')
+        if self.predictor_objective != 'residual_l1':
+            raise ValueError('Only residual_l1 shared predictor objective is supported')
         if self.region_motion not in ('absolute', 'relative'):
             raise ValueError('Unknown spatial region motion representation')
         if not isinstance(self.shared_image_recode, bool):

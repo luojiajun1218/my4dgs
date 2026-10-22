@@ -1,9 +1,0 @@
-Recovery boot: restored saved Clash core startup intent.
-Recovery boot: restored saved Clash core startup intent.
-/home/gamer-02/Documents/Codex/miniforge3/envs/ReConGS/lib/python3.11/site-packages/torch/utils/cpp_extension.py:1964: UserWarning: TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation.
-If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'].
-  warnings.warn(
-----------------------------------------------------------------------
-Ran 359 tests in 101.690s
-
-OK

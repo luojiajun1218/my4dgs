@@ -20,7 +20,6 @@ from PIL import Image
 import torch
 
 
-
 class SequenceExtensionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -231,21 +230,25 @@ class SequenceExtensionTests(unittest.TestCase):
         self.assertEqual((self.destination / 'config.yaml').read_text(), 'new run config must stay intact\n')
 
     def test_extension_retains_shared_color_packets_and_replays_the_same_attributes(self):
-        features = importlib.import_module('pipeline.model.sparse_features')
+        features = importlib.import_module('pipeline.model.legacy_feature_codec')
+        scalar_codec = importlib.import_module('pipeline.model.sparse_updates')
         stream = self.source / 'frame_storage/rigid_tree'
         _, previous = self.replay.replay(stream, stream / 'reference_frame0.npz', through=1)
         motion = self.spatial.SpatialGatedMotion(copy.deepcopy(self.template.config))
         motion.restore(copy.deepcopy(self.saved_motion))
-        config = features.FeatureDCUpdateConfig(enabled=True, sharing='spatial_region')
-        update = features.QuantizedFeatureDCUpdate(config, motion=motion)
-        update.setup(previous['sh_dc'])
-        with torch.no_grad():
-            update.scalar.delta.reshape(-1, 3)[motion.owner.unique()] = .02
-        update.commit(torch.arange(len(motion.owner)))
-        update.finish()
+        node_count = len(motion.parents)
+        symbols = torch.zeros(node_count, 3)
+        symbols[motion.owner.unique()] = 2
+        packet = (features.REGIONAL_MAGIC + features._regional_digest(
+            previous['sh_dc'], motion.owner, node_count) +
+            scalar_codec.encode_opacity_delta(torch.zeros(node_count * 3, 1),
+                symbols.reshape(-1, 1), frame_index=2, step=.01))
         packet_path = stream / 'shdc_002.bin'
-        info = update.export(packet_path, 2)
-        raw = {**self.final_raw, 'sh_dc': update.canonical_features()}
+        packet_path.write_bytes(packet)
+        info = dict(archive_bytes=len(packet), path=str(packet_path))
+        colors = features.decode_feature_dc_delta(packet, previous['sh_dc'],
+            frame_index=2, owner=motion.owner, node_count=node_count)
+        raw = {**self.final_raw, 'sh_dc': colors}
         digest = self.birth.reference_digest(raw)
         index = stream / 'frame_002.json'
         manifest = json.loads(index.read_text())
@@ -261,8 +264,8 @@ class SequenceExtensionTests(unittest.TestCase):
         gaussian[2] = raw['sh_dc'].clone()
         self.checkpoint['gaussians'] = tuple(gaussian)
         self.checkpoint['rigid_tree_frame']['report'] = report
-        self.checkpoint['rigid_tree_module_config']['feature_dc_update'] = asdict(config)
-        self.checkpoint['quantized_feature_dc_update'] = update.capture()
+        self.checkpoint['rigid_tree_module_config']['feature_dc_update'] = dict(
+            enabled=True, sharing='spatial_region')
         plan = self.plan()
         self.assertIn('frame_storage/rigid_tree/shdc_002.bin',
                       {self.entry_path(entry) for entry in plan.files})

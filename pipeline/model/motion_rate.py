@@ -1,4 +1,4 @@
-"""Actual SPG1 packet lengths with a differentiable byte-context rate proxy.
+"""Actual spatial packet lengths with a differentiable byte-context rate proxy.
 
 The rate is periodically measured by the production automatic lossless encoder,
 before births. Intervening values and backward use a first-order model of the
@@ -11,8 +11,10 @@ import numpy as np
 import torch
 
 from .rigid_tree_codec import (CHECKSUM_BYTES, _sparse_write,
-                               compress_motion_packet)
-from .sparse_integer_codec import encode_unsigned_values
+                               compress_spatial_packet, spatial_gate_payload,
+                               spatial_gate_magic)
+from .sparse_integer_codec import (encode_unsigned_values, _spatial_prefix,
+                                   _Reader)
 
 
 def _bytes(values):
@@ -32,12 +34,16 @@ def _streams(t, r):
 
 
 class MotionCodecRate:
-    def __init__(self, empty_packet, regions, points, refresh_steps=20):
-        # The validated empty packet ends in gates, two zero sparse counts,
-        # and a checksum. Keep the immutable prefix, including survivor edits.
+    def __init__(self, empty_packet, regions, points, refresh_steps=20,
+                 previous_opened=None):
+        # The gate section can now be variable-length. Parse its boundary
+        # rather than subtracting a full bitmap from the end of the packet.
         self.regions, self.points = int(regions), int(points)
-        self.gate_bytes = (regions + 7) // 8
-        self.prefix = bytes(empty_packet[:-(self.gate_bytes + 2 + CHECKSUM_BYTES)])
+        reader = _Reader(empty_packet)
+        _, _, _, gate_start = _spatial_prefix(reader)
+        self.prefix = bytes(empty_packet[:gate_start])
+        self.previous_opened = (None if previous_opened is None else
+                                torch.as_tensor(previous_opened).detach().cpu().bool().clone())
         self.refresh_steps = int(refresh_steps)
         self.last_refresh = -1
         self.tables = None
@@ -49,12 +55,12 @@ class MotionCodecRate:
 
     def packet(self, rt, rr, gt, gr, opened):
         arrays = [np.asarray(value, dtype='<i2') for value in (rt, rr, gt, gr)]
-        gates = np.packbits(np.asarray(opened, dtype=np.uint8), bitorder='little').tobytes()
-        body = bytearray(self.prefix + gates)
+        gates, delta = spatial_gate_payload(opened, self.previous_opened)
+        body = bytearray(spatial_gate_magic(self.prefix[:4], delta) + self.prefix[4:] + gates)
         _sparse_write(body, arrays[0][1:], arrays[1][1:])
         _sparse_write(body, arrays[2], arrays[3])
         body.extend(hashlib.sha256(body).digest()[:CHECKSUM_BYTES])
-        return compress_motion_packet(body, mode='auto')
+        return compress_spatial_packet(bytes(body), opened, len(self.prefix), len(gates))
 
     def measure(self, rt, rr, gt, gr, opened, step):
         arrays = [np.asarray(value, dtype='<i2') for value in (rt, rr, gt, gr)]
@@ -144,7 +150,8 @@ class MotionCodecRate:
         return result / 8.
 
     def capture(self):
-        return dict(prefix=self.prefix, regions=self.regions, points=self.points,
+        return dict(prefix=self.prefix, previous_opened=self.previous_opened,
+                    regions=self.regions, points=self.points,
                     refresh_steps=self.refresh_steps, last_refresh=self.last_refresh,
                     tables=self.tables, last_scale=self.last_scale,
                     last_packet_bytes=self.last_packet_bytes, last_entropy_bytes=self.last_entropy_bytes,
@@ -154,9 +161,9 @@ class MotionCodecRate:
     def restore(cls, state):
         result = cls.__new__(cls)
         result.__dict__.update(state)
+        result.previous_opened = state.get('previous_opened')
         result.last_measure_step = state.get('last_measure_step', -1)
         if result.tables is not None:
             result.tables = result.tables.detach().cpu()
-        result.gate_bytes = (result.regions + 7) // 8
         result._device_tables = {}
         return result

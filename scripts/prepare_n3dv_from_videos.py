@@ -28,7 +28,7 @@ from plyfile import PlyData
 from scipy.spatial import cKDTree
 
 from libgs.data.utils.colmap import (
-    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary,
+    read_extrinsics_binary, read_intrinsics_binary,
 )
 
 
@@ -73,6 +73,26 @@ def read_png(file):
             return b''.join(pieces)
 
 
+def reusable_images(destination, frame, sizes):
+    """A partially written camera frame must be regenerated as a whole."""
+    for name, expected_size in sizes.items():
+        target = destination / Path(name).stem / 'images' / f'{frame:04d}.png'
+        if not target.is_file() or target.is_symlink():
+            return False
+        try:
+            with target.open('rb') as file:
+                payload = read_png(file)
+                if file.read(1):
+                    return False
+            with Image.open(io.BytesIO(payload)) as image:
+                if image.mode != 'RGB' or image.size != expected_size:
+                    return False
+                image.verify()
+        except (EOFError, OSError, ValueError, SyntaxError):
+            return False
+    return True
+
+
 def move_flat_model(workspace):
     sparse = workspace / 'sparse'
     target = sparse / '0'
@@ -86,7 +106,7 @@ def move_flat_model(workspace):
     return target
 
 
-def seed_geometry(scene, model, seed_path, fused_path):
+def seed_geometry(scene, model, seed_path, fused_path, workers=4):
     intrinsics = read_intrinsics_binary(model / 'cameras.bin')
     extrinsics = read_extrinsics_binary(model / 'images.bin')
     seed_data = PlyData.read(seed_path)['vertex'].data
@@ -95,7 +115,7 @@ def seed_geometry(scene, model, seed_path, fused_path):
     fused_xyz = np.column_stack([fused_data[k] for k in ('x', 'y', 'z')]).astype(np.float64)
     if len(xyz) != min(40000, len(fused_xyz)) or not np.isfinite(xyz).all():
         raise ValueError('Invalid downsampled seed point cloud')
-    distances, _ = cKDTree(fused_xyz).query(xyz, workers=4)
+    distances, _ = cKDTree(fused_xyz).query(xyz, workers=workers)
     if np.max(distances) != 0:
         raise ValueError('Seed is not a subset of the matching fused cloud')
     centers = []
@@ -275,7 +295,8 @@ def prepare_scene(raw, destination, args):
             model = move_flat_model(first)
             run('sample_seed', [args.python, args.s2gs / 'scripts/pre_dynerf/downsample_point.py',
                                 fused, destination / 'points3D_downsample2.ply'])
-            geometry = seed_geometry(destination, model, destination / 'points3D_downsample2.ply', fused)
+            geometry = seed_geometry(destination, model, destination / 'points3D_downsample2.ply', fused,
+                                     workers=args.threads)
             write_json(destination / 'seed_geometry.json', geometry)
             run('llff_metadata', [args.python, args.s2gs / 'scripts/pre_dynerf/imgs2poses.py',
                 '--scenedir', first, '--outdir', destination])
@@ -288,11 +309,26 @@ def prepare_scene(raw, destination, args):
                                 '-define', 'png:compression-level=3', str(target)],
                                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            calibrated = read_extrinsics_binary(model / 'images.bin')
+            sizes = {extr.name: ((intrinsics[extr.camera_id].width + 1) // 2,
+                                 (intrinsics[extr.camera_id].height + 1) // 2)
+                     for extr in calibrated.values()}
+            reused_frames = 0
+            with ThreadPoolExecutor(max_workers=args.image_workers or min(4, args.threads)) as pool:
                 list(pool.map(resize, [(name, first / 'images' / name, 0) for name in expected_names]))
                 # Each subsequent frame uses the same ORIGINAL distorted model.
                 # The temporary full-size images never accumulate into another dataset.
                 for frame in range(1, args.frames):
+                    if existing and reusable_images(destination, frame, sizes):
+                        # Consume each source frame in order even when its output is retained.
+                        # Seeking or skipping reads could shift the camera/time correspondence.
+                        for video, process in processes:
+                            read_png(process.stdout)
+                        reused_frames += 1
+                        if (frame + 1) % 30 == 0:
+                            update('sequence_images', completed_frames=frame + 1,
+                                   reused_frames=reused_frames)
+                        continue
                     with tempfile.TemporaryDirectory(prefix='frame_', dir=destination) as temporary:
                         temporary = Path(temporary)
                         raw_images = temporary / 'raw'
@@ -306,7 +342,7 @@ def prepare_scene(raw, destination, args):
                                 '--output_type', 'COLMAP'], check=True, stdout=log, stderr=subprocess.STDOUT)
                         list(pool.map(resize, [(name, undistorted / 'images' / name, frame) for name in expected_names]))
                     if (frame + 1) % 30 == 0 or frame == args.frames - 1:
-                        update('sequence_images', completed_frames=frame + 1)
+                        update('sequence_images', completed_frames=frame + 1, reused_frames=reused_frames)
             for video, process in processes:
                 if process.stdout.read(1) or process.wait(timeout=30) != 0:
                     raise ValueError(f'Unexpected video decoder result: {video}')
@@ -363,6 +399,8 @@ def main():
     parser.add_argument('--scenes', nargs='+', required=True)
     parser.add_argument('--frames', type=int, default=300)
     parser.add_argument('--threads', type=int, default=16)
+    parser.add_argument('--image-workers', type=int,
+                        help='Concurrent image resizing jobs; default is min(4, threads)')
     parser.add_argument('--resume', action='store_true',
                         help='Resume a matching generated scene; preserve completed calibration and discard failed stereo caches')
     parser.add_argument('--colmap', type=Path, default=Path(shutil.which('colmap') or 'colmap'))
@@ -373,6 +411,8 @@ def main():
     args = parser.parse_args()
     if args.frames < 1:
         parser.error('frames must be positive')
+    if args.threads < 1 or (args.image_workers is not None and args.image_workers < 1):
+        parser.error('thread and image-worker counts must be positive')
     pending = False
     for scene in args.scenes:
         marker = args.destination_root / scene / 'preprocessing_manifest.json'

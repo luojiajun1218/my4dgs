@@ -92,10 +92,6 @@ class RigidTreeConfig:
         if (self.spatial_gate.private_full_motion and self.amplitude_refit_steps and
                 not self.spatial_gate.reparameterize_after_gate_freeze):
             raise ValueError('Private full-motion proposals do not support amplitude refitting')
-        if self.spatial_gate.predictor_objective == 'proximal_rd' and (
-                not self.proximal_gs_regularization or self.rate_model != 'raw_blocks' or
-                self.amplitude_refit_steps or self.defer_gs_sparsity_until_gate_freeze):
-            raise ValueError('Local proximal RD currently requires raw-block joint proximal fitting')
         if self.rate_model not in ('raw_blocks', 'codec'):
             raise ValueError('Unknown motion rate model')
         if self.rate_model == 'codec' and self.spatial_gate.training_schedule != 'joint':
@@ -656,7 +652,6 @@ class MotionBase(nn.Module):
             self.observations = torch.zeros(len(self.base_xyz), dtype=torch.long, device=self.base_xyz.device)
         self._region_id_lengths = _id_lengths(len(self.parents) - 1, self.base_xyz)
         self._gs_id_lengths = _id_lengths(len(self.base_xyz), self.base_xyz)
-        self.codec_previous_state = None if state is None else DecodedState.restore(state)
         self.frame_reference_state = (None if reference is None else
                                       DecodedState.restore(reference))
         if self.committed:

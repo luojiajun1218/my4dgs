@@ -310,8 +310,7 @@ class SpatialGatedMotion(MotionBase):
 
     @property
     def regional_image_updates(self):
-        return (self.amplitude_refit_active or self.shared_image_recode or
-                (self.config.spatial_gate.predictor_objective == 'proximal_rd' and self._hard_gate_frozen))
+        return self.amplitude_refit_active or self.shared_image_recode
 
     @torch.no_grad()
     def _prepare_amplitude_refit(self, step):
@@ -539,7 +538,6 @@ class SpatialGatedMotion(MotionBase):
         self._coding_initialized = False
         self._hard_gate_frozen = False
         self._amplitude_refit_support = None
-        self._predictor_fit_state = None
         self.flat_region_diagnostics = {'method': 'learned_spatial_gate', 'frame': frame_index}
         self.owner = spatial_owner(self.spatial_paths, self.opened)
         if self.joint_training:
@@ -604,11 +602,6 @@ class SpatialGatedMotion(MotionBase):
         super()._make_optimizer()
         self.optimizer.add_param_group(dict(params=[self.gate_logits],
             lr=self.config.spatial_gate.learning_rate, eps=1e-12))
-
-    @property
-    def shared_prestructure_active(self):
-        return True
-
 
     @torch.no_grad()
     def _mask_regional_fit_updates(self):
@@ -842,7 +835,7 @@ class SpatialGatedMotion(MotionBase):
 
     @torch.no_grad()
     def retain_survivors(self, rows):
-        """Retire fitted low-alpha GS before births, preserving previous IDs."""
+        """Retire fitted GS before packet finalization, preserving previous IDs."""
         if self.committed:
             raise ValueError('Cannot retire GS after motion packet finalization')
         rows = torch.as_tensor(rows, device=self.base_xyz.device, dtype=torch.long)
@@ -868,9 +861,6 @@ class SpatialGatedMotion(MotionBase):
         if self.amplitude_refit_active:
             for name in ('gs_translation', 'gs_rotation'):
                 self._amplitude_refit_support[name] = self._amplitude_refit_support[name][rows].clone()
-        if getattr(self, '_predictor_fit_state', None) is not None:
-            self._predictor_fit_state = {name: value[rows].clone()
-                                        for name, value in self._predictor_fit_state.items()}
         self.node_counts = torch.bincount(self.spatial_paths.flatten(), minlength=len(self.parents))
         self._gs_id_lengths = _id_lengths(len(rows), self.base_xyz)
         self._survivor_mapping_bytes = self._count_survivor_mapping_bytes()
@@ -894,9 +884,14 @@ class SpatialGatedMotion(MotionBase):
 
     def _metadata_bytes(self):
         births = [] if self.pending_birth_sources is None else self.pending_birth_sources.tolist()
-        from .rigid_tree_codec import _uvar
+        from .rigid_tree_codec import _uvar, spatial_gate_payload
+        cached = getattr(self, '_gate_payload_size_cache', None)
+        version = None if self.opened.is_inference() else self.opened._version
+        if version is None or cached is None or cached[0] is not self.opened or cached[1] != version:
+            gates, _ = spatial_gate_payload(self.opened, self.frame_reference_state.spatial_open)
+            cached = self._gate_payload_size_cache = (self.opened, version, len(gates))
         return (4 + 32 + 40 + 16 + 1 + self._survivor_mapping_bytes +
-                (len(self.parents) + 7) // 8 +
+                cached[2] +
                 sum(len(_uvar(value)) for value in
                     (self.frame_index, len(self.parents), len(self.owner), len(births))) +
                 sum(len(_uvar(source)) + 28 for source in births))
@@ -914,7 +909,8 @@ class SpatialGatedMotion(MotionBase):
         from .motion_rate import MotionCodecRate
         from .rigid_tree_codec import encode_motion
         rate = getattr(self, '_codec_rate', None)
-        rebuild = rate is None or rate.points != len(self.owner)
+        rebuild = (rate is None or rate.points != len(self.owner) or
+                   rate.previous_opened is None)
         due = (force or rebuild or step <= self.config.codec_rate_initial_steps
                or step in (1, self.config.spatial_gate.freeze_step, self.motion_steps)
                or step % self.config.codec_rate_interval == 0)
@@ -931,15 +927,14 @@ class SpatialGatedMotion(MotionBase):
                 gs_rotation_step_rad=self.config.gs_rotation_step_rad, spatial_open=self.opened.cpu(),
                 spatial_relative=self.relative_regions)
             rate = self._codec_rate = MotionCodecRate(empty, len(self.parents), len(self.owner),
-                self.config.motion_fit_window_steps or 20)
+                self.config.motion_fit_window_steps or 20,
+                previous_opened=self.frame_reference_state.spatial_open)
         actual = rate.measure(rt, rr, gt, gr, self.opened.cpu(), int(step))
         scale = actual / max(rate.last_entropy_bytes + self._metadata_bytes(), 1.)
         rate.last_scale = scale
         return actual, scale
 
     def loss_terms(self, step, diagnostics=True):
-        if self.config.spatial_gate.predictor_objective == 'proximal_rd':
-            return self._predictor_rd_terms(step, diagnostics)
         steps, gs_steps = self.steps, self.gs_steps
         local_rt = _quantized(self.region_translation, steps[:3])
         local_rr = _quantized(self.region_rotation, steps[3:])
@@ -1195,78 +1190,6 @@ class SpatialGatedMotion(MotionBase):
             spatial_active_regions=self.owner.unique().numel() * self.base_xyz.new_ones(()),
             spatial_open_gates=self.opened[1:].sum(), spatial_gate_mean_probability=(
                 probabilities[self.split_eligible].mean() if self.split_eligible.any() else self.base_xyz.new_zeros(())))
-
-    @torch.no_grad()
-    def _record_predictor_proposal(self):
-        """Save photo-only proposals before L1/L0 can erase branch evidence."""
-        shared = self._shared_motion()
-        target = torch.cat((shared[0] + self.gs_translation,
-                            shared[1] + self.gs_rotation), -1).detach().clone()
-        metrics = []
-        for parameter, group in ((self.gs_translation, self.optimizer.param_groups[2]),
-                                  (self.gs_rotation, self.optimizer.param_groups[3])):
-            state = self.optimizer.state.get(parameter, {})
-            if 'exp_avg_sq' not in state:
-                metrics.append(torch.zeros_like(parameter))
-                continue
-            variance = state['exp_avg_sq'] / (1 - self.config.adam_betas[1] ** int(state['step']))
-            metrics.append((variance.sqrt() + self.config.adam_eps) / group['lr'])
-        self._predictor_fit_state = dict(target=target, metric=torch.cat(metrics, -1))
-
-    def _predictor_rd_terms(self, step, diagnostics):
-        """Learn cuts using the cost of sparsifying each candidate's proposal.
-
-        All candidates fit the same unshrunk photometric target, including
-        branches whose ancestors are closed. Conditional fitting is separate
-        from the expected path cost so ancestors cannot starve their training.
-        """
-        from .predictor_rd import predictor_cost
-        zero = self.base_xyz.new_zeros(())
-        result = dict(rate_loss=zero, relative_motion_loss=zero, candidate_motion_loss=zero)
-        state = getattr(self, '_predictor_fit_state', None)
-        ramp = min(max((step - self.config.rate_warmup_steps) / self.config.rate_ramp_steps, 0.), 1.)
-        price = self.config.rate_loss_weight * ramp / self.rate_normalization_bytes
-        if state is not None:
-            rt, rr = self._regional_predictions()
-            prediction = torch.cat((rt, rr), -1)
-            l1 = self.gs_steps.new_tensor([1 / self.extent] * 3 + [1.] * 3)
-            l1 *= self.config.relative_motion_loss_weight * ramp / len(self.owner)
-            probabilities = self._frontier_probabilities()
-            if self._hard_gate_frozen:
-                probabilities = probabilities.detach()
-            weights = None if self._hard_gate_frozen else self._path_weights(probabilities)
-            paths = [self.owner] if self._hard_gate_frozen else self.spatial_paths.unbind(1)
-            expected, fitted, expected_bytes = zero, zero, zero
-            observed = self.observations.gt(0).to(rt)
-            for level, node in enumerate(paths):
-                cost, _, byte_cost = predictor_cost(state['target'], prediction[node],
-                    state['metric'], self.gs_steps, l1, price, self._gs_id_lengths + 1)
-                cost = cost * observed
-                weight = 1. if weights is None else weights[:, level]
-                expected = expected + (weight * cost.detach()).sum()
-                expected_bytes = expected_bytes + (weight * byte_cost * observed).sum()
-                fitted = fitted + cost.sum() / len(paths)
-            active_t, active_r = rt.ne(0).any(-1).to(rt), rr.ne(0).any(-1).to(rr)
-            ids = torch.cat((self._region_id_lengths.new_zeros(1), self._region_id_lengths)) + 1
-            region_cost = (active_t + active_r - active_t * active_r) * ids + 6 * (active_t + active_r)
-            selection = self._region_selection_probabilities(probabilities)
-            region_bytes = (selection * region_cost).sum()
-            # Expected costs train only the gate. The envelope fits predictors
-            # independently; photo-only GS Adam receives neither derivative.
-            result['relative_motion_loss'] = expected
-            result['rate_loss'] = price * region_bytes
-            result['candidate_motion_loss'] = fitted.detach() if self._hard_gate_frozen else fitted
-            if diagnostics:
-                result['predictor_expected_residual_bytes'] = expected_bytes.detach()
-                result['predictor_expected_region_bytes'] = region_bytes.detach()
-        if diagnostics:
-            hard_bytes = self._hard_motion_bytes() + self._metadata_bytes()
-            result.update(self._support_diagnostics(self._frontier_probabilities()))
-            result.update(rate_bytes_surrogate=hard_bytes, rate_bytes_hard=hard_bytes,
-                rate_byte_price=self.base_xyz.new_tensor(price),
-                rate_normalization_gs_count=self.base_xyz.new_tensor(self.rate_normalization_count),
-                rate_normalization_bytes=self.base_xyz.new_tensor(self.rate_normalization_bytes))
-        return result
 
     @torch.no_grad()
     def _statistical_representatives(self, groups, symbols, observed):
@@ -1619,8 +1542,6 @@ class SpatialGatedMotion(MotionBase):
                                _integer(self.gs_rotation, self.gs_steps[3:]))
                 self._rebase_full_motion(full_motion, preserve_remainder=True)
             if not self.amplitude_refit_active:
-                if self.config.spatial_gate.predictor_objective == 'proximal_rd':
-                    self._record_predictor_proposal()
                 self._proximal_relative_gs()
             return self._finish_joint_step()
         initializing = self.last_step == cfg.start_step and not self._candidate_initialized
@@ -1658,16 +1579,10 @@ class SpatialGatedMotion(MotionBase):
             if self._hard_gate_frozen:
                 # Keep point residuals and optimizer history across step 70.
                 self._shared_field_active = False
-                if cfg.predictor_objective == 'proximal_rd':
-                    # The selected predictors now fit true image error. Their
-                    # old moments belonged to a local proposal objective.
-                    for parameter in (self.region_translation, self.region_rotation):
-                        self.optimizer.state.pop(parameter, None)
         terminal_cleanup = (self.config.terminal_motion_proximal and
                             self.amplitude_refit_active and self.last_step == self.motion_steps)
         if self._motion_fit_window_due() and (not self.amplitude_refit_active or terminal_cleanup):
-            if (self._hard_gate_frozen and not self.joint_image_gradients and
-                    cfg.predictor_objective != 'proximal_rd'):
+            if self._hard_gate_frozen and not self.joint_image_gradients:
                 self.last_metrics['motion/refreshed_region_modes'] = self._refresh_active_representatives()
             before = (self._values(hard=True)[2].ne(0).any(-1).sum()
                       if terminal_cleanup else None)
@@ -1870,30 +1785,34 @@ class SpatialGatedMotion(MotionBase):
             gs_translation_step_world=float(self.gs_steps[0]), gs_rotation_step_rad=float(self.gs_steps[3]),
             semantics='spatial gates; ' + ('parent-relative region corrections' if self.relative_regions else 'absolute region increments') + '; no rotation of GS centers')
 
+    def _regional_image_fitting_version(self):
+        """Use the same coordinate/schedule marker when saving and restoring."""
+        if self.config.spatial_gate.reparameterize_after_gate_freeze:
+            return 'stochastic_proposals_fixed_residuals_v1'
+        if self.stochastic_image_gates:
+            return ('joint_image_private_proposal_stochastic_v1'
+                    if self.config.spatial_gate.private_full_motion else
+                    'joint_image_residual_stochastic_v1')
+        if self.private_full_motion:
+            return ('joint_image_private_proposal_soft_v1' if self.soft_image_gates
+                    else 'joint_image_private_proposal_v1')
+        if self.soft_image_gates:
+            return ('joint_image_soft_anneal_private_v1' if self.hierarchical_private
+                    else 'joint_image_soft_anneal_v1')
+        if self.hierarchical_private:
+            return 'joint_image_hierarchical_private_v1'
+        if self.shared_image_recode:
+            return 'shared_image_recode_v1'
+        if self.joint_image_gradients:
+            return 'joint_image_dense_candidates_v2'
+        return 'joint_motion_coordinates_v1' if self.joint_training else 'observed_candidates_v2'
+
     def capture(self):
         packet = super().capture()
         if packet is not None:
             packet['representative_objective'] = 'rate_relative_v1'
             packet['gate_sparsification'] = 'fit_windows'
-            packet['regional_image_fitting'] = ('stochastic_proposals_fixed_residuals_v1'
-                                                if self.config.spatial_gate.reparameterize_after_gate_freeze else
-                                                'joint_image_residual_stochastic_v1'
-                                                if self.stochastic_image_gates and not self.config.spatial_gate.private_full_motion else
-                                                'joint_image_private_proposal_stochastic_v1'
-                                                if self.stochastic_image_gates else
-                                                'joint_image_private_proposal_soft_v1'
-                                                if self.private_full_motion and self.soft_image_gates else
-                                                'joint_image_private_proposal_v1' if self.private_full_motion else
-                                                'joint_image_soft_anneal_private_v1'
-                                                if self.soft_image_gates and self.hierarchical_private else
-                                                'joint_image_soft_anneal_v1' if self.soft_image_gates else
-                                                'joint_image_hierarchical_private_v1' if self.hierarchical_private else
-                                                'predictor_proposal_then_image_v1'
-                                                if self.config.spatial_gate.predictor_objective == 'proximal_rd' else
-                                                'shared_image_recode_v1' if self.shared_image_recode else
-                                                'joint_image_dense_candidates_v2' if self.joint_image_gradients else
-                                                'joint_motion_coordinates_v1' if self.joint_training
-                                                else 'observed_candidates_v2')
+            packet['regional_image_fitting'] = self._regional_image_fitting_version()
             packet['candidate_initialization'] = ('previous_region_field_v1' if self.joint_training
                                                    else 'quantized_median_v1')
             packet['motion_schedule'] = ('joint_motion_v2' if self.joint_training
@@ -1920,8 +1839,6 @@ class SpatialGatedMotion(MotionBase):
             packet['amplitude_refit_support'] = getattr(self, '_amplitude_refit_support', None)
             packet['codec_rate'] = (None if getattr(self, '_codec_rate', None) is None
                                     else self._codec_rate.capture())
-            if self.config.spatial_gate.predictor_objective == 'proximal_rd':
-                packet['predictor_fit_state'] = self._predictor_fit_state
         return packet
 
     def restore(self, packet):
@@ -1939,21 +1856,7 @@ class SpatialGatedMotion(MotionBase):
         estimator = self._gate_estimator()
         if packet is not None and self.joint_training and packet.get('gate_estimator') != estimator:
             raise ValueError('Earlier joint gate estimators are replay-only')
-        fitting = ('stochastic_proposals_fixed_residuals_v1'
-                   if self.config.spatial_gate.reparameterize_after_gate_freeze else
-                   'joint_image_residual_stochastic_v1'
-                   if self.stochastic_image_gates and not self.config.spatial_gate.private_full_motion else
-                   'joint_image_private_proposal_stochastic_v1' if self.stochastic_image_gates else
-                   'joint_image_private_proposal_soft_v1' if self.private_full_motion and self.soft_image_gates else
-                   'joint_image_private_proposal_v1' if self.private_full_motion else
-                   'joint_image_soft_anneal_private_v1' if self.soft_image_gates and self.hierarchical_private else
-                   'joint_image_soft_anneal_v1' if self.soft_image_gates else
-                   'joint_image_hierarchical_private_v1' if self.hierarchical_private else
-                   'predictor_proposal_then_image_v1'
-                   if self.config.spatial_gate.predictor_objective == 'proximal_rd' else
-                   'shared_image_recode_v1' if self.shared_image_recode else
-                   'joint_image_dense_candidates_v2' if self.joint_image_gradients else
-                   'joint_motion_coordinates_v1' if self.joint_training else 'observed_candidates_v2')
+        fitting = self._regional_image_fitting_version()
         if packet is not None and packet.get('regional_image_fitting') != fitting:
             raise ValueError('Earlier regional image-fitting schedules are replay-only')
         if packet is not None and packet.get('gate_sparsification') != 'fit_windows':
@@ -1979,14 +1882,6 @@ class SpatialGatedMotion(MotionBase):
                 raise ValueError('Checkpoint private coordinates disagree with its gate stage')
             self._frame_private_full_motion = active
         self._amplitude_refit_support = None if packet is None else packet.get('amplitude_refit_support')
-        self._predictor_fit_state = None if packet is None else packet.get('predictor_fit_state')
-        if self._predictor_fit_state is not None:
-            if (set(self._predictor_fit_state) != {'target', 'metric'} or any(
-                    value.shape != (len(self.owner), 6) or not bool(torch.isfinite(value).all())
-                    for value in self._predictor_fit_state.values())):
-                raise ValueError('Invalid shared predictor fitting state')
-            self._predictor_fit_state = {name: value.to(self.base_xyz).clone()
-                                        for name, value in self._predictor_fit_state.items()}
         if self.amplitude_refit_active:
             if not self.config.amplitude_refit_steps or not self._hard_gate_frozen:
                 raise ValueError('Invalid motion amplitude-refit checkpoint')

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -22,8 +23,9 @@ from pipeline.module import GaussianConfig
 def verify(config_path, checkpoint_path, native_log=None):
     config = yaml.safe_load(config_path.read_text())
     state = torch.load(checkpoint_path, map_location='cuda', weights_only=False)
-    if state['current_frame'] != 0 or state['global_step'] != 15000:
-        raise ValueError('Expected a completed 15000-step native first frame')
+    expected_steps = config['trainer']['num_init_steps']
+    if state['current_frame'] != 0 or state['global_step'] != expected_steps:
+        raise ValueError(f'Expected a completed {expected_steps}-step native first frame')
     model = GaussianModel(config['module']['sh_degree'])
     model.restore(state['gaussians'], GaussianConfig(**config['module']['gaussian']))
     renderer = Renderer(RendererConfig(**config['module'].get('renderer', {})), model)
@@ -42,7 +44,7 @@ def verify(config_path, checkpoint_path, native_log=None):
     native_psnr = None
     if native_log:
         text = native_log.read_text(errors='replace')
-        found = re.findall(r'Evaluate test dataset at step 15000:\s*[^\n]*?PSNR:\s*([\d.]+)', text)
+        found = re.findall(rf'Evaluate test dataset at step {expected_steps}:\s*[^\n]*?PSNR:\s*([\d.]+)', text)
         if len(found) != 1:
             raise ValueError('Could not identify the final native held-out evaluation')
         native_psnr = float(found[0])
@@ -50,6 +52,7 @@ def verify(config_path, checkpoint_path, native_log=None):
             raise ValueError('my4dgs rendering differs from the native held-out evaluation')
     return dict(status='passed', checkpoint=str(checkpoint_path.resolve()),
                 input_adapter=config['data']['root'], frame=0, camera='cam00.png',
+                global_step=state['global_step'],
                 image_size=list(view.image.shape[-2:][::-1]), gaussian_count=len(model.get_xyz),
                 active_sh_degree=int(model.active_sh_degree), independent_my4dgs_render=metrics,
                 native_logged_test_psnr_db=native_psnr,
@@ -63,7 +66,7 @@ def main():
     parser.add_argument('--native-log', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    torch.set_num_threads(4)
+    torch.set_num_threads(int(os.environ.get('N3DV_CPU_THREADS', '4')))
     result = verify(args.config, args.checkpoint, args.native_log)
     args.output.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))

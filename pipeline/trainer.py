@@ -1,9 +1,11 @@
 """Frame trainer for spatial gates, GS motion residuals, and quantized births."""
 
 import json
+import hashlib
 import random
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -21,7 +23,20 @@ from .data import PairedFetcher
 from .model.birth_quantization import RAW_FIELDS, model_raw
 from .module import restore_retired_reference
 from .timing import FrameTimer
+from .run_summary import build_run_summary, format_run_summary, time_render
 from libgs.metric import psnr
+
+
+def frame_training_phase(module, step):
+    if step <= module.motion_steps:
+        return 'motion'
+    selection_end = getattr(module, 'birth_selection_end_step', module.total_steps)
+    return 'birth' if step <= selection_end else 'refit'
+
+
+def stage_image_steps(module):
+    return tuple(sorted({module.motion_steps, module.total_steps,
+                         getattr(module, 'birth_selection_end_step', module.total_steps)}))
 
 
 @dataclass
@@ -37,6 +52,45 @@ class TrainerConfig(BaseTrainerConfig):
 
 
 class Trainer(BaseTrainer):
+    def fit(self, module, ckpt_path=None):
+        started = time.perf_counter()
+        self.setup(module, ckpt_path)
+        initial_report = None
+        if self.is_first_frame:
+            # This extra evaluation must not consume the training RNG stream.
+            rng = self._capture_rng()
+            try:
+                evaluation = self.validation_loop()
+                initial_report = dict(frame=0, evaluation=evaluation,
+                    total_count=len(self.module.gaussians._xyz),
+                    render_timing=self._validation_render_timing,
+                    reference_sha256=hashlib.sha256(
+                        self.decoder_reference_path.read_bytes()).hexdigest())
+                (self.output_dir / 'reference_evaluation.json').write_text(
+                    json.dumps(initial_report, indent=2))
+            finally:
+                self._restore_rng(rng)
+        elif getattr(self, 'resume_prefix_dir', None) is not None:
+            source = Path(self.resume_prefix_dir) / 'reference_evaluation.json'
+            if source.is_file() and self.decoder_reference_path.name == 'reference_frame0.npz':
+                candidate = json.loads(source.read_text())
+                if candidate.get('reference_sha256') == hashlib.sha256(
+                        self.decoder_reference_path.read_bytes()).hexdigest():
+                    initial_report = candidate
+                    (self.output_dir / 'reference_evaluation.json').write_text(
+                        json.dumps(initial_report, indent=2))
+        reports = self.training_loop()
+        summary = build_run_summary(self.output_dir, self.datamodule.num_frames,
+            initial_report=initial_report, reference_path=self.decoder_reference_path,
+            elapsed_seconds=time.perf_counter() - started)
+        path = self.output_dir / 'run_summary.json'
+        temporary = path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(summary, indent=2))
+        temporary.replace(path)
+        with tqdm.external_write_mode(file=sys.stderr):
+            logging.info('\n%s', '\n'.join(format_run_summary(summary)))
+        return reports
+
     def setup(self, module, ckpt_path=None):
         if (isinstance(self.config.motion_views_per_step, bool) or
                 not isinstance(self.config.motion_views_per_step, int) or
@@ -92,11 +146,13 @@ class Trainer(BaseTrainer):
         self._resume_rng = ckpt.get('rng_state')
         if ckpt.get('rigid_tree_version') is None:
             self._write_reference(frame_index=0)
+            selection_end = getattr(self.module, 'birth_selection_end_step', self.module.total_steps)
             logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
-                         '%d motion + %d birth steps',
+                         '%d motion + %d birth selection + %d refit steps',
                          self.module.config.rigid_tree.spatial_gate.max_depth,
-                         self.module.config.rigid_tree.motion_steps,
-                         self.module.config.rigid_tree.birth_steps)
+                         self.module.motion_steps,
+                         selection_end - self.module.motion_steps,
+                         self.module.total_steps - selection_end)
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():
@@ -238,11 +294,14 @@ class Trainer(BaseTrainer):
         """Average image objectives before one shared-motion optimizer update."""
         count = self._views_per_step(step)
         packages, metrics, loss_value = [], {}, 0.
+        timer = getattr(self, '_frame_timer', None)
         for index in range(count):
             # The regularizer does not depend on the camera. Charging it on
             # the last view with weight=count preserves the averaged objective
             # and avoids rebuilding the same graph once per camera.
-            loss, values, package = self.module.training_step(fetcher.next(), step,
+            with timer.phase('data_loading') if timer else nullcontext():
+                viewpoint = fetcher.next()
+            loss, values, package = self.module.training_step(viewpoint, step,
                 regularization_weight=count if index == count - 1 else 0.)
             if loss.requires_grad:
                 (loss / count).backward()
@@ -257,6 +316,12 @@ class Trainer(BaseTrainer):
             packages.append(package)
         metrics['gs'] = values['gs']
         self.module.post_training_step(packages[0] if count == 1 else packages)
+        model = getattr(self.module, 'gaussians', None)
+        if model is not None and hasattr(model, '_xyz'):
+            births = getattr(self.module, 'births', None)
+            metrics['gs'] = len(model._xyz) + (
+                len(births._xyz) if getattr(self.module, 'motion_committed', False)
+                and births is not None else 0)
         if defer_metrics:
             return loss_value, metrics
         return Trainer._materialize_step_metrics([(loss_value, metrics)])[0]
@@ -312,6 +377,7 @@ class Trainer(BaseTrainer):
         synchronize = (lambda: torch.cuda.synchronize(device)) if (
             device is not None and torch.device(device).type == 'cuda') else None
         timer = FrameTimer(synchronize=synchronize)
+        self._frame_timer = timer
         started = time.perf_counter()
         fetcher = self._make_fetcher()
         self._resume_fetcher(fetcher)
@@ -327,28 +393,31 @@ class Trainer(BaseTrainer):
                   bar_format='{desc}: {percentage:3.0f}%|{bar}| '
                              '{n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}') as progress_bar:
             for step in range(self.global_step + 1, self.num_steps + 1):
-                timer.switch('motion' if step <= self.module.motion_steps else 'birth')
+                phase = frame_training_phase(self.module, step)
+                timer.switch(phase)
                 self.global_step = step
-                self.module.pre_training_step()
+                with timer.phase('model_setup') if step == 1 else nullcontext():
+                    self.module.pre_training_step()
                 pending_metrics.append(self._fit_views(fetcher, step, defer_metrics=True))
                 if (self.config.stage_image_camera is not None and
-                        step in (self.module.motion_steps, self.module.total_steps)):
+                        step in stage_image_steps(self.module)):
                     with timer.phase('stage_evaluation'):
                         stage_view = self._record_stage_image(step, stage_view)
                 if step % 10 == 0 or step == self.num_steps:
                     # The progress display only refreshes every ten steps. Keep
                     # detached scalars on device until then instead of forcing
                     # a CUDA synchronization after every optimizer update.
-                    for loss_value, metrics in self._materialize_step_metrics(pending_metrics):
-                        train_loss += loss_value
-                        last_metrics = metrics
-                        for name, value in (('image', metrics['image_loss']),
-                                            ('psnr', metrics['psnr'])):
-                            metrics_ema[name] = .6 * metrics_ema[name] + .4 * value
-                    pending_metrics.clear()
-                    progress_bar.set_postfix(dict(image=f"{metrics_ema['image']:.5f}",
-                        psnr=f"{metrics_ema['psnr']:.2f}", gs=metrics['gs']), refresh=False)
-                    progress_bar.update(step - progress_bar.n)
+                    with timer.phase('diagnostics'):
+                        for loss_value, metrics in self._materialize_step_metrics(pending_metrics):
+                            train_loss += loss_value
+                            last_metrics = metrics
+                            for name, value in (('image', metrics['image_loss']),
+                                                ('psnr', metrics['psnr'])):
+                                metrics_ema[name] = .6 * metrics_ema[name] + .4 * value
+                        pending_metrics.clear()
+                        progress_bar.set_postfix(dict(phase=phase, image=f"{metrics_ema['image']:.5f}",
+                            psnr=f"{metrics_ema['psnr']:.2f}", gs=metrics['gs']), refresh=False)
+                        progress_bar.update(step - progress_bar.n)
                 if self._checkpoint_due() and step != self.num_steps:
                     with timer.phase('checkpoint'):
                         self.save_checkpoint()
@@ -358,6 +427,7 @@ class Trainer(BaseTrainer):
         report = dict(self.module.frame_report or {},
             stage_image_metrics=self.module.stage_image_metrics,
             evaluation=evaluation, final_train_metrics=last_metrics,
+            render_timing=getattr(self, '_validation_render_timing', None),
             mean_train_loss=train_loss / max(1, executed_steps),
             train_loss_steps=executed_steps,
             elapsed_seconds=time.perf_counter() - started,
@@ -366,9 +436,12 @@ class Trainer(BaseTrainer):
             with timer.phase('checkpoint'):
                 self.save_checkpoint()
         timing = timer.finish()
+        self._frame_timer = None
         report.update(timing=timing, **{name: timing[name] for name in (
             'training_seconds', 'optimization_seconds', 'evaluation_seconds',
-            'checkpoint_seconds', 'frame_wall_seconds')})
+            'checkpoint_seconds', 'frame_wall_seconds', 'preparation_seconds',
+            'data_loading_seconds', 'encoding_seconds', 'diagnostics_seconds',
+            'training_loop_seconds')})
         directory = self.output_dir / 'frame_summary'
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f'frame_{frame:03d}.json').write_text(
@@ -383,10 +456,12 @@ class Trainer(BaseTrainer):
         logging.info('  Time: training=%.3fs evaluation=%.3fs checkpoint=%.3fs wall=%.3fs',
                      report['training_seconds'], report['evaluation_seconds'],
                      report['checkpoint_seconds'], report['frame_wall_seconds'])
-        logging.info('  Storage=%.2f KB | GS=%d (+%d) | regions=%d | tree edits=%d',
+        logging.info('  Storage=%.2f KB | GS=%d (new=%d, deleted=%d, net=%+d) | regions=%d | tree edits=%d',
                      report.get('encoded_bytes', 0) / 1000,
                      report.get('total_count', last_metrics.get('gs', 0)),
-                     report.get('birth_count', 0), report.get('region_count', 0),
+                     report.get('birth_count', 0), report.get('retired_count', 0),
+                     report.get('birth_count', 0) - report.get('retired_count', 0),
+                     report.get('region_count', 0),
                      report.get('birth_control', {}).get('tree_edit_count', 0))
         return report
 
@@ -421,9 +496,14 @@ class Trainer(BaseTrainer):
             difference = rendered - viewpoint.image
             labels = {self.module.motion_steps: 'hard_spatial_motion_old_only',
                       self.module.total_steps: 'final_decoded_with_birth'}
+            selection_end = getattr(self.module, 'birth_selection_end_step', self.module.total_steps)
+            if self.module.motion_steps < selection_end < self.module.total_steps:
+                labels[selection_end] = 'after_balanced_replacement_before_refit'
             record = dict(step=int(step), phase=labels[step], camera=str(viewpoint.path),
                           mse=float(difference.square().mean()),
                           psnr=float(psnr(rendered, viewpoint.image)), old_only=old_only,
+                          gaussian_count=len(self.module.gaussians._xyz) + (
+                              len(self.module.births._xyz) if not old_only else 0),
                           shared_prestructure_active=bool(getattr(getattr(self.module, 'motion', None),
                                                                  'shared_prestructure_active', False)),
                           participates_in_training_or_selection=False)
@@ -438,16 +518,40 @@ class Trainer(BaseTrainer):
             self._restore_rng(rng)
 
     @torch.no_grad()
+    def _measure_render(self, viewpoint):
+        rng = self._capture_rng()
+        try:
+            device = torch.device(self.device)
+            synchronize = ((lambda: torch.cuda.synchronize(device))
+                           if device.type == 'cuda' else (lambda: None))
+            result = time_render(
+                lambda: self.module.forward(viewpoint)['render'].clamp(0, 1), synchronize)
+            return dict(result, frame=self.current_frame, camera=Path(viewpoint.path).name,
+                        image_size=list(reversed(viewpoint.image.shape[-2:])),
+                        device=str(device))
+        finally:
+            self._restore_rng(rng)
+
+    @torch.no_grad()
     def validation_loop(self):
         loaders = self.datamodule.val_dataloader()
         if not isinstance(loaders, (tuple, list)):
             loaders = [loaders]
+        self._validation_render_timing = None
+        preferred = next((name for name in ('test', 'validation', 'train')
+                          if name in self.datamodule.eval_names), None)
+        selected_camera = self.config.stage_image_camera
         groups = []
         for loader_idx, loader in enumerate(loaders):
             rows = []
             for index, viewpoint in enumerate(loader):
+                viewpoint = viewpoint.to(self.device)
                 rows.append(self.module.validation_step(
-                    viewpoint.to(self.device), index, loader_idx))
+                    viewpoint, index, loader_idx))
+                if (self._validation_render_timing is None and
+                        self.datamodule.eval_names[loader_idx] == preferred and
+                        (selected_camera is None or Path(viewpoint.path).name == selected_camera)):
+                    self._validation_render_timing = self._measure_render(viewpoint)
             groups.append(rows)
         return self.module.validation_end(
             groups[0] if len(groups) == 1 else groups,

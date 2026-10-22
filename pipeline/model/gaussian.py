@@ -47,8 +47,7 @@ class GaussianModel(BaseGaussianModel):
 
     @property
     def get_features(self):
-        dc = getattr(self, 'rigid_sh_dc', None)
-        dc = self._features_dc if dc is None else dc
+        dc = self._features_dc
         return self._render_cached('features', (dc, self._features_rest),
             lambda: torch.cat((dc, self._features_rest), dim=1))
 

@@ -127,6 +127,9 @@ def _load_config(run: Path):
     saved = OmegaConf.to_container(OmegaConf.load(run / 'config.yaml'), resolve=True)
     saved['module']['rigid_tree'] = normalize(saved['module']['rigid_tree'])
     saved['module'].pop('old_opacity', None)
+    # Historical DC packets are decoded from the stream, independently of
+    # the current training configuration, which no longer learns DC updates.
+    saved['module'].pop('feature_dc_update', None)
     config, extra = to_structured(OmegaConf.create(saved), Config)
     if extra:
         raise ValueError(f'Unrecognized run configuration: {extra}')

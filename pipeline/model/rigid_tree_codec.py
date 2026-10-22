@@ -21,7 +21,9 @@ from .spatial_gate import (compose_spatial_pose, spatial_owner, spatial_state_ro
                            SPATIAL_ROUTING_FIELDS, validate_spatial_routing,
                            spatial_accumulate)
 from .sparse_integer_codec import (MOTION_MAGICS, pack_layout, unpack_layout,
-                                   encode_motion_layout, decode_motion_layout)
+                                   encode_motion_layout, decode_motion_layout,
+                                   encode_unsigned_values, GATE_DELTA_MAGICS,
+                                   TRANSLATION_ONLY_SPATIAL_MAGICS)
 
 
 MAGIC = b'RRT1'
@@ -45,9 +47,10 @@ SPATIAL_LZMA_COMPRESSED_MAGIC = b'SPL1'
 RELATIVE_SPATIAL_MAGIC = b'SPG2'
 TRANSLATION_ONLY_SPATIAL_MAGIC = b'SPG3'
 RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC = b'SPG4'
-TRANSLATION_ONLY_MAGICS = (TRANSLATION_ONLY_SPATIAL_MAGIC,
-                           RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC)
-SPATIAL_MAGICS = (SPATIAL_MAGIC, RELATIVE_SPATIAL_MAGIC, *TRANSLATION_ONLY_MAGICS)
+TRANSLATION_ONLY_MAGICS = TRANSLATION_ONLY_SPATIAL_MAGICS
+SPATIAL_MAGICS = (SPATIAL_MAGIC, RELATIVE_SPATIAL_MAGIC,
+                  TRANSLATION_ONLY_SPATIAL_MAGIC,
+                  RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC, *GATE_DELTA_MAGICS)
 CHECKSUM_BYTES = 16
 MAX_RAW_PACKET_BYTES = 512 * 1024 * 1024
 MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
@@ -65,6 +68,8 @@ WRAPPERS = {
     RELATIVE_SPATIAL_MAGIC: (b'SPC2', b'SPL2'),
     TRANSLATION_ONLY_SPATIAL_MAGIC: (b'SPC3', b'SPL3'),
     RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC: (b'SPC4', b'SPL4'),
+    **{magic: (b'SPC' + magic[-1:], b'SPL' + magic[-1:])
+       for magic in GATE_DELTA_MAGICS},
 }
 INNER_MAGIC = {wrapper: raw for raw, pair in WRAPPERS.items()
                for wrapper in pair}
@@ -260,6 +265,10 @@ def motion_packet_info(packet):
                MOTION_MAGICS[0]: 'SVI1-planar-varint',
                MOTION_MAGICS[1]: 'SVZ1-planar-varint-zlib',
                MOTION_MAGICS[2]: 'SVX1-planar-varint-lzma'}
+    for raw_magic in GATE_DELTA_MAGICS:
+        formats[raw_magic] = raw_magic.decode() + '-gate-delta-raw'
+        for wrapper, codec in zip(WRAPPERS[raw_magic], ('zlib', 'lzma')):
+            formats[wrapper] = wrapper.decode() + '-gate-delta-' + codec
     return dict(format=formats[magic], stored_bytes=len(packet),
                 raw_stream_bytes=len(raw), compression_savings_bytes=len(raw) - len(packet))
 
@@ -291,6 +300,41 @@ def _cpu(tensor, dtype, shape=None):
     if shape is not None and tuple(tensor.shape) != tuple(shape):
         raise ValueError(f'Expected shape {shape}, got {tuple(tensor.shape)}')
     return tensor
+
+
+def spatial_gate_payload(opened, previous=None):
+    """Encode changed gate IDs; use the legacy bitmap if it is shorter.
+
+    IDs are increasing gap varints. Each listed bit is toggled, including
+    unreachable descendants, so the complete next-frame state stays exact.
+    """
+    opened = _cpu(opened, torch.bool)
+    if opened.ndim != 1:
+        raise ValueError('Spatial gates must be a vector')
+    full = np.packbits(opened.numpy(), bitorder='little').tobytes()
+    if previous is None:
+        return full, False
+    previous = _cpu(previous, torch.bool, opened.shape)
+    changed = np.flatnonzero(opened.numpy() != previous.numpy())
+    delta = _uvar(len(changed)) + encode_unsigned_values(np.diff(np.r_[-1, changed]))
+    return (delta, True) if len(delta) < len(full) else (full, False)
+
+
+def spatial_gate_magic(magic, delta):
+    index = SPATIAL_MAGICS.index(bytes(magic)) % 4
+    return SPATIAL_MAGICS[index + (4 if delta else 0)]
+
+
+def compress_spatial_packet(raw, opened, gate_start, gate_length, mode='auto'):
+    """Choose by actual stored bytes; a sparse gate list may compress worse."""
+    encoded = compress_motion_packet(raw, mode)
+    if mode != 'auto' or raw[:4] not in GATE_DELTA_MAGICS:
+        return encoded
+    gates, _ = spatial_gate_payload(opened)
+    body = (spatial_gate_magic(raw[:4], False) + raw[4:gate_start] + gates +
+            raw[gate_start + gate_length:-CHECKSUM_BYTES])
+    full = body + hashlib.sha256(body).digest()[:CHECKSUM_BYTES]
+    return min(encoded, compress_motion_packet(full, mode), key=len)
 
 
 def _sparse_write(result, t, r):
@@ -430,7 +474,8 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                   translation_step_extent, rotation_step_rad, compression='none',
                   gs_translation_step_extent=None, gs_rotation_step_rad=None,
                   region_map=None, pivots=None, spatial_open=None,
-                  spatial_relative=False, inherit_birth_rotation=False):
+                  spatial_relative=False, inherit_birth_rotation=False,
+                  gate_delta=True):
     """Encode actual sparse translation/rotation blocks and topology deltas."""
     _validate_state(previous_state)
     if frame_index != previous_state.frame_index + 1:
@@ -500,6 +545,10 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
         raise ValueError('Spatial stream requires explicit region and GS steps')
     spatial_magic = ((RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC if spatial_relative else TRANSLATION_ONLY_SPATIAL_MAGIC)
                      if inherit_birth_rotation else RELATIVE_SPATIAL_MAGIC if spatial_relative else SPATIAL_MAGIC)
+    if spatial:
+        gates, delta_gates = spatial_gate_payload(spatial_open,
+            previous_state.spatial_open if gate_delta else None)
+        spatial_magic = spatial_gate_magic(spatial_magic, delta_gates)
     result = bytearray(spatial_magic if spatial else DYNAMIC_MAGIC if dynamic else
                        DUAL_STEP_DELTA_MAGIC if dual_step else DELTA_MAGIC)
     result.extend(previous_state.digest())
@@ -540,10 +589,7 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
             result.extend(_uvar(node))
             result.extend(_uvar(int(parents[node])))
     if spatial:
-        # A split changes thousands of owners, but only one region gate bit.
-        gates = bytearray((regions + 7) // 8)
-        for node in torch.where(spatial_open)[0].tolist():
-            gates[node // 8] |= 1 << (node % 8)
+        gate_start = len(result)
         result.extend(gates)
     else:
         result.extend(_uvar(len(owner_edits)))
@@ -558,6 +604,9 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
         result.extend(struct.pack('<3f', *xyz) if inherit_birth_rotation else
                       struct.pack('<3f4f', *xyz, *rotation))
     result.extend(hashlib.sha256(result).digest()[:CHECKSUM_BYTES])
+    if spatial:
+        return compress_spatial_packet(bytes(result), spatial_open, gate_start,
+                                       len(gates), compression)
     return compress_motion_packet(result, mode=compression)
 
 
@@ -662,9 +711,23 @@ def decode_motion(payload, prior_state):
     if spatial:
         if not torch.equal(parents, prior_state.parents):
             raise ValueError('Spatial candidate tree cannot be reparented')
-        bits = reader.take((regions + 7) // 8)
-        opened = torch.tensor([bool(bits[node // 8] & (1 << (node % 8)))
-                               for node in range(regions)])
+        if stream_magic in GATE_DELTA_MAGICS:
+            opened = prior_state.spatial_open.clone()
+            changes = reader.integer()
+            if changes > regions - 1 or changes > len(reader.payload) - reader.cursor:
+                raise ValueError('Too many spatial gate changes')
+            last = -1
+            for _ in range(changes):
+                gap = reader.integer()
+                node = last + gap
+                if gap < 1 or node <= 0 or node >= regions:
+                    raise ValueError('Invalid spatial gate change ID')
+                opened[node] = ~opened[node]
+                last = node
+        else:
+            bits = reader.take((regions + 7) // 8)
+            opened = torch.tensor([bool(bits[node // 8] & (1 << (node % 8)))
+                                   for node in range(regions)])
         paths = prior_state.spatial_paths[rows].clone()
         if prior_state.spatial_centers is not None:
             paths = spatial_state_route(prior_state.xyz[rows], prior_state)
@@ -700,7 +763,8 @@ def decode_motion(payload, prior_state):
     if reader.cursor != len(reader.payload):
         raise ValueError('Trailing rigid motion bytes')
     step_t = extent * step_extent
-    if stream_magic in (RELATIVE_SPATIAL_MAGIC, RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC):
+    if stream_magic in (RELATIVE_SPATIAL_MAGIC, RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC,
+                       GATE_DELTA_MAGICS[1], GATE_DELTA_MAGICS[3]):
         rt = spatial_accumulate(rt.to(torch.int32), parents)
         rr = spatial_accumulate(rr.to(torch.int32), parents)
     values = (rt.float() * step_t, rr.float() * step_rotation,
