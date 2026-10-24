@@ -1,0 +1,222 @@
+{
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv/flame_steak_1020/130k_multiview_select_ssim_180_80_40/20261024T095641_3b0b28",
+  "frames": [
+    {
+      "frame": 1,
+      "births": 290,
+      "retired": 261,
+      "metrics": {
+        "old_all": {
+          "psnr": 34.0837516784668,
+          "ssim": 0.9705583453178406
+        },
+        "old_survivors_only": {
+          "psnr": 34.0837516784668,
+          "ssim": 0.9705583453178406
+        },
+        "old_all_plus_final_births": {
+          "psnr": 34.099788665771484,
+          "ssim": 0.9705482721328735
+        },
+        "final_survivors_plus_births": {
+          "psnr": 34.099788665771484,
+          "ssim": 0.9705482721328735
+        }
+      },
+      "adding_final_births_to_all_old_db": 0.0160369873046875,
+      "deleting_old_with_births_present_db": 0.0,
+      "deleting_old_without_births_db": 0.0,
+      "total_change_db": 0.0160369873046875
+    },
+    {
+      "frame": 9,
+      "births": 48,
+      "retired": 44,
+      "metrics": {
+        "old_all": {
+          "psnr": 33.92877197265625,
+          "ssim": 0.9696367383003235
+        },
+        "old_survivors_only": {
+          "psnr": 33.92877197265625,
+          "ssim": 0.9696367383003235
+        },
+        "old_all_plus_final_births": {
+          "psnr": 33.986331939697266,
+          "ssim": 0.969651460647583
+        },
+        "final_survivors_plus_births": {
+          "psnr": 33.986331939697266,
+          "ssim": 0.969651460647583
+        }
+      },
+      "adding_final_births_to_all_old_db": 0.057559967041015625,
+      "deleting_old_with_births_present_db": 0.0,
+      "deleting_old_without_births_db": 0.0,
+      "total_change_db": 0.057559967041015625
+    },
+    {
+      "frame": 29,
+      "births": 217,
+      "retired": 238,
+      "metrics": {
+        "old_all": {
+          "psnr": 33.840087890625,
+          "ssim": 0.9691539406776428
+        },
+        "old_survivors_only": {
+          "psnr": 33.840087890625,
+          "ssim": 0.9691539406776428
+        },
+        "old_all_plus_final_births": {
+          "psnr": 33.84258270263672,
+          "ssim": 0.9691603183746338
+        },
+        "final_survivors_plus_births": {
+          "psnr": 33.84258270263672,
+          "ssim": 0.9691603183746338
+        }
+      },
+      "adding_final_births_to_all_old_db": 0.00249481201171875,
+      "deleting_old_with_births_present_db": 0.0,
+      "deleting_old_without_births_db": 0.0,
+      "total_change_db": 0.00249481201171875
+    },
+    {
+      "frame": 59,
+      "births": 204,
+      "retired": 224,
+      "metrics": {
+        "old_all": {
+          "psnr": 34.359962463378906,
+          "ssim": 0.9691988229751587
+        },
+        "old_survivors_only": {
+          "psnr": 34.359962463378906,
+          "ssim": 0.9691988229751587
+        },
+        "old_all_plus_final_births": {
+          "psnr": 34.345245361328125,
+          "ssim": 0.9691696166992188
+        },
+        "final_survivors_plus_births": {
+          "psnr": 34.345237731933594,
+          "ssim": 0.9691696166992188
+        }
+      },
+      "adding_final_births_to_all_old_db": -0.01471710205078125,
+      "deleting_old_with_births_present_db": -7.62939453125e-06,
+      "deleting_old_without_births_db": 0.0,
+      "total_change_db": -0.0147247314453125
+    },
+    {
+      "frame": 119,
+      "births": 178,
+      "retired": 161,
+      "metrics": {
+        "old_all": {
+          "psnr": 34.979488372802734,
+          "ssim": 0.9683328866958618
+        },
+        "old_survivors_only": {
+          "psnr": 34.97983169555664,
+          "ssim": 0.9683327674865723
+        },
+        "old_all_plus_final_births": {
+          "psnr": 34.971187591552734,
+          "ssim": 0.9683177471160889
+        },
+        "final_survivors_plus_births": {
+          "psnr": 34.9715461730957,
+          "ssim": 0.9683176279067993
+        }
+      },
+      "adding_final_births_to_all_old_db": -0.00830078125,
+      "deleting_old_with_births_present_db": 0.00035858154296875,
+      "deleting_old_without_births_db": 0.00034332275390625,
+      "total_change_db": -0.00794219970703125
+    },
+    {
+      "frame": 179,
+      "births": 309,
+      "retired": 339,
+      "metrics": {
+        "old_all": {
+          "psnr": 33.952247619628906,
+          "ssim": 0.9667539596557617
+        },
+        "old_survivors_only": {
+          "psnr": 33.95222473144531,
+          "ssim": 0.9667542576789856
+        },
+        "old_all_plus_final_births": {
+          "psnr": 33.88506317138672,
+          "ssim": 0.9666241407394409
+        },
+        "final_survivors_plus_births": {
+          "psnr": 33.88505554199219,
+          "ssim": 0.96662437915802
+        }
+      },
+      "adding_final_births_to_all_old_db": -0.0671844482421875,
+      "deleting_old_with_births_present_db": -7.62939453125e-06,
+      "deleting_old_without_births_db": -2.288818359375e-05,
+      "total_change_db": -0.06719207763671875
+    },
+    {
+      "frame": 239,
+      "births": 219,
+      "retired": 240,
+      "metrics": {
+        "old_all": {
+          "psnr": 34.25994873046875,
+          "ssim": 0.9676010608673096
+        },
+        "old_survivors_only": {
+          "psnr": 34.25971603393555,
+          "ssim": 0.9676007032394409
+        },
+        "old_all_plus_final_births": {
+          "psnr": 34.22706604003906,
+          "ssim": 0.9675416350364685
+        },
+        "final_survivors_plus_births": {
+          "psnr": 34.22683334350586,
+          "ssim": 0.9675413370132446
+        }
+      },
+      "adding_final_births_to_all_old_db": -0.0328826904296875,
+      "deleting_old_with_births_present_db": -0.000232696533203125,
+      "deleting_old_without_births_db": -0.000232696533203125,
+      "total_change_db": -0.033115386962890625
+    },
+    {
+      "frame": 299,
+      "births": 291,
+      "retired": 262,
+      "metrics": {
+        "old_all": {
+          "psnr": 34.697078704833984,
+          "ssim": 0.9671537280082703
+        },
+        "old_survivors_only": {
+          "psnr": 34.69707107543945,
+          "ssim": 0.9671537280082703
+        },
+        "old_all_plus_final_births": {
+          "psnr": 34.67286682128906,
+          "ssim": 0.9671229720115662
+        },
+        "final_survivors_plus_births": {
+          "psnr": 34.67282485961914,
+          "ssim": 0.9671229720115662
+        }
+      },
+      "adding_final_births_to_all_old_db": -0.024211883544921875,
+      "deleting_old_with_births_present_db": -4.1961669921875e-05,
+      "deleting_old_without_births_db": -7.62939453125e-06,
+      "total_change_db": -0.02425384521484375
+    }
+  ],
+  "scope": "Fixed-attribute render counterfactuals on eight saved cam00 frames. Birth attributes were learned with retirement; this is not retraining, a counterfactual sequence or an all-frame causal estimate."
+}

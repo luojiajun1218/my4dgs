@@ -2,10 +2,10 @@
 # frame0.pth is the regular checkpoint file; keep it when cleaning full300 outputs.
 # Storage coefficient 3e-5; regional/shared color updates removed.
 # 180 motion + 80 birth selection + 40 fixed-pool joint refit steps.
-# Results: output/n3dv/flame_steak_1020/full300_130k_balanced10pct_180_80_40/<timestamp_jobid>/.
+# Results: output/n3dv/flame_steak_1020/full300_130k_birthdriven10pct_180_80_40/<timestamp_jobid>/.
 # New/retired counts may differ by at most 10% of the final newborn count.
 output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv/flame_steak_1020
-experiment_name: full300_130k_balanced10pct_180_80_40
+experiment_name: full300_130k_birthdriven10pct_180_80_40
 mode: train
 ckpt_path: /home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv/flame_steak_1020/frame0.pth
 trainer:
@@ -157,8 +157,8 @@ module:
   birth:
     source_covariance_init: true
     replace_low_opacity: false
-    replacement_policy: balanced_current_births
-    replacement_count_tolerance: 0.1  # Protect necessary source GS within 10% of final births.
+    replacement_policy: birth_driven_retirement
+    replacement_count_tolerance: 0.1  # Old deletions must lie within 0.9K..1.1K for admitted births K.
     refit_steps: 40  # Selection ends at step 260; 261..300 jointly refit the fixed pool.
     rotation_updates: false
     clone_sigma_scale: 2.0
@@ -167,7 +167,7 @@ module:
     densify_grad_threshold: 0.00015
     opacity_threshold: 0.01
     new_max_screen_size: 20.0
-    max_new_gaussians: null
+    max_new_gaussians: null  # No birth quota imposed by the retirement policy.
     new_xyz_step_extent: 1.0e-05
     new_rotation_step: 0.001
     new_logscale_step: 0.001
@@ -177,7 +177,7 @@ module:
     enabled: true
     step: 0.01
     learning_rate: 0.01
-    prune_threshold: 0.01  # Legacy threshold strategy only; balanced replacement uses the final pool ranking.
+    prune_threshold: 0.01  # Natural old-GS deletion threshold; count is clamped to the birth-count band.
     proximal_regularization: true
     mode: alpha
     l1_weight: 0.05

@@ -1,2 +1,3 @@
 # Preserve original CSV evidence bytes, including standard CRLF record endings.
 docs/experiment/evidence/**/*.csv whitespace=cr-at-eol
+docs/experiment/assets/**/*.csv whitespace=cr-at-eol

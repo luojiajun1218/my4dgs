@@ -1,0 +1,123 @@
+{
+  "settings": {
+    "run_dir": "/tmp/my4dgs_frame009_amdd4mjt/output/restore_frame009/20261023T232410_e675b7",
+    "frames": [
+      9
+    ],
+    "result_json": "/tmp/my4dgs_frame009_amdd4mjt/frame009_birth_probe.json",
+    "validation_cameras": [
+      "cam04.png",
+      "cam08.png",
+      "cam12.png",
+      "cam16.png"
+    ],
+    "fit_steps": 120,
+    "evaluation_steps": [
+      80,
+      120
+    ],
+    "views_per_step": 4,
+    "candidates_per_view": 52,
+    "initial_sigma_pixels": 2.0,
+    "initial_alpha": 0.1,
+    "position_lr_extent": 1e-05,
+    "color_lr": 0.01,
+    "scale_lr": 0.005,
+    "alpha_lr": 0.05,
+    "lr_final_ratio": 0.2,
+    "retirement_tolerance": 0.1,
+    "minimum_relative_validation_gain": 0.001
+  },
+  "records": [
+    {
+      "frame": 9,
+      "new_count": 832,
+      "retired_count": 749,
+      "accepted_by_validation_loss": false,
+      "committed_new_count": 0,
+      "committed_retired_count": 0,
+      "baseline": {
+        "train": {
+          "psnr": 36.3921639919281,
+          "photo": 0.014032569015398622
+        },
+        "validation": {
+          "psnr": 36.65478038787842,
+          "photo": 0.01345360092818737
+        },
+        "test": {
+          "psnr": 33.7285041809082,
+          "photo": 0.01815635897219181
+        }
+      },
+      "initial": {
+        "train": {
+          "psnr": 36.391796827316284,
+          "photo": 0.014077255269512534
+        },
+        "validation": {
+          "psnr": 36.647586822509766,
+          "photo": 0.013509368989616632
+        },
+        "test": {
+          "psnr": 33.72181701660156,
+          "photo": 0.018204551190137863
+        }
+      },
+      "validation_camera_names": [
+        "cam04.png",
+        "cam08.png",
+        "cam12.png",
+        "cam16.png"
+      ],
+      "minimum_relative_validation_gain": 0.001,
+      "stages": {
+        "80": {
+          "train": {
+            "psnr": 36.42006587982178,
+            "photo": 0.014026281656697392
+          },
+          "validation": {
+            "psnr": 36.679593086242676,
+            "photo": 0.013454855419695377
+          },
+          "test": {
+            "psnr": 33.74412536621094,
+            "photo": 0.018155444413423538
+          }
+        },
+        "120": {
+          "train": {
+            "psnr": 36.42508578300476,
+            "photo": 0.014024106785655022
+          },
+          "validation": {
+            "psnr": 36.684752464294434,
+            "photo": 0.013453921768814325
+          },
+          "test": {
+            "psnr": 33.74897384643555,
+            "photo": 0.01815333403646946
+          }
+        }
+      },
+      "retirement_trial": {
+        "train": {
+          "psnr": 36.42508602142334,
+          "photo": 0.014024104399140924
+        },
+        "validation": {
+          "psnr": 36.682870864868164,
+          "photo": 0.013455587904900312
+        },
+        "test": {
+          "psnr": 33.74897384643555,
+          "photo": 0.01815333403646946
+        }
+      },
+      "wall_seconds": 15.01146669901209,
+      "committed_test_psnr": 33.7285041809082,
+      "scope": "Fixed saved motion. Candidate fitting and retirement trials only; all candidate rows retained during fitting. No sequential training, checkpoint resume or codec measurement."
+    }
+  ]
+}

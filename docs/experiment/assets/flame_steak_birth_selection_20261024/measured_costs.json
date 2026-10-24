@@ -1,0 +1,47 @@
+[
+  {
+    "frame": 1,
+    "encoded_bytes": 97644,
+    "index_bytes": 572,
+    "complete_update_bytes": 98216,
+    "training_seconds": 15.746369050059002,
+    "frame_wall_seconds": 20.914017495990265,
+    "scope": "120 birth/refit steps, saved motion reused"
+  },
+  {
+    "frame": 9,
+    "encoded_bytes": 31409,
+    "index_bytes": 572,
+    "complete_update_bytes": 31981,
+    "training_seconds": 14.863248353183735,
+    "frame_wall_seconds": 18.95911758299917,
+    "scope": "120 birth/refit steps, saved motion reused"
+  },
+  {
+    "frame": 29,
+    "encoded_bytes": 38112,
+    "index_bytes": 574,
+    "complete_update_bytes": 38686,
+    "training_seconds": 14.766769191337517,
+    "frame_wall_seconds": 19.029066649993183,
+    "scope": "120 birth/refit steps, saved motion reused"
+  },
+  {
+    "frame": 30,
+    "encoded_bytes": 37770,
+    "index_bytes": 574,
+    "complete_update_bytes": 38344,
+    "training_seconds": 28.822496684500948,
+    "frame_wall_seconds": 32.796057619998464,
+    "scope": "full 300 steps, contiguous after modified frame029"
+  },
+  {
+    "frame": 31,
+    "encoded_bytes": 38840,
+    "index_bytes": 574,
+    "complete_update_bytes": 39414,
+    "training_seconds": 27.590762232313864,
+    "frame_wall_seconds": 31.50407528501819,
+    "scope": "full 300 steps, contiguous after modified frame029"
+  }
+]

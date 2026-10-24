@@ -72,6 +72,8 @@ class TrainingSummaryTests(unittest.TestCase):
         self.assertEqual(storage['total_mb'], (complete_bytes + 9) / 1e6)
         self.assertEqual(storage['reference_amortized_kb_per_frame'], (complete_bytes + 9) / 3000)
         self.assertAlmostEqual(result['pure_render_fps'], 150 / .6)
+        self.assertEqual(result['fps_notice'], 'FPS仅供参考')
+        self.assertIn('FPS仅供参考', '\n'.join(format_run_summary(result)))
         self.assertEqual(result['model_training_seconds_mean'], 2.)
         self.assertEqual((result['initial_gaussians'], result['final_gaussians']), (10, 12))
 
@@ -119,6 +121,7 @@ class TrainingSummaryTests(unittest.TestCase):
                              clock=lambda: state['now'])
         self.assertEqual(result['render_seconds'], 6.)
         self.assertEqual(result['render_fps'], .5)
+        self.assertEqual(result['fps_notice'], 'FPS仅供参考')
 
     def test_render_sampling_preserves_rng(self):
         trainer = object.__new__(Trainer)

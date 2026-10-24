@@ -1,0 +1,20 @@
+# Short diagnostic prototype, NOT a main.py/full300 training config.
+# Loads independent saved step-180 models. Does not resume the sequence or
+# measure codec storage; test camera cam00 is evaluation only.
+run_dir: output/n3dv/flame_steak_1020/full300_130k_birthdriven10pct_180_80_40/20261022T142925_c8bbee
+frames: [1, 149, 299]
+result_json: /tmp/my4dgs_birth_revision/results.json
+validation_cameras: [cam04.png, cam08.png, cam12.png, cam16.png]
+fit_steps: 120
+evaluation_steps: [80, 120]
+views_per_step: 4
+candidates_per_view: 52
+initial_sigma_pixels: 2.0  # Approximate projected scale, not the rasterizer's bounding radius.
+initial_alpha: 0.1
+position_lr_extent: 1.0e-5
+color_lr: 0.01
+scale_lr: 0.005
+alpha_lr: 0.05
+lr_final_ratio: 0.2
+retirement_tolerance: 0.1
+minimum_relative_validation_gain: 0.001

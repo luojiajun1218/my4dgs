@@ -35,8 +35,12 @@ def frame_training_phase(module, step):
 
 
 def stage_image_steps(module):
-    return tuple(sorted({module.motion_steps, module.total_steps,
-                         getattr(module, 'birth_selection_end_step', module.total_steps)}))
+    steps = {module.motion_steps, module.total_steps,
+             getattr(module, 'birth_selection_end_step', module.total_steps)}
+    warmup_end = getattr(module, 'birth_warmup_end_step', module.motion_steps)
+    if warmup_end > module.motion_steps:
+        steps.add(warmup_end)
+    return tuple(sorted(steps))
 
 
 @dataclass
@@ -49,6 +53,7 @@ class TrainerConfig(BaseTrainerConfig):
     saving_ckpt_every_n_frames: int = 1000
     stage_image_camera: Optional[str] = None
     motion_views_per_step: int = 1
+    birth_views_per_step: int = 1
 
 
 class Trainer(BaseTrainer):
@@ -96,6 +101,9 @@ class Trainer(BaseTrainer):
                 not isinstance(self.config.motion_views_per_step, int) or
                 self.config.motion_views_per_step < 1):
             raise ValueError('motion_views_per_step must be a positive integer')
+        if (isinstance(self.config.birth_views_per_step, bool) or
+                not isinstance(self.config.birth_views_per_step, int) or self.config.birth_views_per_step < 1):
+            raise ValueError('birth_views_per_step must be a positive integer')
         self.module, module.trainer = module, self
         self.init_logger()
         self.datamodule.setup(self.output_dir)
@@ -130,7 +138,7 @@ class Trainer(BaseTrainer):
             if isinstance(saved_trainer, dict) and 'stage_image_camera' not in saved_trainer:
                 saved_trainer = {**saved_trainer, 'stage_image_camera': None}
             if isinstance(saved_trainer, dict):
-                saved_trainer = {'motion_views_per_step': 1, **saved_trainer}
+                saved_trainer = {'motion_views_per_step': 1, 'birth_views_per_step': 1, **saved_trainer}
             if extension_plan is None and (
                     ckpt.get('rigid_tree_data_config') != asdict(self.datamodule.config) or
                     saved_trainer != asdict(self.config)):
@@ -153,6 +161,14 @@ class Trainer(BaseTrainer):
                          self.module.motion_steps,
                          selection_end - self.module.motion_steps,
                          self.module.total_steps - selection_end)
+            if self.module.config.birth.warmup_steps:
+                logging.info('Birth schedule: %d warmup steps (alpha=%.3f, scale fixed), '
+                             '%d selection steps, %d fixed-pool refit steps; newborn opacity LR=%g',
+                             self.module.config.birth.warmup_steps,
+                             self.module.config.birth.initial_opacity,
+                             selection_end - self.module.birth_warmup_end_step,
+                             self.module.config.birth.refit_steps,
+                             self.module.config.gaussian_stage2.opacity_lr)
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():
@@ -280,7 +296,7 @@ class Trainer(BaseTrainer):
         if self.global_step:
             for step in range(1, self.global_step + 1):
                 for _ in range(self._views_per_step(step)):
-                    fetcher.next()
+                    Trainer._next_training_view(self, fetcher, step)
             # Rebuilding a DataLoader and replaying views can draw host RNG.
             # The optimizer and cloning resume from the saved post-step state.
             self._restore_rng(self._resume_rng)
@@ -288,7 +304,19 @@ class Trainer(BaseTrainer):
 
     def _views_per_step(self, step):
         return (self.config.motion_views_per_step
-                if step <= self.module.motion_steps else 1)
+                if step <= self.module.motion_steps else getattr(self.config, 'birth_views_per_step', 1))
+
+    def _next_training_view(self, fetcher, step):
+        birth = getattr(getattr(self.module, 'config', None), 'birth', None)
+        validation = (set(birth.validation_cameras) if step > self.module.motion_steps
+                      and getattr(birth, 'strategy', None) == 'multiview_residual'
+                      and not (getattr(birth, 'refit_all_training_views', False)
+                          and step > self.module.birth_selection_end_step) else set())
+        for _ in range(10000):
+            viewpoint = fetcher.next()
+            if not validation or Path(viewpoint.path).name not in validation:
+                return viewpoint
+        raise ValueError('Birth fitting stream contains no non-validation cameras')
 
     def _fit_views(self, fetcher, step, *, defer_metrics=False):
         """Average image objectives before one shared-motion optimizer update."""
@@ -300,7 +328,7 @@ class Trainer(BaseTrainer):
             # the last view with weight=count preserves the averaged objective
             # and avoids rebuilding the same graph once per camera.
             with timer.phase('data_loading') if timer else nullcontext():
-                viewpoint = fetcher.next()
+                viewpoint = Trainer._next_training_view(self, fetcher, step)
             loss, values, package = self.module.training_step(viewpoint, step,
                 regularization_weight=count if index == count - 1 else 0.)
             if loss.requires_grad:
@@ -311,7 +339,7 @@ class Trainer(BaseTrainer):
             if count > 1:
                 # Keep only evidence needed after backward, not full images.
                 package = {name: package[name] for name in
-                    ('visibility_filter', 'motion_contribution_filter', 'viewspace_points')
+                    ('visibility_filter', 'motion_contribution_filter', 'viewspace_points', 'radii')
                     if name in package}
             packages.append(package)
         metrics['gs'] = values['gs']
@@ -496,6 +524,9 @@ class Trainer(BaseTrainer):
             difference = rendered - viewpoint.image
             labels = {self.module.motion_steps: 'hard_spatial_motion_old_only',
                       self.module.total_steps: 'final_decoded_with_birth'}
+            warmup_end = getattr(self.module, 'birth_warmup_end_step', self.module.motion_steps)
+            if warmup_end > self.module.motion_steps:
+                labels[warmup_end] = 'after_birth_warmup_before_opacity_competition'
             selection_end = getattr(self.module, 'birth_selection_end_step', self.module.total_steps)
             if self.module.motion_steps < selection_end < self.module.total_steps:
                 labels[selection_end] = 'after_balanced_replacement_before_refit'

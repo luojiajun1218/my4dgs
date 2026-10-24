@@ -1,0 +1,548 @@
+[
+  {
+    "frame": 1,
+    "source_boundary": "output/n3dv/flame_steak_1020/130k_multiview_mse_180_80_40/20261024T002601_88a2fc/rigid-ckpt-1-180.pth",
+    "run_dir": "/tmp/my4dgs_birth_selection_1024_v2/output/frame001_selection/20261024T093019_6196ad",
+    "stages": [
+      {
+        "step": 180,
+        "phase": "hard_spatial_motion_old_only",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0001/cam00.png",
+        "mse": 0.0003861237782984972,
+        "psnr": 34.15119171142578,
+        "old_only": true,
+        "gaussian_count": 128963,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      },
+      {
+        "step": 260,
+        "phase": "after_balanced_replacement_before_refit",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0001/cam00.png",
+        "mse": 0.0003846613399218768,
+        "psnr": 34.167633056640625,
+        "old_only": false,
+        "gaussian_count": 128992,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      },
+      {
+        "step": 300,
+        "phase": "final_decoded_with_birth",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0001/cam00.png",
+        "mse": 0.00038457446498796344,
+        "psnr": 34.16862487792969,
+        "old_only": false,
+        "gaussian_count": 128992,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      }
+    ],
+    "new": 299,
+    "deleted": 270,
+    "encoded_bytes": 97644,
+    "evaluation": {
+      "test": {
+        "l1": 0.014784511178731918,
+        "psnr": 34.16862487792969,
+        "ssim": 0.9705891013145447,
+        "lpips": 0.11479975283145905
+      }
+    },
+    "admission": {
+      "contribution_rule": "two_frame_compositing_max",
+      "baseline": {
+        "psnr": 37.15866184234619,
+        "ssim": 0.972738191485405,
+        "mse": 0.00019946006796089932
+      },
+      "trial_retirements": [
+        848,
+        942,
+        1036,
+        270,
+        299,
+        328,
+        135,
+        150,
+        165,
+        68,
+        75,
+        82
+      ],
+      "trial_metrics": [
+        {
+          "psnr": 37.15639400482178,
+          "ssim": 0.9726857244968414,
+          "mse": 0.00019952539514633827
+        },
+        {
+          "psnr": 37.15639591217041,
+          "ssim": 0.9726857095956802,
+          "mse": 0.00019952533693867736
+        },
+        {
+          "psnr": 37.15639591217041,
+          "ssim": 0.9726857393980026,
+          "mse": 0.0001995253660425078
+        },
+        {
+          "psnr": 37.1800479888916,
+          "ssim": 0.9727541506290436,
+          "mse": 0.0001984988157346379
+        },
+        {
+          "psnr": 37.17861366271973,
+          "ssim": 0.9727540016174316,
+          "mse": 0.00019855465143336914
+        },
+        {
+          "psnr": 37.17861366271973,
+          "ssim": 0.9727540016174316,
+          "mse": 0.00019855465143336914
+        },
+        {
+          "psnr": 37.17860507965088,
+          "ssim": 0.9727538526058197,
+          "mse": 0.0001985681665246375
+        },
+        {
+          "psnr": 37.17860507965088,
+          "ssim": 0.9727538526058197,
+          "mse": 0.0001985681665246375
+        },
+        {
+          "psnr": 37.17860507965088,
+          "ssim": 0.9727538526058197,
+          "mse": 0.0001985681665246375
+        },
+        {
+          "psnr": 37.176286697387695,
+          "ssim": 0.9727528244256973,
+          "mse": 0.00019866663569700904
+        },
+        {
+          "psnr": 37.176286697387695,
+          "ssim": 0.9727528244256973,
+          "mse": 0.00019866663569700904
+        },
+        {
+          "psnr": 37.176286697387695,
+          "ssim": 0.9727528244256973,
+          "mse": 0.00019866663569700904
+        }
+      ],
+      "accepted": true,
+      "trial_birth_counts": [
+        942,
+        942,
+        942,
+        299,
+        299,
+        299,
+        150,
+        150,
+        150,
+        75,
+        75,
+        75
+      ],
+      "newborn_utility": {
+        "positive_count": 299,
+        "nonpositive_count": 643,
+        "pool_counts": [
+          942,
+          299,
+          150,
+          75
+        ],
+        "estimate": "half_alpha_image_derivative",
+        "ssim_weight": 0.01
+      },
+      "protected_count": 239,
+      "protected_recent_births": 0,
+      "min_gain_db": 0.005,
+      "max_ssim_drop": 0.0001,
+      "validation_cameras": [
+        "cam04.png",
+        "cam08.png",
+        "cam12.png",
+        "cam16.png"
+      ],
+      "selected_trial": 3
+    },
+    "decoded_fields_bit_exact": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    },
+    "scope": "Fixed saved motion followed by actual birth selection, refit and codec"
+  },
+  {
+    "frame": 9,
+    "source_boundary": "output/n3dv/flame_steak_1020/130k_multiview_mse_180_80_40/20261024T002601_88a2fc/rigid-ckpt-9-180.pth",
+    "run_dir": "/tmp/my4dgs_birth_selection_1024_v2/output/frame009_selection/20261024T093042_a654ab",
+    "stages": [
+      {
+        "step": 180,
+        "phase": "hard_spatial_motion_old_only",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0009/cam00.png",
+        "mse": 0.00044123345287516713,
+        "psnr": 33.58009338378906,
+        "old_only": true,
+        "gaussian_count": 128963,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      },
+      {
+        "step": 260,
+        "phase": "after_balanced_replacement_before_refit",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0009/cam00.png",
+        "mse": 0.0004333900287747383,
+        "psnr": 33.65528869628906,
+        "old_only": false,
+        "gaussian_count": 128975,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      },
+      {
+        "step": 300,
+        "phase": "final_decoded_with_birth",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0009/cam00.png",
+        "mse": 0.00043252448085695505,
+        "psnr": 33.66400909423828,
+        "old_only": false,
+        "gaussian_count": 128975,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      }
+    ],
+    "new": 120,
+    "deleted": 108,
+    "encoded_bytes": 31409,
+    "evaluation": {
+      "test": {
+        "l1": 0.015463144518435001,
+        "psnr": 33.66400909423828,
+        "ssim": 0.9695313572883606,
+        "lpips": 0.11891724169254303
+      }
+    },
+    "admission": {
+      "contribution_rule": "two_frame_compositing_max",
+      "baseline": {
+        "psnr": 36.64965343475342,
+        "ssim": 0.9717144668102264,
+        "mse": 0.00022971478756517172
+      },
+      "trial_retirements": [
+        858,
+        953,
+        1048,
+        216,
+        240,
+        264,
+        108,
+        120,
+        132,
+        54,
+        60,
+        66
+      ],
+      "trial_metrics": [
+        {
+          "psnr": 36.68506050109863,
+          "ssim": 0.9716725051403046,
+          "mse": 0.00022711179190082476
+        },
+        {
+          "psnr": 36.6850643157959,
+          "ssim": 0.9716725051403046,
+          "mse": 0.00022711173369316384
+        },
+        {
+          "psnr": 36.6850643157959,
+          "ssim": 0.9716725051403046,
+          "mse": 0.0002271117082273122
+        },
+        {
+          "psnr": 36.70679759979248,
+          "ssim": 0.9717290848493576,
+          "mse": 0.00022607176651945338
+        },
+        {
+          "psnr": 36.70679759979248,
+          "ssim": 0.9717290848493576,
+          "mse": 0.00022607176651945338
+        },
+        {
+          "psnr": 36.70679759979248,
+          "ssim": 0.9717290848493576,
+          "mse": 0.00022607176651945338
+        },
+        {
+          "psnr": 36.70820617675781,
+          "ssim": 0.9717289805412292,
+          "mse": 0.00022602081662626006
+        },
+        {
+          "psnr": 36.70820617675781,
+          "ssim": 0.9717289805412292,
+          "mse": 0.00022602081662626006
+        },
+        {
+          "psnr": 36.70820617675781,
+          "ssim": 0.9717289805412292,
+          "mse": 0.00022602081662626006
+        },
+        {
+          "psnr": 36.70702266693115,
+          "ssim": 0.971726581454277,
+          "mse": 0.0002260700275655836
+        },
+        {
+          "psnr": 36.70702266693115,
+          "ssim": 0.971726581454277,
+          "mse": 0.0002260700275655836
+        },
+        {
+          "psnr": 36.70702266693115,
+          "ssim": 0.971726581454277,
+          "mse": 0.0002260700275655836
+        }
+      ],
+      "accepted": true,
+      "trial_birth_counts": [
+        953,
+        953,
+        953,
+        240,
+        240,
+        240,
+        120,
+        120,
+        120,
+        60,
+        60,
+        60
+      ],
+      "newborn_utility": {
+        "positive_count": 240,
+        "nonpositive_count": 713,
+        "pool_counts": [
+          953,
+          240,
+          120,
+          60
+        ],
+        "estimate": "half_alpha_image_derivative",
+        "ssim_weight": 0.01
+      },
+      "protected_count": 1010,
+      "protected_recent_births": 964,
+      "min_gain_db": 0.005,
+      "max_ssim_drop": 0.0001,
+      "validation_cameras": [
+        "cam04.png",
+        "cam08.png",
+        "cam12.png",
+        "cam16.png"
+      ],
+      "selected_trial": 6
+    },
+    "decoded_fields_bit_exact": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    },
+    "scope": "Fixed saved motion followed by actual birth selection, refit and codec"
+  },
+  {
+    "frame": 29,
+    "source_boundary": "output/n3dv/flame_steak_1020/130k_multiview_mse_180_80_40/20261024T002601_88a2fc/rigid-ckpt-29-180.pth",
+    "run_dir": "/tmp/my4dgs_birth_selection_1024_v2/output/frame029_selection/20261024T093103_6543aa",
+    "stages": [
+      {
+        "step": 180,
+        "phase": "hard_spatial_motion_old_only",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0029/cam00.png",
+        "mse": 0.00040530861588194966,
+        "psnr": 33.935638427734375,
+        "old_only": true,
+        "gaussian_count": 128774,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      },
+      {
+        "step": 260,
+        "phase": "after_balanced_replacement_before_refit",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0029/cam00.png",
+        "mse": 0.0004048676637466997,
+        "psnr": 33.940364837646484,
+        "old_only": false,
+        "gaussian_count": 128747,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      },
+      {
+        "step": 300,
+        "phase": "final_decoded_with_birth",
+        "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0029/cam00.png",
+        "mse": 0.0004048410046380013,
+        "psnr": 33.94062805175781,
+        "old_only": false,
+        "gaussian_count": 128747,
+        "shared_prestructure_active": false,
+        "participates_in_training_or_selection": false
+      }
+    ],
+    "new": 271,
+    "deleted": 298,
+    "encoded_bytes": 38112,
+    "evaluation": {
+      "test": {
+        "l1": 0.015029653906822205,
+        "psnr": 33.94062805175781,
+        "ssim": 0.9691405296325684,
+        "lpips": 0.11800208687782288
+      }
+    },
+    "admission": {
+      "contribution_rule": "two_frame_compositing_max",
+      "baseline": {
+        "psnr": 36.65821361541748,
+        "ssim": 0.9714018851518631,
+        "mse": 0.0002325683417438995
+      },
+      "trial_retirements": [
+        849,
+        943,
+        1037,
+        244,
+        271,
+        298,
+        123,
+        136,
+        149,
+        62,
+        68,
+        74
+      ],
+      "trial_metrics": [
+        {
+          "psnr": 36.65156269073486,
+          "ssim": 0.971367821097374,
+          "mse": 0.0002327257243450731
+        },
+        {
+          "psnr": 36.65156269073486,
+          "ssim": 0.971367821097374,
+          "mse": 0.00023272565886145458
+        },
+        {
+          "psnr": 36.65156364440918,
+          "ssim": 0.9713678359985352,
+          "mse": 0.00023272538237506524
+        },
+        {
+          "psnr": 36.67130947113037,
+          "ssim": 0.9714304655790329,
+          "mse": 0.00023195337780634873
+        },
+        {
+          "psnr": 36.67131042480469,
+          "ssim": 0.9714304655790329,
+          "mse": 0.0002319532068213448
+        },
+        {
+          "psnr": 36.671311378479004,
+          "ssim": 0.9714304655790329,
+          "mse": 0.00023195319226942956
+        },
+        {
+          "psnr": 36.67051124572754,
+          "ssim": 0.971429780125618,
+          "mse": 0.0002319916347914841
+        },
+        {
+          "psnr": 36.67051124572754,
+          "ssim": 0.971429780125618,
+          "mse": 0.0002319916347914841
+        },
+        {
+          "psnr": 36.67051124572754,
+          "ssim": 0.971429780125618,
+          "mse": 0.0002319916347914841
+        },
+        {
+          "psnr": 36.66858386993408,
+          "ssim": 0.9714282900094986,
+          "mse": 0.00023209856590256095
+        },
+        {
+          "psnr": 36.66858386993408,
+          "ssim": 0.9714282900094986,
+          "mse": 0.00023209856590256095
+        },
+        {
+          "psnr": 36.66858386993408,
+          "ssim": 0.9714282900094986,
+          "mse": 0.00023209856590256095
+        }
+      ],
+      "accepted": true,
+      "trial_birth_counts": [
+        943,
+        943,
+        943,
+        271,
+        271,
+        271,
+        136,
+        136,
+        136,
+        68,
+        68,
+        68
+      ],
+      "newborn_utility": {
+        "positive_count": 271,
+        "nonpositive_count": 672,
+        "pool_counts": [
+          943,
+          271,
+          136,
+          68
+        ],
+        "estimate": "half_alpha_image_derivative",
+        "ssim_weight": 0.01
+      },
+      "protected_count": 243,
+      "protected_recent_births": 0,
+      "min_gain_db": 0.005,
+      "max_ssim_drop": 0.0001,
+      "validation_cameras": [
+        "cam04.png",
+        "cam08.png",
+        "cam12.png",
+        "cam16.png"
+      ],
+      "selected_trial": 5
+    },
+    "decoded_fields_bit_exact": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    },
+    "scope": "Fixed saved motion followed by actual birth selection, refit and codec"
+  }
+]

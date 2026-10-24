@@ -242,6 +242,65 @@ class MotionViewUpdates(unittest.TestCase):
         old = self.trainer(views=1)
         self.assertEqual(sum(old._views_per_step(s) for s in range(1,201)), 200)
 
+    def test_multiview_birth_validation_cameras_are_excluded_and_resume_replays_them(self):
+        trainer = self.trainer(views=2)
+        trainer.config.birth_views_per_step = 4
+        trainer.module.config.birth = SimpleNamespace(
+            strategy='multiview_residual', validation_cameras=['cam04.png', 'cam08.png'])
+        names = ['cam04.png', 'cam01.png', 'cam08.png', 'cam02.png', 'cam03.png']
+
+        def fetcher():
+            import itertools
+            stream = itertools.cycle(SimpleNamespace(path=Path(name)) for name in names)
+            return SimpleNamespace(next=Mock(side_effect=stream))
+
+        original = fetcher()
+        for step in range(1, 104):
+            for _ in range(trainer._views_per_step(step)):
+                view = TRAINER.Trainer._next_training_view(trainer, original, step)
+                if step > trainer.module.motion_steps:
+                    self.assertNotIn(view.path.name, trainer.module.config.birth.validation_cameras)
+        trainer.global_step = 103
+        trainer._resume_rng = {'saved': True}
+        trainer._restore_rng = Mock()
+        resumed = fetcher()
+        TRAINER.Trainer._resume_fetcher(trainer, resumed)
+        self.assertEqual(original.next.call_count, resumed.next.call_count)
+        trainer._restore_rng.assert_called_once_with({'saved': True})
+        for step in range(104, 109):
+            for _ in range(trainer._views_per_step(step)):
+                left = TRAINER.Trainer._next_training_view(trainer, original, step)
+                right = TRAINER.Trainer._next_training_view(trainer, resumed, step)
+                self.assertEqual(left.path.name, right.path.name)
+
+        # Motion fitting still uses all training cameras.
+        self.assertEqual(TRAINER.Trainer._next_training_view(trainer, fetcher(), 100).path.name,
+                         'cam04.png')
+
+    def test_selected_birth_refit_can_use_all_training_views_and_resume_exactly(self):
+        import itertools
+        trainer = self.trainer(views=2)
+        trainer.module.birth_selection_end_step = 160
+        trainer.module.config.birth = SimpleNamespace(strategy='multiview_residual',
+            validation_cameras=['cam04.png'], refit_all_training_views=True)
+        trainer.config.birth_views_per_step = 4
+        def stream():
+            names = itertools.cycle(['cam04.png', 'cam01.png', 'cam02.png'])
+            return SimpleNamespace(next=lambda: SimpleNamespace(path=Path(next(names))))
+        self.assertEqual(TRAINER.Trainer._next_training_view(trainer, stream(), 160).path.name, 'cam01.png')
+        self.assertEqual(TRAINER.Trainer._next_training_view(trainer, stream(), 161).path.name, 'cam04.png')
+        first, resumed = stream(), stream()
+        for step in range(1, 172):
+            for _ in range(trainer._views_per_step(step)):
+                TRAINER.Trainer._next_training_view(trainer, first, step)
+        trainer.global_step, trainer._resume_rng = 171, None
+        trainer._restore_rng = Mock()
+        TRAINER.Trainer._resume_fetcher(trainer, resumed)
+        for _ in range(16):
+            left = TRAINER.Trainer._next_training_view(trainer, first, 172)
+            right = TRAINER.Trainer._next_training_view(trainer, resumed, 172)
+            self.assertEqual(left.path.name, right.path.name)
+
     def test_all_camera_evidence_and_unscaled_birth_scores_reach_one_update(self):
         captured = []
         model = SimpleNamespace(add_densification_stats=lambda point, mask:

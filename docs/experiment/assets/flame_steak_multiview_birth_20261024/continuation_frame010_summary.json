@@ -1,0 +1,7309 @@
+{
+  "frame": 10,
+  "initial_reference": {
+    "source": "native_frame0_checkpoint",
+    "threshold": 0.0075,
+    "original_count": 132586,
+    "retained_count": 128963,
+    "removed_count": 3623
+  },
+  "schedule": {
+    "motion_steps": 180,
+    "birth_warmup_steps": 0,
+    "birth_selection_steps": 80,
+    "refit_steps": 40,
+    "birth_selection_end_step": 260
+  },
+  "region_count": 209,
+  "candidate_region_count": 4681,
+  "initialization": {
+    "spatial": true,
+    "initial_regions": 8,
+    "gate_start_step": 0,
+    "gate_freeze_step": 70,
+    "optimization_steps": 300
+  },
+  "old_count": 128901,
+  "birth_count": 0,
+  "previous_count": 128901,
+  "retired_count": 0,
+  "total_count": 128901,
+  "motion": {
+    "path": "/tmp/my4dgs_multiview_resume_gxex99fm/output/resume009_continue010/20261024T001112_67f727/frame_storage/rigid_tree/motion_010.bin",
+    "bytes": 23682,
+    "payload_bytes": 23682,
+    "format": "SVX1-planar-varint-lzma",
+    "stored_bytes": 23682,
+    "raw_stream_bytes": 85708,
+    "compression_savings_bytes": 62026,
+    "frame_index": 10,
+    "gs_count": 128901,
+    "region_count": 4681,
+    "active_region_count": 209,
+    "region_translation_step_world": 0.00038961812970228493,
+    "region_rotation_step_rad": 0.0010000000474974513,
+    "gs_translation_step_world": 0.00038961812970228493,
+    "gs_rotation_step_rad": 0.0010000000474974513,
+    "semantics": "spatial gates; parent-relative region corrections; no rotation of GS centers"
+  },
+  "birth": null,
+  "opacity_update": {
+    "path": "/tmp/my4dgs_multiview_resume_gxex99fm/output/resume009_continue010/20261024T001112_67f727/frame_storage/rigid_tree/opacity_010.bin",
+    "archive_bytes": 3076,
+    "rows": 2482,
+    "step": 0.009999999776482582,
+    "mode": "alpha",
+    "timing": "before_births",
+    "format": "OVX1",
+    "raw_body_bytes": 7690
+  },
+  "motion_observation_diagnostics": {
+    "kind": "actual_compositing",
+    "frustum_samples": 32197479,
+    "used_samples": 31341936,
+    "old_gs_with_no_motion_observation": 46,
+    "scope": "surviving GS; current motion optimization views; excludes birth and heldout renders"
+  },
+  "stage_image_metrics": [
+    {
+      "step": 180,
+      "phase": "hard_spatial_motion_old_only",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0010/cam00.png",
+      "mse": 0.0003695255727507174,
+      "psnr": 34.33668518066406,
+      "old_only": true,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 260,
+      "phase": "after_balanced_replacement_before_refit",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0010/cam00.png",
+      "mse": 0.0003695255727507174,
+      "psnr": 34.33668518066406,
+      "old_only": false,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 300,
+      "phase": "final_decoded_with_birth",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0010/cam00.png",
+      "mse": 0.0003695255727507174,
+      "psnr": 34.33668518066406,
+      "old_only": false,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    }
+  ],
+  "encoded_bytes": 26758,
+  "shared_reference_bytes": 11100041,
+  "materialized_sha256": "a543350ea5423c01a5a1553bd46e710f2ca0192964eda52c82aae3c5448de585",
+  "decoder_reference": "frame_storage/rigid_tree/reference_frame8.npz",
+  "frame_manifest": "frame_storage/rigid_tree/frame_010.json",
+  "motion_activity": {
+    "moving_regions": 236,
+    "old_gs_with_local_residual": 10454,
+    "old_gs": 128901,
+    "topology_edits": 276,
+    "old_gs_with_changed_pose": 84791,
+    "changed_pose_translation_threshold_world": 0.00019480906485114247,
+    "changed_pose_rotation_threshold_rad": 0.0005000000237487257
+  },
+  "motion_rate_diagnostics": {
+    "rate_loss": 6.323819980025291e-05,
+    "relative_motion_loss": 2.4502254746039398e-05,
+    "rate_bytes_surrogate": 105397.0,
+    "rate_fraction": 2.1079399585723877,
+    "relative_motion": 4.9004509492078796e-05,
+    "candidate_motion_loss": 0.0,
+    "gs_active_rows": 10454.0,
+    "gs_translation_active_blocks": 10454.0,
+    "gs_rotation_active_blocks": 0.0,
+    "region_active_nodes": 236.0,
+    "spatial_active_regions": 209.0,
+    "spatial_open_gates": 81.0,
+    "spatial_gate_mean_probability": 0.13917526602745056,
+    "rate_bytes_hard": 85708.0,
+    "rate_normalization_gs_count": 128901.0,
+    "rate_normalization_bytes": 50000.0,
+    "rate_byte_price": 5.999999941330714e-10
+  },
+  "opacity_rate_diagnostics": {
+    "loss": 2.8492999263107777e-05,
+    "l1_loss": 2.398939977865666e-05,
+    "raw_bytes_surrogate": 7506.0,
+    "active_rows": 2482.0
+  },
+  "flat_region_diagnostics": {
+    "method": "learned_spatial_gate",
+    "frame": 10,
+    "training_schedule": "joint",
+    "temporal_initialization": "previous_full_increment",
+    "initial_gates": "previous_frame",
+    "learning_trace": [
+      {
+        "step": 1,
+        "hard_frozen": false,
+        "gate_temperature": 3.0,
+        "image_relaxation": "stochastic_ste",
+        "shared_field_active": true,
+        "active_regions": 293,
+        "active_regions_by_depth": {
+          "1": 3,
+          "2": 29,
+          "3": 62,
+          "4": 199
+        },
+        "gate_gradient_norm": 0.0,
+        "coding_initialized": true,
+        "top_gate_probabilities": [
+          0.5411593317985535,
+          0.4986957907676697,
+          0.5737856030464172,
+          0.47624391317367554,
+          0.5325718522071838,
+          0.499112993478775,
+          0.5437806248664856,
+          0.5013366341590881
+        ],
+        "layers": [
+          {
+            "depth": 1,
+            "candidates": 8,
+            "active_regions": 3,
+            "nonzero_motion": 8,
+            "mean_selection_probability": 0.479164183139801,
+            "translation_gradient_rms": 0.028560588136315346
+          },
+          {
+            "depth": 2,
+            "candidates": 64,
+            "active_regions": 29,
+            "nonzero_motion": 60,
+            "mean_selection_probability": 0.27527105808258057,
+            "translation_gradient_rms": 0.0020166507456451654
+          },
+          {
+            "depth": 3,
+            "candidates": 511,
+            "active_regions": 62,
+            "nonzero_motion": 507,
+            "mean_selection_probability": 0.13511820137500763,
+            "translation_gradient_rms": 0.00017425390251446515
+          },
+          {
+            "depth": 4,
+            "candidates": 3953,
+            "active_regions": 199,
+            "nonzero_motion": 3822,
+            "mean_selection_probability": 0.11080368608236313,
+            "translation_gradient_rms": 2.070276423182804e-05
+          }
+        ],
+        "private_allowed_gs": 128901
+      },
+      {
+        "step": 35,
+        "hard_frozen": false,
+        "gate_temperature": 0.9646452530933116,
+        "image_relaxation": "stochastic_ste",
+        "shared_field_active": true,
+        "active_regions": 266,
+        "active_regions_by_depth": {
+          "1": 3,
+          "2": 30,
+          "3": 57,
+          "4": 176
+        },
+        "gate_gradient_norm": 4.120595986023545e-05,
+        "coding_initialized": true,
+        "top_gate_probabilities": [
+          0.4178990423679352,
+          0.5951979756355286,
+          0.7098371386528015,
+          0.2620719075202942,
+          0.5277501940727234,
+          0.5470612049102783,
+          0.7566152215003967,
+          0.32509613037109375
+        ],
+        "layers": [
+          {
+            "depth": 1,
+            "candidates": 8,
+            "active_regions": 3,
+            "nonzero_motion": 8,
+            "mean_selection_probability": 0.48230889439582825,
+            "translation_gradient_rms": 0.0064917998388409615
+          },
+          {
+            "depth": 2,
+            "candidates": 64,
+            "active_regions": 30,
+            "nonzero_motion": 64,
+            "mean_selection_probability": 0.32464325428009033,
+            "translation_gradient_rms": 0.0016905043739825487
+          },
+          {
+            "depth": 3,
+            "candidates": 511,
+            "active_regions": 57,
+            "nonzero_motion": 508,
+            "mean_selection_probability": 0.13197554647922516,
+            "translation_gradient_rms": 0.00021986958745401353
+          },
+          {
+            "depth": 4,
+            "candidates": 3953,
+            "active_regions": 176,
+            "nonzero_motion": 3822,
+            "mean_selection_probability": 0.06163114681839943,
+            "translation_gradient_rms": 2.250978104711976e-05
+          }
+        ],
+        "private_allowed_gs": 128901
+      },
+      {
+        "step": 70,
+        "hard_frozen": true,
+        "gate_temperature": 0.3,
+        "image_relaxation": "stochastic_ste",
+        "shared_field_active": false,
+        "active_regions": 209,
+        "active_regions_by_depth": {
+          "1": 4,
+          "2": 24,
+          "3": 46,
+          "4": 135
+        },
+        "gate_gradient_norm": 2.627776120789349e-05,
+        "coding_initialized": true,
+        "top_gate_probabilities": [
+          0.5376384854316711,
+          0.6833718419075012,
+          0.9157568216323853,
+          0.15443119406700134,
+          0.3643917441368103,
+          0.37151262164115906,
+          0.8690013289451599,
+          0.15721744298934937
+        ],
+        "layers": [
+          {
+            "depth": 1,
+            "candidates": 8,
+            "active_regions": 4,
+            "nonzero_motion": 8,
+            "mean_selection_probability": 0.5,
+            "translation_gradient_rms": 0.011658648028969765
+          },
+          {
+            "depth": 2,
+            "candidates": 64,
+            "active_regions": 24,
+            "nonzero_motion": 64,
+            "mean_selection_probability": 0.375,
+            "translation_gradient_rms": 0.0026375825982540846
+          },
+          {
+            "depth": 3,
+            "candidates": 511,
+            "active_regions": 46,
+            "nonzero_motion": 505,
+            "mean_selection_probability": 0.09001956880092621,
+            "translation_gradient_rms": 0.00026962600531987846
+          },
+          {
+            "depth": 4,
+            "candidates": 3953,
+            "active_regions": 135,
+            "nonzero_motion": 3836,
+            "mean_selection_probability": 0.03415127471089363,
+            "translation_gradient_rms": 4.251524296705611e-05
+          }
+        ],
+        "private_allowed_gs": 128901
+      },
+      {
+        "step": 180,
+        "hard_frozen": true,
+        "gate_temperature": 0.3,
+        "image_relaxation": "stochastic_ste",
+        "shared_field_active": false,
+        "active_regions": 209,
+        "active_regions_by_depth": {
+          "1": 4,
+          "2": 24,
+          "3": 46,
+          "4": 135
+        },
+        "gate_gradient_norm": 0.0,
+        "coding_initialized": true,
+        "top_gate_probabilities": [
+          0.5376384854316711,
+          0.6833718419075012,
+          0.9157568216323853,
+          0.15443119406700134,
+          0.3643917441368103,
+          0.37151262164115906,
+          0.8690013289451599,
+          0.15721744298934937
+        ],
+        "layers": [
+          {
+            "depth": 1,
+            "candidates": 8,
+            "active_regions": 4,
+            "nonzero_motion": 6,
+            "mean_selection_probability": 0.5,
+            "translation_gradient_rms": 0.008916518650949001
+          },
+          {
+            "depth": 2,
+            "candidates": 64,
+            "active_regions": 24,
+            "nonzero_motion": 63,
+            "mean_selection_probability": 0.375,
+            "translation_gradient_rms": 0.0010860479669645429
+          },
+          {
+            "depth": 3,
+            "candidates": 511,
+            "active_regions": 46,
+            "nonzero_motion": 505,
+            "mean_selection_probability": 0.09001956880092621,
+            "translation_gradient_rms": 0.00011260777682764456
+          },
+          {
+            "depth": 4,
+            "candidates": 3953,
+            "active_regions": 135,
+            "nonzero_motion": 3836,
+            "mean_selection_probability": 0.03415127471089363,
+            "translation_gradient_rms": 2.4538956495234743e-05
+          }
+        ],
+        "private_allowed_gs": 128901
+      }
+    ],
+    "semantics": "parent-relative region corrections; orientation-only rotations; GS residuals",
+    "spatial_assignment": "previous_decoded_position_v1",
+    "spatial_initialization": "robust_median",
+    "spatial_initialization_distance_quantile": 0.999,
+    "spatial_outlier_assignment": "nearest_region",
+    "region_representative": "previous region field; joint region and GS fit",
+    "region_motion_learning": true,
+    "joint_image_gradients": true,
+    "image_relaxation": "stochastic_ste",
+    "hierarchical_private": false,
+    "proposal_image_weight": 0.0,
+    "private_full_motion": false,
+    "private_full_motion_configured": false,
+    "reparameterize_after_gate_freeze": false,
+    "predictor_objective": "residual_l1",
+    "shared_image_recode": true,
+    "rotation_updates": false,
+    "rate_model": "raw_blocks",
+    "region_motion": "relative",
+    "stored_region_nodes": 239,
+    "candidate_nodes": 4681,
+    "active_regions": 209,
+    "open_gates": 81,
+    "eligible_gates": 582,
+    "gate_start_step": 0,
+    "gate_learning_start_step": 20,
+    "relative_motion_units": "extent/radians; expected full-motion candidate residual",
+    "gate_freeze_step": 70,
+    "active_regions_by_depth": {
+      "1": 4,
+      "2": 24,
+      "3": 46,
+      "4": 135
+    },
+    "tree_health": {
+      "scope": "surviving GS before this frame birth; counts do not measure image correctness",
+      "point_weighted_depth": 1.5018580150658256,
+      "points_on_deepest_frontier": 4841,
+      "residual_points_on_deepest_frontier": 1703,
+      "largest_candidate_leaf": {
+        "node": 2198,
+        "count": 466,
+        "local_residual_count": 1
+      }
+    },
+    "regions": [
+      {
+        "node": 4,
+        "depth": 1,
+        "count": 24026,
+        "observed_count": 24023,
+        "local_residual_count": 1083,
+        "local_residual_fraction": 0.045076169073581696,
+        "translation": [
+          -0.00010575956548564136,
+          0.00018903601448982954,
+          0.00014059040404390544
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 5,
+        "depth": 1,
+        "count": 26065,
+        "observed_count": 26054,
+        "local_residual_count": 2739,
+        "local_residual_fraction": 0.10508344322443008,
+        "translation": [
+          -0.0012920921435579658,
+          0.00010537773050600663,
+          -3.467520582489669e-05
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 6,
+        "depth": 1,
+        "count": 18330,
+        "observed_count": 18326,
+        "local_residual_count": 1484,
+        "local_residual_fraction": 0.08096017688512802,
+        "translation": [
+          0.00014605872274842113,
+          -0.00014577721594832838,
+          -0.00010448995453771204
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 8,
+        "depth": 1,
+        "count": 11543,
+        "observed_count": 11538,
+        "local_residual_count": 843,
+        "local_residual_fraction": 0.07303127646446228,
+        "translation": [
+          4.298142084735446e-05,
+          -0.00024482887238264084,
+          -1.731529482640326e-05
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 9,
+        "depth": 2,
+        "count": 1398,
+        "observed_count": 1398,
+        "local_residual_count": 31,
+        "local_residual_fraction": 0.0221745353192091,
+        "translation": [
+          -0.00252214795909822,
+          -0.0017408475978299975,
+          0.001303805853240192
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 11,
+        "depth": 2,
+        "count": 379,
+        "observed_count": 379,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.036939315497875214,
+        "translation": [
+          -0.000671034213155508,
+          -0.0017755402950569987,
+          0.001142367022112012
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 12,
+        "depth": 2,
+        "count": 2121,
+        "observed_count": 2121,
+        "local_residual_count": 20,
+        "local_residual_fraction": 0.009429514408111572,
+        "translation": [
+          -5.875874194316566e-05,
+          -0.0007857353775762022,
+          0.00041307404171675444
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 13,
+        "depth": 2,
+        "count": 1990,
+        "observed_count": 1987,
+        "local_residual_count": 32,
+        "local_residual_fraction": 0.016080401837825775,
+        "translation": [
+          0.0012221424840390682,
+          -0.0010084916139021516,
+          -0.00026956122019328177
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 15,
+        "depth": 2,
+        "count": 776,
+        "observed_count": 776,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.011597937904298306,
+        "translation": [
+          0.000404350837925449,
+          -0.0006771465414203703,
+          0.0009531997493468225
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 16,
+        "depth": 2,
+        "count": 1320,
+        "observed_count": 1320,
+        "local_residual_count": 48,
+        "local_residual_fraction": 0.036363635212183,
+        "translation": [
+          0.0006927208742126822,
+          -0.0009029406355693936,
+          0.0005049042520113289
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 17,
+        "depth": 2,
+        "count": 107,
+        "observed_count": 107,
+        "local_residual_count": 19,
+        "local_residual_fraction": 0.17757008969783783,
+        "translation": [
+          0.0023546626325696707,
+          -0.0007387015502899885,
+          -0.0014522564597427845
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 18,
+        "depth": 2,
+        "count": 2085,
+        "observed_count": 2085,
+        "local_residual_count": 51,
+        "local_residual_fraction": 0.024460431188344955,
+        "translation": [
+          0.0009564092033542693,
+          0.0004949834547005594,
+          -0.004396568518131971
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 20,
+        "depth": 2,
+        "count": 2296,
+        "observed_count": 2296,
+        "local_residual_count": 67,
+        "local_residual_fraction": 0.029181184247136116,
+        "translation": [
+          0.0012943035690113902,
+          0.0005793326417915523,
+          0.007282219361513853
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 21,
+        "depth": 2,
+        "count": 2513,
+        "observed_count": 2513,
+        "local_residual_count": 100,
+        "local_residual_fraction": 0.03979307785630226,
+        "translation": [
+          0.00022845958301331848,
+          0.0005874806665815413,
+          0.0021422940772026777
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 22,
+        "depth": 2,
+        "count": 458,
+        "observed_count": 458,
+        "local_residual_count": 17,
+        "local_residual_fraction": 0.03711790218949318,
+        "translation": [
+          0.00016727714682929218,
+          9.888347267406061e-05,
+          0.007729107514023781
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 23,
+        "depth": 2,
+        "count": 1974,
+        "observed_count": 1973,
+        "local_residual_count": 100,
+        "local_residual_fraction": 0.050658561289310455,
+        "translation": [
+          -0.0007524761604145169,
+          0.0002722744538914412,
+          0.008339816704392433
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 24,
+        "depth": 2,
+        "count": 297,
+        "observed_count": 297,
+        "local_residual_count": 16,
+        "local_residual_fraction": 0.05387205258011818,
+        "translation": [
+          -0.0014710448449477553,
+          0.00023469819279853255,
+          0.0019136355258524418
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 25,
+        "depth": 2,
+        "count": 3765,
+        "observed_count": 3764,
+        "local_residual_count": 87,
+        "local_residual_fraction": 0.02310756966471672,
+        "translation": [
+          -0.0014035413041710854,
+          0.0018682412337511778,
+          0.0022736103273928165
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 26,
+        "depth": 2,
+        "count": 682,
+        "observed_count": 682,
+        "local_residual_count": 91,
+        "local_residual_fraction": 0.1334310919046402,
+        "translation": [
+          -0.0012998600723221898,
+          0.001469588140025735,
+          0.002517022890970111
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 27,
+        "depth": 2,
+        "count": 2251,
+        "observed_count": 2251,
+        "local_residual_count": 92,
+        "local_residual_fraction": 0.04087072238326073,
+        "translation": [
+          -0.001395445317029953,
+          0.0012216209433972836,
+          0.0019440000178292394
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 28,
+        "depth": 2,
+        "count": 4006,
+        "observed_count": 4005,
+        "local_residual_count": 346,
+        "local_residual_fraction": 0.08637044578790665,
+        "translation": [
+          -0.0013284028973430395,
+          0.0014146823668852448,
+          0.002186376601457596
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 31,
+        "depth": 2,
+        "count": 2346,
+        "observed_count": 2346,
+        "local_residual_count": 170,
+        "local_residual_fraction": 0.07246376574039459,
+        "translation": [
+          -0.0017005611443892121,
+          0.0020642601884901524,
+          0.0028806570917367935
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 32,
+        "depth": 2,
+        "count": 2145,
+        "observed_count": 2145,
+        "local_residual_count": 267,
+        "local_residual_fraction": 0.12447552382946014,
+        "translation": [
+          -0.001651728875003755,
+          0.0015174677828326821,
+          0.0025334269739687443
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 57,
+        "depth": 2,
+        "count": 697,
+        "observed_count": 697,
+        "local_residual_count": 62,
+        "local_residual_fraction": 0.08895265311002731,
+        "translation": [
+          0.0098583297803998,
+          8.276577136712149e-05,
+          -0.0025702842976897955
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 59,
+        "depth": 2,
+        "count": 1611,
+        "observed_count": 1610,
+        "local_residual_count": 103,
+        "local_residual_fraction": 0.06393544375896454,
+        "translation": [
+          0.007384880445897579,
+          2.2933769287192263e-05,
+          0.0005952540668658912
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 61,
+        "depth": 2,
+        "count": 1108,
+        "observed_count": 1107,
+        "local_residual_count": 69,
+        "local_residual_fraction": 0.06227436661720276,
+        "translation": [
+          0.008568749763071537,
+          -0.0002946570748463273,
+          -0.0022670484613627195
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 63,
+        "depth": 2,
+        "count": 467,
+        "observed_count": 467,
+        "local_residual_count": 32,
+        "local_residual_fraction": 0.06852248311042786,
+        "translation": [
+          0.00956574734300375,
+          -6.137617674539797e-06,
+          0.0009945721831172705
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 64,
+        "depth": 2,
+        "count": 1233,
+        "observed_count": 1233,
+        "local_residual_count": 185,
+        "local_residual_fraction": 0.15004055202007294,
+        "translation": [
+          -0.0003038433496840298,
+          -0.0003480127779766917,
+          -0.0011768925469368696
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 81,
+        "depth": 3,
+        "count": 24,
+        "observed_count": 24,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.000671910704113543,
+          0.001815822091884911,
+          0.00715642562136054
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 83,
+        "depth": 3,
+        "count": 90,
+        "observed_count": 90,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.0029867033008486032,
+          0.0009477307321503758,
+          0.0071181138046085835
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 84,
+        "depth": 3,
+        "count": 15,
+        "observed_count": 15,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.06666667014360428,
+        "translation": [
+          -0.007112381048500538,
+          -0.002762644551694393,
+          0.013160301372408867
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 85,
+        "depth": 3,
+        "count": 7,
+        "observed_count": 7,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.0019348866771906614,
+          -0.0002539218112360686,
+          0.008760434575378895
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 86,
+        "depth": 3,
+        "count": 70,
+        "observed_count": 68,
+        "local_residual_count": 39,
+        "local_residual_fraction": 0.5571428537368774,
+        "translation": [
+          -0.003382962429895997,
+          0.0021468333434313536,
+          0.0037648938596248627
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 87,
+        "depth": 3,
+        "count": 233,
+        "observed_count": 233,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.00475630909204483,
+          -0.0009340110118500888,
+          0.006793868727982044
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 113,
+        "depth": 3,
+        "count": 101,
+        "observed_count": 101,
+        "local_residual_count": 18,
+        "local_residual_fraction": 0.1782178282737732,
+        "translation": [
+          0.008747179992496967,
+          0.0004421395424287766,
+          -0.004245261661708355
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 114,
+        "depth": 3,
+        "count": 13,
+        "observed_count": 12,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.23076923191547394,
+        "translation": [
+          0.019834419712424278,
+          0.014312268234789371,
+          -0.017844973132014275
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 115,
+        "depth": 3,
+        "count": 25,
+        "observed_count": 25,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.03999999910593033,
+        "translation": [
+          -0.0005093643558211625,
+          -0.0004379526653792709,
+          0.0031663563568145037
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 116,
+        "depth": 3,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.1764705926179886,
+        "translation": [
+          0.00299982656724751,
+          -0.0011979787377640605,
+          -0.00035683874739333987
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 117,
+        "depth": 3,
+        "count": 10,
+        "observed_count": 10,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.20000000298023224,
+        "translation": [
+          -0.0014606150798499584,
+          -0.0004247025935910642,
+          0.004283843096345663
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 118,
+        "depth": 3,
+        "count": 34,
+        "observed_count": 34,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.11764705926179886,
+        "translation": [
+          0.00311363791115582,
+          -0.0008636960992589593,
+          -0.0015647303080186248
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 119,
+        "depth": 3,
+        "count": 31,
+        "observed_count": 31,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.06451612710952759,
+        "translation": [
+          0.0015497588319703937,
+          -0.0024065820034593344,
+          -0.004680434707552195
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 154,
+        "depth": 3,
+        "count": 89,
+        "observed_count": 89,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.10112359374761581,
+        "translation": [
+          0.0038349414244294167,
+          -0.0019068391993641853,
+          0.007803726475685835
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 155,
+        "depth": 3,
+        "count": 77,
+        "observed_count": 77,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.03896103799343109,
+        "translation": [
+          -0.0013007881352677941,
+          -0.00015938222350087017,
+          0.002073257463052869
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 156,
+        "depth": 3,
+        "count": 52,
+        "observed_count": 52,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.001959256362169981,
+          0.0018791252514347434,
+          -0.005605703219771385
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 157,
+        "depth": 3,
+        "count": 71,
+        "observed_count": 71,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.09859155118465424,
+        "translation": [
+          -0.0007211546180769801,
+          0.0017284284112975001,
+          0.0012595586013048887
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 158,
+        "depth": 3,
+        "count": 52,
+        "observed_count": 52,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.11538461595773697,
+        "translation": [
+          0.0055919671431183815,
+          0.002049169270321727,
+          -0.0028732195496559143
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 159,
+        "depth": 3,
+        "count": 69,
+        "observed_count": 69,
+        "local_residual_count": 5,
+        "local_residual_fraction": 0.07246376574039459,
+        "translation": [
+          0.0025374642573297024,
+          0.0007041614153422415,
+          -0.004455556161701679
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 160,
+        "depth": 3,
+        "count": 153,
+        "observed_count": 153,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.026143791154026985,
+        "translation": [
+          0.002855274360626936,
+          0.000125296093756333,
+          0.007359710056334734
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 233,
+        "depth": 3,
+        "count": 446,
+        "observed_count": 446,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.0022421525791287422,
+        "translation": [
+          0.0005334030138328671,
+          0.0005984624149277806,
+          0.0036256348248571157
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 235,
+        "depth": 3,
+        "count": 64,
+        "observed_count": 64,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.046875,
+        "translation": [
+          -0.0006426827167160809,
+          -0.0016038956819102168,
+          0.003762946929782629
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 237,
+        "depth": 3,
+        "count": 600,
+        "observed_count": 600,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.023333333432674408,
+        "translation": [
+          0.0010552274761721492,
+          0.00040648915455676615,
+          0.0029943499248474836
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 238,
+        "depth": 3,
+        "count": 59,
+        "observed_count": 59,
+        "local_residual_count": 10,
+        "local_residual_fraction": 0.16949152946472168,
+        "translation": [
+          0.00032180859125219285,
+          -3.445201582508162e-05,
+          0.003057768801227212
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 239,
+        "depth": 3,
+        "count": 45,
+        "observed_count": 45,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.04444444552063942,
+        "translation": [
+          -0.00675960211083293,
+          5.3821466281078756e-05,
+          0.0066090780310332775
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 241,
+        "depth": 3,
+        "count": 604,
+        "observed_count": 604,
+        "local_residual_count": 60,
+        "local_residual_fraction": 0.09933774918317795,
+        "translation": [
+          -0.004767884500324726,
+          0.005318882409483194,
+          0.006113718263804913
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 243,
+        "depth": 3,
+        "count": 837,
+        "observed_count": 837,
+        "local_residual_count": 97,
+        "local_residual_fraction": 0.11589008569717407,
+        "translation": [
+          -0.004571978468447924,
+          0.004968134220689535,
+          0.006260220892727375
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 245,
+        "depth": 3,
+        "count": 429,
+        "observed_count": 429,
+        "local_residual_count": 35,
+        "local_residual_fraction": 0.08158507943153381,
+        "translation": [
+          -0.005076405126601458,
+          0.005377856083214283,
+          0.006640377454459667
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 247,
+        "depth": 3,
+        "count": 131,
+        "observed_count": 131,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.06870228797197342,
+        "translation": [
+          -0.004573760088533163,
+          0.004303364548832178,
+          0.006659506354480982
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 466,
+        "depth": 3,
+        "count": 137,
+        "observed_count": 137,
+        "local_residual_count": 21,
+        "local_residual_fraction": 0.15328466892242432,
+        "translation": [
+          0.004143321420997381,
+          0.002330864081159234,
+          0.0044809323735535145
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 468,
+        "depth": 3,
+        "count": 87,
+        "observed_count": 87,
+        "local_residual_count": 25,
+        "local_residual_fraction": 0.28735631704330444,
+        "translation": [
+          0.002271105069667101,
+          0.006158896256238222,
+          0.015467990189790726
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 469,
+        "depth": 3,
+        "count": 65,
+        "observed_count": 65,
+        "local_residual_count": 27,
+        "local_residual_fraction": 0.4153846204280853,
+        "translation": [
+          0.0018315609777346253,
+          -0.005417883396148682,
+          -0.010838724672794342
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 470,
+        "depth": 3,
+        "count": 60,
+        "observed_count": 60,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.23333333432674408,
+        "translation": [
+          0.0002367864944972098,
+          0.0074103460647165775,
+          0.015769099816679955
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 471,
+        "depth": 3,
+        "count": 77,
+        "observed_count": 76,
+        "local_residual_count": 17,
+        "local_residual_fraction": 0.22077922523021698,
+        "translation": [
+          -0.0030334205366671085,
+          0.0020457401406019926,
+          0.005934261716902256
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 481,
+        "depth": 3,
+        "count": 28,
+        "observed_count": 28,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.1071428582072258,
+        "translation": [
+          0.004924652632325888,
+          2.5780043870327063e-05,
+          -0.0002108836342813447
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 483,
+        "depth": 3,
+        "count": 38,
+        "observed_count": 37,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.15789473056793213,
+        "translation": [
+          0.004818509332835674,
+          -0.0027917446568608284,
+          -0.013350357301533222
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 484,
+        "depth": 3,
+        "count": 104,
+        "observed_count": 104,
+        "local_residual_count": 16,
+        "local_residual_fraction": 0.1538461595773697,
+        "translation": [
+          0.0041408962570130825,
+          3.898060640494805e-06,
+          0.0012144511565566063
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 485,
+        "depth": 3,
+        "count": 115,
+        "observed_count": 115,
+        "local_residual_count": 16,
+        "local_residual_fraction": 0.13913042843341827,
+        "translation": [
+          0.00016041794151533395,
+          -0.00015448973863385618,
+          -0.00046019061119295657
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 486,
+        "depth": 3,
+        "count": 23,
+        "observed_count": 23,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.1304347813129425,
+        "translation": [
+          0.0006690081208944321,
+          0.0014002354582771659,
+          0.004038914106786251
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 488,
+        "depth": 3,
+        "count": 55,
+        "observed_count": 55,
+        "local_residual_count": 17,
+        "local_residual_fraction": 0.30909091234207153,
+        "translation": [
+          -0.0008773069130256772,
+          0.0006409414927475154,
+          -0.0009562911000102758
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 497,
+        "depth": 3,
+        "count": 119,
+        "observed_count": 119,
+        "local_residual_count": 10,
+        "local_residual_fraction": 0.08403361588716507,
+        "translation": [
+          0.018629921600222588,
+          -0.00026600691489875317,
+          -0.002217862056568265
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 499,
+        "depth": 3,
+        "count": 159,
+        "observed_count": 159,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.044025156646966934,
+        "translation": [
+          0.01279442198574543,
+          -0.00014456326607614756,
+          -0.0009731321479193866
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 501,
+        "depth": 3,
+        "count": 112,
+        "observed_count": 112,
+        "local_residual_count": 11,
+        "local_residual_fraction": 0.0982142835855484,
+        "translation": [
+          0.011830994859337807,
+          -0.0004326972411945462,
+          -0.0027522339951246977
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 502,
+        "depth": 3,
+        "count": 189,
+        "observed_count": 189,
+        "local_residual_count": 19,
+        "local_residual_fraction": 0.10052909702062607,
+        "translation": [
+          0.0011133239604532719,
+          -0.00020611585932783782,
+          -0.0007620592950843275
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 503,
+        "depth": 3,
+        "count": 133,
+        "observed_count": 133,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.06766917556524277,
+        "translation": [
+          0.01332063414156437,
+          -0.00018013734370470047,
+          -0.001590930623933673
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 504,
+        "depth": 3,
+        "count": 122,
+        "observed_count": 122,
+        "local_residual_count": 15,
+        "local_residual_fraction": 0.12295082211494446,
+        "translation": [
+          0.0003251986636314541,
+          -0.0005120192654430866,
+          -0.0018108767690137029
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 657,
+        "depth": 4,
+        "count": 10,
+        "observed_count": 10,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.6000000238418579,
+        "translation": [
+          -0.004739770200103521,
+          0.004097220953553915,
+          0.01127080898731947
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 658,
+        "depth": 4,
+        "count": 4,
+        "observed_count": 4,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.75,
+        "translation": [
+          0.006895110011100769,
+          -0.00826444011181593,
+          -0.0030420650728046894
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 659,
+        "depth": 4,
+        "count": 18,
+        "observed_count": 18,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.2222222238779068,
+        "translation": [
+          -0.0034435985144227743,
+          0.002205569762736559,
+          0.012854654341936111
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 660,
+        "depth": 4,
+        "count": 69,
+        "observed_count": 69,
+        "local_residual_count": 35,
+        "local_residual_fraction": 0.5072463750839233,
+        "translation": [
+          -0.0077186762355268,
+          0.000257819308899343,
+          0.014221292920410633
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 661,
+        "depth": 4,
+        "count": 40,
+        "observed_count": 40,
+        "local_residual_count": 13,
+        "local_residual_fraction": 0.32499998807907104,
+        "translation": [
+          -0.003332156455144286,
+          0.002277528867125511,
+          0.014666608534753323
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 662,
+        "depth": 4,
+        "count": 23,
+        "observed_count": 23,
+        "local_residual_count": 19,
+        "local_residual_fraction": 0.8260869383811951,
+        "translation": [
+          -0.005552214104682207,
+          0.002335510915145278,
+          0.013386080972850323
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 663,
+        "depth": 4,
+        "count": 9,
+        "observed_count": 9,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.1111111119389534,
+        "translation": [
+          -0.004124761093407869,
+          -0.0025255049113184214,
+          0.016250338405370712
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 664,
+        "depth": 4,
+        "count": 20,
+        "observed_count": 20,
+        "local_residual_count": 18,
+        "local_residual_fraction": 0.8999999761581421,
+        "translation": [
+          -0.005828684661537409,
+          -0.0007023398065939546,
+          0.015528658404946327
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 705,
+        "depth": 4,
+        "count": 3,
+        "observed_count": 3,
+        "local_residual_count": 3,
+        "local_residual_fraction": 1.0,
+        "translation": [
+          -0.001298273797146976,
+          0.007671975065022707,
+          0.007214531768113375
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 707,
+        "depth": 4,
+        "count": 2,
+        "observed_count": 2,
+        "local_residual_count": 2,
+        "local_residual_fraction": 1.0,
+        "translation": [
+          -0.0039093405939638615,
+          0.001578712835907936,
+          0.006992069073021412
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 708,
+        "depth": 4,
+        "count": 2,
+        "observed_count": 2,
+        "local_residual_count": 2,
+        "local_residual_fraction": 1.0,
+        "translation": [
+          0.0014361804351210594,
+          -0.0008657941361889243,
+          -0.0013027242384850979
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 709,
+        "depth": 4,
+        "count": 1,
+        "observed_count": 1,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.0010153489420190454,
+          0.0025647119618952274,
+          0.0005014269845560193
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 710,
+        "depth": 4,
+        "count": 1,
+        "observed_count": 1,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.00021089489746373147,
+          0.0005296816816553473,
+          -0.003610554151237011
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 711,
+        "depth": 4,
+        "count": 1,
+        "observed_count": 1,
+        "local_residual_count": 1,
+        "local_residual_fraction": 1.0,
+        "translation": [
+          0.010874511674046516,
+          -0.0056744534522295,
+          0.011890263296663761
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 961,
+        "depth": 4,
+        "count": 10,
+        "observed_count": 10,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.10000000149011612,
+        "translation": [
+          0.0004520883085206151,
+          0.00011575839744182304,
+          -0.0014022983377799392
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 962,
+        "depth": 4,
+        "count": 32,
+        "observed_count": 32,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.0625,
+        "translation": [
+          0.0008469297317788005,
+          0.0005542232538573444,
+          0.005276352167129517
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 963,
+        "depth": 4,
+        "count": 12,
+        "observed_count": 12,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.001130634336732328,
+          -0.001005030469968915,
+          -0.00544340442866087
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 964,
+        "depth": 4,
+        "count": 3,
+        "observed_count": 3,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.0019394773989915848,
+          0.0006069053197279572,
+          0.009878192096948624
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 965,
+        "depth": 4,
+        "count": 9,
+        "observed_count": 9,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.0007825459470041096,
+          -0.0014242484467104077,
+          -0.006026677321642637
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 966,
+        "depth": 4,
+        "count": 11,
+        "observed_count": 11,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.09090909361839294,
+        "translation": [
+          -0.0006387749454006553,
+          0.0005517206736840308,
+          0.010091220960021019
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 967,
+        "depth": 4,
+        "count": 32,
+        "observed_count": 32,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.21875,
+        "translation": [
+          -0.00042676879093050957,
+          -0.00037212567985989153,
+          -0.0036129208747297525
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 968,
+        "depth": 4,
+        "count": 15,
+        "observed_count": 15,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.06666667014360428,
+        "translation": [
+          -0.00028301565907895565,
+          0.0003782290150411427,
+          0.0042110709473490715
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1225,
+        "depth": 4,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.8235294222831726,
+        "translation": [
+          -0.0035778898745775223,
+          0.002558554522693157,
+          0.002889876253902912
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1227,
+        "depth": 4,
+        "count": 14,
+        "observed_count": 14,
+        "local_residual_count": 12,
+        "local_residual_fraction": 0.8571428656578064,
+        "translation": [
+          0.0009705970296636224,
+          -0.0004038799670524895,
+          -0.0002741971402429044
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1228,
+        "depth": 4,
+        "count": 8,
+        "observed_count": 8,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.125,
+        "translation": [
+          -0.004671305418014526,
+          -0.0076422612182796,
+          0.007117330562323332
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1230,
+        "depth": 4,
+        "count": 30,
+        "observed_count": 30,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.06666667014360428,
+        "translation": [
+          0.0016424276400357485,
+          -0.0002547391050029546,
+          -0.004080280661582947
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1231,
+        "depth": 4,
+        "count": 5,
+        "observed_count": 5,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.20000000298023224,
+        "translation": [
+          0.0062166135758161545,
+          -0.0079105319455266,
+          0.006506429985165596
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1232,
+        "depth": 4,
+        "count": 24,
+        "observed_count": 24,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.0416666679084301,
+        "translation": [
+          -0.0077311876229941845,
+          -0.0026584116276353598,
+          0.00813199207186699
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1873,
+        "depth": 4,
+        "count": 5,
+        "observed_count": 5,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.010989242233335972,
+          0.0015668435953557491,
+          0.00298668397590518
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1874,
+        "depth": 4,
+        "count": 5,
+        "observed_count": 5,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.4000000059604645,
+        "translation": [
+          0.0014775943709537387,
+          0.0035537690855562687,
+          -0.0036921906284987926
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1875,
+        "depth": 4,
+        "count": 15,
+        "observed_count": 15,
+        "local_residual_count": 8,
+        "local_residual_fraction": 0.5333333611488342,
+        "translation": [
+          -0.002159609692171216,
+          -0.0021498030982911587,
+          0.005255586002022028
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1876,
+        "depth": 4,
+        "count": 11,
+        "observed_count": 11,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.6363636255264282,
+        "translation": [
+          -0.001533124246634543,
+          -1.3230829608801287e-05,
+          -0.001273331348784268
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1877,
+        "depth": 4,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.05882352963089943,
+        "translation": [
+          0.0006614688318222761,
+          -0.0003928766236640513,
+          0.0058050150983035564
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1878,
+        "depth": 4,
+        "count": 10,
+        "observed_count": 10,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.20000000298023224,
+        "translation": [
+          0.0010321787558495998,
+          -0.0006342992419376969,
+          -0.002248640637844801
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1879,
+        "depth": 4,
+        "count": 1,
+        "observed_count": 1,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.012047209776937962,
+          0.00026108010206371546,
+          0.02093837782740593
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1880,
+        "depth": 4,
+        "count": 9,
+        "observed_count": 9,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.1111111119389534,
+        "translation": [
+          0.00048784303362481296,
+          -0.0013597782235592604,
+          -0.004600778687745333
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1889,
+        "depth": 4,
+        "count": 56,
+        "observed_count": 56,
+        "local_residual_count": 25,
+        "local_residual_fraction": 0.4464285671710968,
+        "translation": [
+          -0.009401981718838215,
+          -0.002299224492162466,
+          0.005635398440063
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1890,
+        "depth": 4,
+        "count": 157,
+        "observed_count": 157,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.08917197585105896,
+        "translation": [
+          0.00030364078702405095,
+          0.0004942634259350598,
+          0.003834774252027273
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1891,
+        "depth": 4,
+        "count": 29,
+        "observed_count": 29,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.13793103396892548,
+        "translation": [
+          -0.008538862690329552,
+          -0.0009664101526141167,
+          0.009071663953363895
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1892,
+        "depth": 4,
+        "count": 100,
+        "observed_count": 100,
+        "local_residual_count": 15,
+        "local_residual_fraction": 0.15000000596046448,
+        "translation": [
+          -0.0001935568725457415,
+          0.000665200175717473,
+          0.004124566446989775
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1893,
+        "depth": 4,
+        "count": 82,
+        "observed_count": 82,
+        "local_residual_count": 48,
+        "local_residual_fraction": 0.5853658318519592,
+        "translation": [
+          -0.004777080379426479,
+          -0.0026541282422840595,
+          0.0016033673891797662
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1894,
+        "depth": 4,
+        "count": 35,
+        "observed_count": 35,
+        "local_residual_count": 17,
+        "local_residual_fraction": 0.48571428656578064,
+        "translation": [
+          -0.0005140193388797343,
+          -0.004993817303329706,
+          -0.0015600123442709446
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1895,
+        "depth": 4,
+        "count": 149,
+        "observed_count": 149,
+        "local_residual_count": 77,
+        "local_residual_fraction": 0.5167785286903381,
+        "translation": [
+          -0.0026519435923546553,
+          -0.0005684814532287419,
+          0.0038488181307911873
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1896,
+        "depth": 4,
+        "count": 49,
+        "observed_count": 49,
+        "local_residual_count": 28,
+        "local_residual_fraction": 0.5714285969734192,
+        "translation": [
+          0.0006056715501472354,
+          -0.00555078499019146,
+          -0.0019202192779630423
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1921,
+        "depth": 4,
+        "count": 52,
+        "observed_count": 52,
+        "local_residual_count": 20,
+        "local_residual_fraction": 0.38461539149284363,
+        "translation": [
+          0.0010141562670469284,
+          -0.005153384525328875,
+          -0.0038818346802145243
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1922,
+        "depth": 4,
+        "count": 59,
+        "observed_count": 59,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.06779661029577255,
+        "translation": [
+          0.000762106035836041,
+          -0.0002930816262960434,
+          0.0003895998524967581
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1923,
+        "depth": 4,
+        "count": 103,
+        "observed_count": 102,
+        "local_residual_count": 30,
+        "local_residual_fraction": 0.291262149810791,
+        "translation": [
+          -0.0034491028636693954,
+          0.0033082037698477507,
+          0.0014354563318192959
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1924,
+        "depth": 4,
+        "count": 24,
+        "observed_count": 24,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.0833333358168602,
+        "translation": [
+          -0.0006163922371342778,
+          0.002148257801309228,
+          0.0004063582164235413
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1925,
+        "depth": 4,
+        "count": 16,
+        "observed_count": 16,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.007958733476698399,
+          0.0017598910490050912,
+          0.010487446561455727
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1926,
+        "depth": 4,
+        "count": 97,
+        "observed_count": 97,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.07216494530439377,
+        "translation": [
+          -0.0002529853372834623,
+          -0.0002498871472198516,
+          0.002132898662239313
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1927,
+        "depth": 4,
+        "count": 68,
+        "observed_count": 68,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.05882352963089943,
+        "translation": [
+          -0.0010363836772739887,
+          -0.0016821210738271475,
+          0.002256272127851844
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1928,
+        "depth": 4,
+        "count": 39,
+        "observed_count": 39,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.05128205195069313,
+        "translation": [
+          -0.0005299748154357076,
+          0.00010232908971374854,
+          0.002623377600684762
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1937,
+        "depth": 4,
+        "count": 120,
+        "observed_count": 120,
+        "local_residual_count": 66,
+        "local_residual_fraction": 0.550000011920929,
+        "translation": [
+          -0.0021998758893460035,
+          0.004074421711266041,
+          0.005618061404675245
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1938,
+        "depth": 4,
+        "count": 253,
+        "observed_count": 253,
+        "local_residual_count": 76,
+        "local_residual_fraction": 0.30039525032043457,
+        "translation": [
+          0.006689079105854034,
+          -0.007773171178996563,
+          -0.007807969581335783
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1940,
+        "depth": 4,
+        "count": 19,
+        "observed_count": 19,
+        "local_residual_count": 8,
+        "local_residual_fraction": 0.42105263471603394,
+        "translation": [
+          0.00945817120373249,
+          -0.012647798284888268,
+          -0.021934913471341133
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1941,
+        "depth": 4,
+        "count": 43,
+        "observed_count": 43,
+        "local_residual_count": 20,
+        "local_residual_fraction": 0.4651162922382355,
+        "translation": [
+          0.007899262942373753,
+          -0.008377082645893097,
+          -0.011731671169400215
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1942,
+        "depth": 4,
+        "count": 9,
+        "observed_count": 9,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.3333333432674408,
+        "translation": [
+          0.004919843282550573,
+          -0.0019099442288279533,
+          -0.004262404982000589
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1953,
+        "depth": 4,
+        "count": 59,
+        "observed_count": 55,
+        "local_residual_count": 37,
+        "local_residual_fraction": 0.6271186470985413,
+        "translation": [
+          0.0021536466665565968,
+          -0.0034039621241390705,
+          -0.011467826552689075
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1954,
+        "depth": 4,
+        "count": 18,
+        "observed_count": 18,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.5,
+        "translation": [
+          -0.003596497932448983,
+          0.003044326324015856,
+          0.006515766493976116
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1955,
+        "depth": 4,
+        "count": 25,
+        "observed_count": 23,
+        "local_residual_count": 12,
+        "local_residual_fraction": 0.47999998927116394,
+        "translation": [
+          0.009047405794262886,
+          0.0014943927526474,
+          0.0032068807631731033
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1956,
+        "depth": 4,
+        "count": 168,
+        "observed_count": 167,
+        "local_residual_count": 75,
+        "local_residual_fraction": 0.4464285671710968,
+        "translation": [
+          -0.004838867578655481,
+          0.002778606256470084,
+          0.005427345633506775
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1957,
+        "depth": 4,
+        "count": 54,
+        "observed_count": 54,
+        "local_residual_count": 44,
+        "local_residual_fraction": 0.8148148059844971,
+        "translation": [
+          0.01008756272494793,
+          -0.00945264007896185,
+          -0.013077452778816223
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1958,
+        "depth": 4,
+        "count": 44,
+        "observed_count": 44,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.3181818127632141,
+        "translation": [
+          -0.004851177334785461,
+          0.0025286513846367598,
+          0.006121521349996328
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1959,
+        "depth": 4,
+        "count": 10,
+        "observed_count": 10,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.6000000238418579,
+        "translation": [
+          -0.006878293119370937,
+          0.004307943396270275,
+          0.017569994553923607
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1960,
+        "depth": 4,
+        "count": 54,
+        "observed_count": 54,
+        "local_residual_count": 17,
+        "local_residual_fraction": 0.31481480598449707,
+        "translation": [
+          -0.004172036424279213,
+          0.0023190202191472054,
+          0.0055822934955358505
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1969,
+        "depth": 4,
+        "count": 278,
+        "observed_count": 278,
+        "local_residual_count": 123,
+        "local_residual_fraction": 0.4424460530281067,
+        "translation": [
+          0.005939093418419361,
+          -0.005310542415827513,
+          -0.0066220443695783615
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1970,
+        "depth": 4,
+        "count": 111,
+        "observed_count": 111,
+        "local_residual_count": 67,
+        "local_residual_fraction": 0.6036036014556885,
+        "translation": [
+          0.006125596817582846,
+          -0.006136045791208744,
+          -0.005603995639830828
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1971,
+        "depth": 4,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.529411792755127,
+        "translation": [
+          0.0048160129226744175,
+          -0.005716709420084953,
+          -0.01115537527948618
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1972,
+        "depth": 4,
+        "count": 38,
+        "observed_count": 38,
+        "local_residual_count": 12,
+        "local_residual_fraction": 0.31578946113586426,
+        "translation": [
+          0.007582519669085741,
+          -0.005318771116435528,
+          -0.0066042086109519005
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1973,
+        "depth": 4,
+        "count": 123,
+        "observed_count": 123,
+        "local_residual_count": 77,
+        "local_residual_fraction": 0.6260162591934204,
+        "translation": [
+          -0.0017094190698117018,
+          -0.0011927663581445813,
+          -0.010396672412753105
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1974,
+        "depth": 4,
+        "count": 121,
+        "observed_count": 121,
+        "local_residual_count": 66,
+        "local_residual_fraction": 0.5454545617103577,
+        "translation": [
+          0.002932314295321703,
+          -0.0014886113349348307,
+          -0.0050487699918448925
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1975,
+        "depth": 4,
+        "count": 14,
+        "observed_count": 14,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.4285714328289032,
+        "translation": [
+          0.0003587910905480385,
+          -0.004374317359179258,
+          -0.014184540137648582
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1976,
+        "depth": 4,
+        "count": 98,
+        "observed_count": 98,
+        "local_residual_count": 35,
+        "local_residual_fraction": 0.3571428656578064,
+        "translation": [
+          -0.005126639734953642,
+          0.0030907136388123035,
+          -0.0072554247453808784
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1985,
+        "depth": 4,
+        "count": 54,
+        "observed_count": 54,
+        "local_residual_count": 11,
+        "local_residual_fraction": 0.20370370149612427,
+        "translation": [
+          0.0003765372675843537,
+          0.0012656274484470487,
+          0.0030640047043561935
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1986,
+        "depth": 4,
+        "count": 7,
+        "observed_count": 7,
+        "local_residual_count": 5,
+        "local_residual_fraction": 0.7142857313156128,
+        "translation": [
+          0.00035808980464935303,
+          0.0045042624697089195,
+          0.003999522887170315
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1987,
+        "depth": 4,
+        "count": 148,
+        "observed_count": 148,
+        "local_residual_count": 25,
+        "local_residual_fraction": 0.1689189225435257,
+        "translation": [
+          -0.00231781043112278,
+          0.0004230561899021268,
+          0.0009788802126422524
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1988,
+        "depth": 4,
+        "count": 60,
+        "observed_count": 60,
+        "local_residual_count": 16,
+        "local_residual_fraction": 0.2666666805744171,
+        "translation": [
+          -0.0024471336510032415,
+          0.00019114302995149046,
+          0.0013279839185997844
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1989,
+        "depth": 4,
+        "count": 26,
+        "observed_count": 26,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.26923078298568726,
+        "translation": [
+          -0.0010362444445490837,
+          -0.008720104582607746,
+          -0.020970627665519714
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1990,
+        "depth": 4,
+        "count": 199,
+        "observed_count": 198,
+        "local_residual_count": 107,
+        "local_residual_fraction": 0.5376884341239929,
+        "translation": [
+          -0.001183906220830977,
+          0.004249779041856527,
+          0.005421340931206942
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1991,
+        "depth": 4,
+        "count": 25,
+        "observed_count": 25,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.23999999463558197,
+        "translation": [
+          -0.00118405488319695,
+          0.0003848096530418843,
+          -0.0009991250699386
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 1992,
+        "depth": 4,
+        "count": 29,
+        "observed_count": 29,
+        "local_residual_count": 14,
+        "local_residual_fraction": 0.48275861144065857,
+        "translation": [
+          -0.0036858993116766214,
+          0.0016582987736910582,
+          0.006854208651930094
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3721,
+        "depth": 4,
+        "count": 84,
+        "observed_count": 84,
+        "local_residual_count": 29,
+        "local_residual_fraction": 0.3452380895614624,
+        "translation": [
+          0.003551442176103592,
+          -0.002974174916744232,
+          -0.008903956040740013
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3722,
+        "depth": 4,
+        "count": 39,
+        "observed_count": 39,
+        "local_residual_count": 13,
+        "local_residual_fraction": 0.3333333432674408,
+        "translation": [
+          0.0030399358365684748,
+          -0.0029186520259827375,
+          -0.007802451495081186
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3723,
+        "depth": 4,
+        "count": 26,
+        "observed_count": 26,
+        "local_residual_count": 8,
+        "local_residual_fraction": 0.3076923191547394,
+        "translation": [
+          0.002316264668479562,
+          -0.0006695022457279265,
+          -0.01054668053984642
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3724,
+        "depth": 4,
+        "count": 34,
+        "observed_count": 34,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.20588235557079315,
+        "translation": [
+          0.0026516097132116556,
+          -0.00014640906010754406,
+          -0.004536319524049759
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3725,
+        "depth": 4,
+        "count": 26,
+        "observed_count": 26,
+        "local_residual_count": 11,
+        "local_residual_fraction": 0.42307692766189575,
+        "translation": [
+          0.0016295753885060549,
+          -0.0006535067223012447,
+          -0.0069840941578149796
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3726,
+        "depth": 4,
+        "count": 34,
+        "observed_count": 34,
+        "local_residual_count": 11,
+        "local_residual_fraction": 0.3235294222831726,
+        "translation": [
+          0.0014723851345479488,
+          0.0005337435868568718,
+          0.0006324975402094424
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3727,
+        "depth": 4,
+        "count": 5,
+        "observed_count": 5,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.20000000298023224,
+        "translation": [
+          -0.0006602364592254162,
+          -0.00018540641758590937,
+          -0.007152921985834837
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3728,
+        "depth": 4,
+        "count": 3,
+        "observed_count": 3,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.6666666865348816,
+        "translation": [
+          0.00010512222070246935,
+          0.0009233662858605385,
+          -0.002476843073964119
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3737,
+        "depth": 4,
+        "count": 9,
+        "observed_count": 9,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.2222222238779068,
+        "translation": [
+          0.00481842877343297,
+          0.0008201461168937385,
+          -0.005999723449349403
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3738,
+        "depth": 4,
+        "count": 21,
+        "observed_count": 21,
+        "local_residual_count": 5,
+        "local_residual_fraction": 0.2380952388048172,
+        "translation": [
+          0.0003016088157892227,
+          -0.0026536500081419945,
+          0.0009700623340904713
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3739,
+        "depth": 4,
+        "count": 13,
+        "observed_count": 13,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.07692307978868484,
+        "translation": [
+          0.007841654121875763,
+          0.0008794210734777153,
+          -0.007742830086499453
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3740,
+        "depth": 4,
+        "count": 10,
+        "observed_count": 10,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.20000000298023224,
+        "translation": [
+          -0.00016125709225889295,
+          -0.0022346368059515953,
+          -0.0020068015437573195
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3741,
+        "depth": 4,
+        "count": 2,
+        "observed_count": 2,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.00018901021394412965,
+          -0.002625011606141925,
+          -0.01969074457883835
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3742,
+        "depth": 4,
+        "count": 11,
+        "observed_count": 11,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.6363636255264282,
+        "translation": [
+          -0.0008582479786127806,
+          0.0012163007631897926,
+          -0.001945790834724903
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3743,
+        "depth": 4,
+        "count": 8,
+        "observed_count": 8,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.125,
+        "translation": [
+          0.012453646399080753,
+          0.005102749448269606,
+          0.019094018265604973
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3744,
+        "depth": 4,
+        "count": 12,
+        "observed_count": 12,
+        "local_residual_count": 8,
+        "local_residual_fraction": 0.6666666865348816,
+        "translation": [
+          -0.0006096172728575766,
+          0.003749506315216422,
+          0.003601003671064973
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3777,
+        "depth": 4,
+        "count": 20,
+        "observed_count": 20,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.000349304114934057,
+          0.0014750040136277676,
+          0.0040041799657046795
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3778,
+        "depth": 4,
+        "count": 11,
+        "observed_count": 11,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.27272728085517883,
+        "translation": [
+          -0.0009712454630061984,
+          0.0032194480299949646,
+          0.008266338147222996
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3779,
+        "depth": 4,
+        "count": 24,
+        "observed_count": 24,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.375,
+        "translation": [
+          -0.000964969047345221,
+          0.0023429307620972395,
+          0.006395401898771524
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3780,
+        "depth": 4,
+        "count": 18,
+        "observed_count": 18,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.2222222238779068,
+        "translation": [
+          0.0006430390640161932,
+          0.0032995606306940317,
+          0.010351222939789295
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3781,
+        "depth": 4,
+        "count": 36,
+        "observed_count": 36,
+        "local_residual_count": 10,
+        "local_residual_fraction": 0.2777777910232544,
+        "translation": [
+          0.0005035398062318563,
+          0.0014562949072569609,
+          0.005738373380154371
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3782,
+        "depth": 4,
+        "count": 13,
+        "observed_count": 13,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.1538461595773697,
+        "translation": [
+          -0.0024970376398414373,
+          7.429048855556175e-05,
+          0.005598702002316713
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3783,
+        "depth": 4,
+        "count": 34,
+        "observed_count": 34,
+        "local_residual_count": 11,
+        "local_residual_fraction": 0.3235294222831726,
+        "translation": [
+          -0.0011151103535667062,
+          0.0016526200342923403,
+          0.005899183452129364
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3784,
+        "depth": 4,
+        "count": 42,
+        "observed_count": 42,
+        "local_residual_count": 9,
+        "local_residual_fraction": 0.2142857164144516,
+        "translation": [
+          -0.0023886084090918303,
+          0.003466652240604162,
+          0.010545589961111546
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3857,
+        "depth": 4,
+        "count": 19,
+        "observed_count": 19,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.10526315867900848,
+        "translation": [
+          0.003991995006799698,
+          0.0004132526519242674,
+          0.0003645737888291478
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3859,
+        "depth": 4,
+        "count": 25,
+        "observed_count": 25,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.23999999463558197,
+        "translation": [
+          0.0016939043998718262,
+          -0.0018090789671987295,
+          -0.003232324728742242
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3860,
+        "depth": 4,
+        "count": 5,
+        "observed_count": 5,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.800000011920929,
+        "translation": [
+          -0.00024148279044311494,
+          0.006595866288989782,
+          0.0005912467604503036
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3861,
+        "depth": 4,
+        "count": 14,
+        "observed_count": 14,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.1428571492433548,
+        "translation": [
+          -0.003247927874326706,
+          0.0070205144584178925,
+          0.004937689285725355
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3862,
+        "depth": 4,
+        "count": 12,
+        "observed_count": 12,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.3333333432674408,
+        "translation": [
+          -0.004353197757154703,
+          0.0038181000854820013,
+          0.004641329403966665
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3863,
+        "depth": 4,
+        "count": 14,
+        "observed_count": 14,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.4285714328289032,
+        "translation": [
+          -0.001076902262866497,
+          0.003550376743078232,
+          -0.0075417025946080685
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3864,
+        "depth": 4,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.4117647111415863,
+        "translation": [
+          -0.0005744487280026078,
+          -0.0010175078641623259,
+          0.0023337954189628363
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3897,
+        "depth": 4,
+        "count": 6,
+        "observed_count": 6,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.0007652170024812222,
+          0.011342047713696957,
+          0.0026667648926377296
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3898,
+        "depth": 4,
+        "count": 23,
+        "observed_count": 23,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.17391304671764374,
+        "translation": [
+          0.0010290080681443214,
+          0.0021294918842613697,
+          -0.003062979783862829
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3899,
+        "depth": 4,
+        "count": 16,
+        "observed_count": 15,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.25,
+        "translation": [
+          -0.0006410597125068307,
+          0.0037319534458220005,
+          -0.0005670081009157002
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3901,
+        "depth": 4,
+        "count": 8,
+        "observed_count": 8,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.0036278751213103533,
+          0.003326846519485116,
+          0.005517852492630482
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3902,
+        "depth": 4,
+        "count": 2,
+        "observed_count": 2,
+        "local_residual_count": 2,
+        "local_residual_fraction": 1.0,
+        "translation": [
+          0.008432694710791111,
+          -0.02414800226688385,
+          -0.006193616893142462
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3903,
+        "depth": 4,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.4117647111415863,
+        "translation": [
+          -0.00014253062545321882,
+          -0.0002123706362908706,
+          0.004619610030204058
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3904,
+        "depth": 4,
+        "count": 5,
+        "observed_count": 5,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.6000000238418579,
+        "translation": [
+          0.007658554241061211,
+          0.0021848632022738457,
+          0.004301184322685003
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3985,
+        "depth": 4,
+        "count": 9,
+        "observed_count": 9,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.2222222238779068,
+        "translation": [
+          0.0016615556087344885,
+          -0.004083095118403435,
+          -0.002012146869674325
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3986,
+        "depth": 4,
+        "count": 22,
+        "observed_count": 22,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.09090909361839294,
+        "translation": [
+          0.0029672193340957165,
+          0.0004139480588492006,
+          0.004550025798380375
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3987,
+        "depth": 4,
+        "count": 14,
+        "observed_count": 14,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.1428571492433548,
+        "translation": [
+          0.0056820157915353775,
+          0.0009967148071154952,
+          -0.009314983151853085
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3988,
+        "depth": 4,
+        "count": 15,
+        "observed_count": 15,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.4000000059604645,
+        "translation": [
+          0.0004360205784905702,
+          0.002239448484033346,
+          -0.0013539635110646486
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3989,
+        "depth": 4,
+        "count": 12,
+        "observed_count": 12,
+        "local_residual_count": 1,
+        "local_residual_fraction": 0.0833333358168602,
+        "translation": [
+          -0.004314289428293705,
+          -0.009546495042741299,
+          -0.002482782583683729
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3990,
+        "depth": 4,
+        "count": 17,
+        "observed_count": 17,
+        "local_residual_count": 3,
+        "local_residual_fraction": 0.1764705926179886,
+        "translation": [
+          0.0007329105283133686,
+          0.0004430382396094501,
+          0.002338902559131384
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3991,
+        "depth": 4,
+        "count": 19,
+        "observed_count": 19,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          -0.0033707355614751577,
+          -0.005638000089675188,
+          -0.013702169060707092
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 3992,
+        "depth": 4,
+        "count": 36,
+        "observed_count": 36,
+        "local_residual_count": 7,
+        "local_residual_fraction": 0.1944444477558136,
+        "translation": [
+          -0.001002966775558889,
+          0.0034041625913232565,
+          0.005052170716226101
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4001,
+        "depth": 4,
+        "count": 12,
+        "observed_count": 12,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.004490862134844065,
+          -0.005284968297928572,
+          -0.017542991787195206
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4002,
+        "depth": 4,
+        "count": 22,
+        "observed_count": 22,
+        "local_residual_count": 8,
+        "local_residual_fraction": 0.3636363744735718,
+        "translation": [
+          0.00044111168244853616,
+          0.0035835911985486746,
+          0.00559248635545373
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4003,
+        "depth": 4,
+        "count": 13,
+        "observed_count": 13,
+        "local_residual_count": 2,
+        "local_residual_fraction": 0.1538461595773697,
+        "translation": [
+          0.002844688016921282,
+          -0.001297167269513011,
+          -0.011303815990686417
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4004,
+        "depth": 4,
+        "count": 13,
+        "observed_count": 13,
+        "local_residual_count": 4,
+        "local_residual_fraction": 0.3076923191547394,
+        "translation": [
+          6.298471998888999e-05,
+          0.002311813412234187,
+          0.007498313672840595
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4005,
+        "depth": 4,
+        "count": 11,
+        "observed_count": 11,
+        "local_residual_count": 0,
+        "local_residual_fraction": 0.0,
+        "translation": [
+          0.005501363426446915,
+          -0.009869891218841076,
+          -0.011277113109827042
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4006,
+        "depth": 4,
+        "count": 34,
+        "observed_count": 34,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.1764705926179886,
+        "translation": [
+          -0.000259420950897038,
+          0.0014106447342783213,
+          0.004638120997697115
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4007,
+        "depth": 4,
+        "count": 23,
+        "observed_count": 23,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.260869562625885,
+        "translation": [
+          -0.00014111120253801346,
+          -0.0013522591907531023,
+          -0.009451456367969513
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "node": 4008,
+        "depth": 4,
+        "count": 14,
+        "observed_count": 14,
+        "local_residual_count": 6,
+        "local_residual_fraction": 0.4285714328289032,
+        "translation": [
+          -0.0005637607537209988,
+          0.00269809877499938,
+          0.004538252949714661
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "gates": [
+      {
+        "node": 1,
+        "probability": 0.5376384854316711,
+        "opened": true
+      },
+      {
+        "node": 2,
+        "probability": 0.6833718419075012,
+        "opened": true
+      },
+      {
+        "node": 3,
+        "probability": 0.9157568216323853,
+        "opened": true
+      },
+      {
+        "node": 4,
+        "probability": 0.15443119406700134,
+        "opened": false
+      },
+      {
+        "node": 5,
+        "probability": 0.3643917441368103,
+        "opened": false
+      },
+      {
+        "node": 6,
+        "probability": 0.37151262164115906,
+        "opened": false
+      },
+      {
+        "node": 7,
+        "probability": 0.8690013289451599,
+        "opened": true
+      },
+      {
+        "node": 8,
+        "probability": 0.15721744298934937,
+        "opened": false
+      },
+      {
+        "node": 9,
+        "probability": 0.22682982683181763,
+        "opened": false
+      },
+      {
+        "node": 10,
+        "probability": 0.5211532115936279,
+        "opened": true
+      },
+      {
+        "node": 11,
+        "probability": 0.11763547360897064,
+        "opened": false
+      },
+      {
+        "node": 12,
+        "probability": 0.3438010513782501,
+        "opened": false
+      },
+      {
+        "node": 13,
+        "probability": 0.2116718888282776,
+        "opened": false
+      },
+      {
+        "node": 14,
+        "probability": 0.6948637962341309,
+        "opened": true
+      },
+      {
+        "node": 15,
+        "probability": 0.042396362870931625,
+        "opened": false
+      },
+      {
+        "node": 16,
+        "probability": 0.4258594214916229,
+        "opened": false
+      },
+      {
+        "node": 17,
+        "probability": 0.020030708983540535,
+        "opened": false
+      },
+      {
+        "node": 18,
+        "probability": 0.0754295065999031,
+        "opened": false
+      },
+      {
+        "node": 19,
+        "probability": 0.6281012892723083,
+        "opened": true
+      },
+      {
+        "node": 20,
+        "probability": 0.025459421798586845,
+        "opened": false
+      },
+      {
+        "node": 21,
+        "probability": 0.35257095098495483,
+        "opened": false
+      },
+      {
+        "node": 22,
+        "probability": 0.038388870656490326,
+        "opened": false
+      },
+      {
+        "node": 23,
+        "probability": 0.31137171387672424,
+        "opened": false
+      },
+      {
+        "node": 24,
+        "probability": 0.01692756451666355,
+        "opened": false
+      },
+      {
+        "node": 25,
+        "probability": 0.07225233316421509,
+        "opened": false
+      },
+      {
+        "node": 26,
+        "probability": 0.12093376368284225,
+        "opened": false
+      },
+      {
+        "node": 27,
+        "probability": 0.23283074796199799,
+        "opened": false
+      },
+      {
+        "node": 28,
+        "probability": 0.46924203634262085,
+        "opened": false
+      },
+      {
+        "node": 29,
+        "probability": 0.8759188055992126,
+        "opened": true
+      },
+      {
+        "node": 30,
+        "probability": 0.9583267569541931,
+        "opened": true
+      },
+      {
+        "node": 31,
+        "probability": 0.11722943186759949,
+        "opened": false
+      },
+      {
+        "node": 32,
+        "probability": 0.07375040650367737,
+        "opened": false
+      },
+      {
+        "node": 33,
+        "probability": 0.08597099781036377,
+        "opened": false
+      },
+      {
+        "node": 34,
+        "probability": 0.10868547111749649,
+        "opened": false
+      },
+      {
+        "node": 35,
+        "probability": 0.17661602795124054,
+        "opened": false
+      },
+      {
+        "node": 36,
+        "probability": 0.038426030427217484,
+        "opened": false
+      },
+      {
+        "node": 37,
+        "probability": 0.31771793961524963,
+        "opened": false
+      },
+      {
+        "node": 38,
+        "probability": 0.36766013503074646,
+        "opened": false
+      },
+      {
+        "node": 39,
+        "probability": 0.07284305989742279,
+        "opened": false
+      },
+      {
+        "node": 40,
+        "probability": 0.09999081492424011,
+        "opened": false
+      },
+      {
+        "node": 41,
+        "probability": 0.13945339620113373,
+        "opened": false
+      },
+      {
+        "node": 42,
+        "probability": 0.017735209316015244,
+        "opened": false
+      },
+      {
+        "node": 43,
+        "probability": 0.27212628722190857,
+        "opened": false
+      },
+      {
+        "node": 44,
+        "probability": 0.9378671050071716,
+        "opened": true
+      },
+      {
+        "node": 45,
+        "probability": 0.04121548682451248,
+        "opened": false
+      },
+      {
+        "node": 46,
+        "probability": 0.21559631824493408,
+        "opened": false
+      },
+      {
+        "node": 47,
+        "probability": 0.01199242565780878,
+        "opened": false
+      },
+      {
+        "node": 48,
+        "probability": 0.5866885781288147,
+        "opened": true
+      },
+      {
+        "node": 49,
+        "probability": 0.19419190287590027,
+        "opened": false
+      },
+      {
+        "node": 50,
+        "probability": 0.05127408728003502,
+        "opened": false
+      },
+      {
+        "node": 51,
+        "probability": 0.3792688548564911,
+        "opened": false
+      },
+      {
+        "node": 52,
+        "probability": 0.14399296045303345,
+        "opened": false
+      },
+      {
+        "node": 53,
+        "probability": 0.5803455114364624,
+        "opened": true
+      },
+      {
+        "node": 54,
+        "probability": 0.1897146999835968,
+        "opened": false
+      },
+      {
+        "node": 55,
+        "probability": 0.317766934633255,
+        "opened": false
+      },
+      {
+        "node": 56,
+        "probability": 0.18604163825511932,
+        "opened": false
+      },
+      {
+        "node": 57,
+        "probability": 0.1525728404521942,
+        "opened": false
+      },
+      {
+        "node": 58,
+        "probability": 0.8838917016983032,
+        "opened": true
+      },
+      {
+        "node": 59,
+        "probability": 0.3239179849624634,
+        "opened": false
+      },
+      {
+        "node": 60,
+        "probability": 0.6413634419441223,
+        "opened": true
+      },
+      {
+        "node": 61,
+        "probability": 0.3105502128601074,
+        "opened": false
+      },
+      {
+        "node": 62,
+        "probability": 0.5524926781654358,
+        "opened": true
+      },
+      {
+        "node": 63,
+        "probability": 0.28128090500831604,
+        "opened": false
+      },
+      {
+        "node": 64,
+        "probability": 0.3088787794113159,
+        "opened": false
+      },
+      {
+        "node": 65,
+        "probability": 0.3260635435581207,
+        "opened": false
+      },
+      {
+        "node": 66,
+        "probability": 0.5440686941146851,
+        "opened": true
+      },
+      {
+        "node": 67,
+        "probability": 0.16816161572933197,
+        "opened": false
+      },
+      {
+        "node": 68,
+        "probability": 0.25805941224098206,
+        "opened": false
+      },
+      {
+        "node": 69,
+        "probability": 0.44688400626182556,
+        "opened": false
+      },
+      {
+        "node": 70,
+        "probability": 0.058527108281850815,
+        "opened": false
+      },
+      {
+        "node": 71,
+        "probability": 0.8199723958969116,
+        "opened": true
+      },
+      {
+        "node": 72,
+        "probability": 0.2959413230419159,
+        "opened": false
+      },
+      {
+        "node": 73,
+        "probability": 0.026551898568868637,
+        "opened": false
+      },
+      {
+        "node": 74,
+        "probability": 0.02421696111559868,
+        "opened": false
+      },
+      {
+        "node": 75,
+        "probability": 0.020225604996085167,
+        "opened": false
+      },
+      {
+        "node": 76,
+        "probability": 0.032123833894729614,
+        "opened": false
+      },
+      {
+        "node": 77,
+        "probability": 0.05146831274032593,
+        "opened": false
+      },
+      {
+        "node": 78,
+        "probability": 0.08710737526416779,
+        "opened": false
+      },
+      {
+        "node": 79,
+        "probability": 0.02182045392692089,
+        "opened": false
+      },
+      {
+        "node": 80,
+        "probability": 0.20265145599842072,
+        "opened": false
+      },
+      {
+        "node": 81,
+        "probability": 0.020154183730483055,
+        "opened": false
+      },
+      {
+        "node": 82,
+        "probability": 0.8339880704879761,
+        "opened": true
+      },
+      {
+        "node": 83,
+        "probability": 0.014114216901361942,
+        "opened": false
+      },
+      {
+        "node": 84,
+        "probability": 0.11181192100048065,
+        "opened": false
+      },
+      {
+        "node": 85,
+        "probability": 0.012616819702088833,
+        "opened": false
+      },
+      {
+        "node": 86,
+        "probability": 0.14769096672534943,
+        "opened": false
+      },
+      {
+        "node": 87,
+        "probability": 0.05569739639759064,
+        "opened": false
+      },
+      {
+        "node": 88,
+        "probability": 0.6491100192070007,
+        "opened": true
+      },
+      {
+        "node": 89,
+        "probability": 0.05464259162545204,
+        "opened": false
+      },
+      {
+        "node": 90,
+        "probability": 0.12284278869628906,
+        "opened": false
+      },
+      {
+        "node": 91,
+        "probability": 0.1457531452178955,
+        "opened": false
+      },
+      {
+        "node": 92,
+        "probability": 0.02892732061445713,
+        "opened": false
+      },
+      {
+        "node": 93,
+        "probability": 0.0989169180393219,
+        "opened": false
+      },
+      {
+        "node": 94,
+        "probability": 0.05535702779889107,
+        "opened": false
+      },
+      {
+        "node": 95,
+        "probability": 0.047281354665756226,
+        "opened": false
+      },
+      {
+        "node": 96,
+        "probability": 0.04182221740484238,
+        "opened": false
+      },
+      {
+        "node": 97,
+        "probability": 0.22517740726470947,
+        "opened": false
+      },
+      {
+        "node": 98,
+        "probability": 0.024217963218688965,
+        "opened": false
+      },
+      {
+        "node": 99,
+        "probability": 0.1520654559135437,
+        "opened": false
+      },
+      {
+        "node": 100,
+        "probability": 0.06926669180393219,
+        "opened": false
+      },
+      {
+        "node": 101,
+        "probability": 0.07876615971326828,
+        "opened": false
+      },
+      {
+        "node": 102,
+        "probability": 0.1535075604915619,
+        "opened": false
+      },
+      {
+        "node": 103,
+        "probability": 0.04443008452653885,
+        "opened": false
+      },
+      {
+        "node": 104,
+        "probability": 0.7799578309059143,
+        "opened": true
+      },
+      {
+        "node": 105,
+        "probability": 0.23116077482700348,
+        "opened": false
+      },
+      {
+        "node": 106,
+        "probability": 0.1004820168018341,
+        "opened": false
+      },
+      {
+        "node": 107,
+        "probability": 0.37433546781539917,
+        "opened": false
+      },
+      {
+        "node": 108,
+        "probability": 0.03270740807056427,
+        "opened": false
+      },
+      {
+        "node": 109,
+        "probability": 0.05724764242768288,
+        "opened": false
+      },
+      {
+        "node": 110,
+        "probability": 0.03677874803543091,
+        "opened": false
+      },
+      {
+        "node": 111,
+        "probability": 0.10677355527877808,
+        "opened": false
+      },
+      {
+        "node": 112,
+        "probability": 0.04994785040616989,
+        "opened": false
+      },
+      {
+        "node": 113,
+        "probability": 0.3641307055950165,
+        "opened": false
+      },
+      {
+        "node": 114,
+        "probability": 0.06596507877111435,
+        "opened": false
+      },
+      {
+        "node": 115,
+        "probability": 0.02434149943292141,
+        "opened": false
+      },
+      {
+        "node": 116,
+        "probability": 0.4404674470424652,
+        "opened": false
+      },
+      {
+        "node": 117,
+        "probability": 0.017691055312752724,
+        "opened": false
+      },
+      {
+        "node": 118,
+        "probability": 0.21435008943080902,
+        "opened": false
+      },
+      {
+        "node": 119,
+        "probability": 0.025552282109856606,
+        "opened": false
+      },
+      {
+        "node": 120,
+        "probability": 0.539234459400177,
+        "opened": true
+      },
+      {
+        "node": 121,
+        "probability": 0.11675798147916794,
+        "opened": false
+      },
+      {
+        "node": 122,
+        "probability": 0.05752210691571236,
+        "opened": false
+      },
+      {
+        "node": 123,
+        "probability": 0.13696196675300598,
+        "opened": false
+      },
+      {
+        "node": 124,
+        "probability": 0.058354027569293976,
+        "opened": false
+      },
+      {
+        "node": 125,
+        "probability": 0.06812011450529099,
+        "opened": false
+      },
+      {
+        "node": 126,
+        "probability": 0.048338860273361206,
+        "opened": false
+      },
+      {
+        "node": 127,
+        "probability": 0.02999890223145485,
+        "opened": false
+      },
+      {
+        "node": 128,
+        "probability": 0.07503899186849594,
+        "opened": false
+      },
+      {
+        "node": 129,
+        "probability": 0.04465889558196068,
+        "opened": false
+      },
+      {
+        "node": 130,
+        "probability": 0.24606063961982727,
+        "opened": false
+      },
+      {
+        "node": 131,
+        "probability": 0.02422608993947506,
+        "opened": false
+      },
+      {
+        "node": 132,
+        "probability": 0.09497792273759842,
+        "opened": false
+      },
+      {
+        "node": 133,
+        "probability": 0.1690068542957306,
+        "opened": false
+      },
+      {
+        "node": 134,
+        "probability": 0.782132625579834,
+        "opened": true
+      },
+      {
+        "node": 135,
+        "probability": 0.5045624375343323,
+        "opened": true
+      },
+      {
+        "node": 136,
+        "probability": 0.06462891399860382,
+        "opened": false
+      },
+      {
+        "node": 137,
+        "probability": 0.03850526735186577,
+        "opened": false
+      },
+      {
+        "node": 138,
+        "probability": 0.026345044374465942,
+        "opened": false
+      },
+      {
+        "node": 139,
+        "probability": 0.1690608710050583,
+        "opened": false
+      },
+      {
+        "node": 140,
+        "probability": 0.03012978658080101,
+        "opened": false
+      },
+      {
+        "node": 141,
+        "probability": 0.02599940076470375,
+        "opened": false
+      },
+      {
+        "node": 142,
+        "probability": 0.025904128327965736,
+        "opened": false
+      },
+      {
+        "node": 144,
+        "probability": 0.035442594438791275,
+        "opened": false
+      },
+      {
+        "node": 145,
+        "probability": 0.013161931186914444,
+        "opened": false
+      },
+      {
+        "node": 146,
+        "probability": 0.3502342104911804,
+        "opened": false
+      },
+      {
+        "node": 147,
+        "probability": 0.016812171787023544,
+        "opened": false
+      },
+      {
+        "node": 148,
+        "probability": 0.013117060996592045,
+        "opened": false
+      },
+      {
+        "node": 149,
+        "probability": 0.031060252338647842,
+        "opened": false
+      },
+      {
+        "node": 150,
+        "probability": 0.009641963057219982,
+        "opened": false
+      },
+      {
+        "node": 151,
+        "probability": 0.2187395691871643,
+        "opened": false
+      },
+      {
+        "node": 152,
+        "probability": 0.0102870874106884,
+        "opened": false
+      },
+      {
+        "node": 153,
+        "probability": 0.9103844165802002,
+        "opened": true
+      },
+      {
+        "node": 154,
+        "probability": 0.006079766899347305,
+        "opened": false
+      },
+      {
+        "node": 155,
+        "probability": 0.022346068173646927,
+        "opened": false
+      },
+      {
+        "node": 156,
+        "probability": 0.006569643039256334,
+        "opened": false
+      },
+      {
+        "node": 157,
+        "probability": 0.007422295864671469,
+        "opened": false
+      },
+      {
+        "node": 158,
+        "probability": 0.008036607876420021,
+        "opened": false
+      },
+      {
+        "node": 159,
+        "probability": 0.006828132085502148,
+        "opened": false
+      },
+      {
+        "node": 160,
+        "probability": 0.014396660029888153,
+        "opened": false
+      },
+      {
+        "node": 161,
+        "probability": 0.029001878574490547,
+        "opened": false
+      },
+      {
+        "node": 162,
+        "probability": 0.02893015742301941,
+        "opened": false
+      },
+      {
+        "node": 163,
+        "probability": 0.03584086522459984,
+        "opened": false
+      },
+      {
+        "node": 164,
+        "probability": 0.036386821419000626,
+        "opened": false
+      },
+      {
+        "node": 165,
+        "probability": 0.03250451013445854,
+        "opened": false
+      },
+      {
+        "node": 166,
+        "probability": 0.057382676750421524,
+        "opened": false
+      },
+      {
+        "node": 167,
+        "probability": 0.07250064611434937,
+        "opened": false
+      },
+      {
+        "node": 168,
+        "probability": 0.03906606137752533,
+        "opened": false
+      },
+      {
+        "node": 169,
+        "probability": 0.018615834414958954,
+        "opened": false
+      },
+      {
+        "node": 170,
+        "probability": 0.1489769071340561,
+        "opened": false
+      },
+      {
+        "node": 171,
+        "probability": 0.03757569193840027,
+        "opened": false
+      },
+      {
+        "node": 172,
+        "probability": 0.037750981748104095,
+        "opened": false
+      },
+      {
+        "node": 173,
+        "probability": 0.5290958285331726,
+        "opened": true
+      },
+      {
+        "node": 174,
+        "probability": 0.007159354630857706,
+        "opened": false
+      },
+      {
+        "node": 175,
+        "probability": 0.11547718197107315,
+        "opened": false
+      },
+      {
+        "node": 176,
+        "probability": 0.014927152544260025,
+        "opened": false
+      },
+      {
+        "node": 178,
+        "probability": 0.025250915437936783,
+        "opened": false
+      },
+      {
+        "node": 179,
+        "probability": 0.05029677599668503,
+        "opened": false
+      },
+      {
+        "node": 180,
+        "probability": 0.02693868987262249,
+        "opened": false
+      },
+      {
+        "node": 181,
+        "probability": 0.026204412803053856,
+        "opened": false
+      },
+      {
+        "node": 182,
+        "probability": 0.022329745814204216,
+        "opened": false
+      },
+      {
+        "node": 183,
+        "probability": 0.024835629388689995,
+        "opened": false
+      },
+      {
+        "node": 184,
+        "probability": 0.031248845160007477,
+        "opened": false
+      },
+      {
+        "node": 185,
+        "probability": 0.012540863826870918,
+        "opened": false
+      },
+      {
+        "node": 186,
+        "probability": 0.329905241727829,
+        "opened": false
+      },
+      {
+        "node": 187,
+        "probability": 0.03727170452475548,
+        "opened": false
+      },
+      {
+        "node": 188,
+        "probability": 0.16443973779678345,
+        "opened": false
+      },
+      {
+        "node": 189,
+        "probability": 0.7588790655136108,
+        "opened": true
+      },
+      {
+        "node": 190,
+        "probability": 0.024187125265598297,
+        "opened": false
+      },
+      {
+        "node": 191,
+        "probability": 0.25938647985458374,
+        "opened": false
+      },
+      {
+        "node": 192,
+        "probability": 0.016209736466407776,
+        "opened": false
+      },
+      {
+        "node": 193,
+        "probability": 0.041656773537397385,
+        "opened": false
+      },
+      {
+        "node": 194,
+        "probability": 0.029527660459280014,
+        "opened": false
+      },
+      {
+        "node": 195,
+        "probability": 0.03616972267627716,
+        "opened": false
+      },
+      {
+        "node": 196,
+        "probability": 0.10376521199941635,
+        "opened": false
+      },
+      {
+        "node": 197,
+        "probability": 0.038606010377407074,
+        "opened": false
+      },
+      {
+        "node": 198,
+        "probability": 0.059654757380485535,
+        "opened": false
+      },
+      {
+        "node": 199,
+        "probability": 0.07603038102388382,
+        "opened": false
+      },
+      {
+        "node": 200,
+        "probability": 0.06624608486890793,
+        "opened": false
+      },
+      {
+        "node": 201,
+        "probability": 0.06714356690645218,
+        "opened": false
+      },
+      {
+        "node": 202,
+        "probability": 0.17514504492282867,
+        "opened": false
+      },
+      {
+        "node": 203,
+        "probability": 0.02989095076918602,
+        "opened": false
+      },
+      {
+        "node": 204,
+        "probability": 0.01718168333172798,
+        "opened": false
+      },
+      {
+        "node": 205,
+        "probability": 0.039928629994392395,
+        "opened": false
+      },
+      {
+        "node": 206,
+        "probability": 0.17244131863117218,
+        "opened": false
+      },
+      {
+        "node": 207,
+        "probability": 0.05710132047533989,
+        "opened": false
+      },
+      {
+        "node": 208,
+        "probability": 0.3123592138290405,
+        "opened": false
+      },
+      {
+        "node": 209,
+        "probability": 0.29102757573127747,
+        "opened": false
+      },
+      {
+        "node": 210,
+        "probability": 0.07649122923612595,
+        "opened": false
+      },
+      {
+        "node": 211,
+        "probability": 0.03815528005361557,
+        "opened": false
+      },
+      {
+        "node": 212,
+        "probability": 0.1067272275686264,
+        "opened": false
+      },
+      {
+        "node": 213,
+        "probability": 0.058598101139068604,
+        "opened": false
+      },
+      {
+        "node": 214,
+        "probability": 0.0881466269493103,
+        "opened": false
+      },
+      {
+        "node": 215,
+        "probability": 0.10787200927734375,
+        "opened": false
+      },
+      {
+        "node": 216,
+        "probability": 0.06532730162143707,
+        "opened": false
+      },
+      {
+        "node": 217,
+        "probability": 0.06545145064592361,
+        "opened": false
+      },
+      {
+        "node": 218,
+        "probability": 0.030681360512971878,
+        "opened": false
+      },
+      {
+        "node": 219,
+        "probability": 0.02072615548968315,
+        "opened": false
+      },
+      {
+        "node": 220,
+        "probability": 0.0202314592897892,
+        "opened": false
+      },
+      {
+        "node": 221,
+        "probability": 0.03769800066947937,
+        "opened": false
+      },
+      {
+        "node": 222,
+        "probability": 0.28625375032424927,
+        "opened": false
+      },
+      {
+        "node": 223,
+        "probability": 0.2795833349227905,
+        "opened": false
+      },
+      {
+        "node": 224,
+        "probability": 0.1685260683298111,
+        "opened": false
+      },
+      {
+        "node": 225,
+        "probability": 0.2523561120033264,
+        "opened": false
+      },
+      {
+        "node": 226,
+        "probability": 0.0432795025408268,
+        "opened": false
+      },
+      {
+        "node": 227,
+        "probability": 0.1634015440940857,
+        "opened": false
+      },
+      {
+        "node": 228,
+        "probability": 0.0754418671131134,
+        "opened": false
+      },
+      {
+        "node": 229,
+        "probability": 0.2937910556793213,
+        "opened": false
+      },
+      {
+        "node": 230,
+        "probability": 0.3453773558139801,
+        "opened": false
+      },
+      {
+        "node": 231,
+        "probability": 0.14905011653900146,
+        "opened": false
+      },
+      {
+        "node": 232,
+        "probability": 0.19632361829280853,
+        "opened": false
+      },
+      {
+        "node": 233,
+        "probability": 0.0840122178196907,
+        "opened": false
+      },
+      {
+        "node": 234,
+        "probability": 0.520658552646637,
+        "opened": true
+      },
+      {
+        "node": 235,
+        "probability": 0.015530803240835667,
+        "opened": false
+      },
+      {
+        "node": 236,
+        "probability": 0.8467704653739929,
+        "opened": true
+      },
+      {
+        "node": 237,
+        "probability": 0.474343866109848,
+        "opened": false
+      },
+      {
+        "node": 238,
+        "probability": 0.10224821418523788,
+        "opened": false
+      },
+      {
+        "node": 239,
+        "probability": 0.014700622297823429,
+        "opened": false
+      },
+      {
+        "node": 240,
+        "probability": 0.7140557765960693,
+        "opened": true
+      },
+      {
+        "node": 241,
+        "probability": 0.2411682903766632,
+        "opened": false
+      },
+      {
+        "node": 242,
+        "probability": 0.7796933054924011,
+        "opened": true
+      },
+      {
+        "node": 243,
+        "probability": 0.23360981047153473,
+        "opened": false
+      },
+      {
+        "node": 244,
+        "probability": 0.9663501381874084,
+        "opened": true
+      },
+      {
+        "node": 245,
+        "probability": 0.34976038336753845,
+        "opened": false
+      },
+      {
+        "node": 246,
+        "probability": 0.9540851712226868,
+        "opened": true
+      },
+      {
+        "node": 247,
+        "probability": 0.13253183662891388,
+        "opened": false
+      },
+      {
+        "node": 248,
+        "probability": 0.5468224883079529,
+        "opened": true
+      },
+      {
+        "node": 249,
+        "probability": 0.13048715889453888,
+        "opened": false
+      },
+      {
+        "node": 250,
+        "probability": 0.24006198346614838,
+        "opened": false
+      },
+      {
+        "node": 251,
+        "probability": 0.2983584702014923,
+        "opened": false
+      },
+      {
+        "node": 252,
+        "probability": 0.17792774736881256,
+        "opened": false
+      },
+      {
+        "node": 253,
+        "probability": 0.06676707416772842,
+        "opened": false
+      },
+      {
+        "node": 254,
+        "probability": 0.24314360320568085,
+        "opened": false
+      },
+      {
+        "node": 255,
+        "probability": 0.29527777433395386,
+        "opened": false
+      },
+      {
+        "node": 256,
+        "probability": 0.09955451637506485,
+        "opened": false
+      },
+      {
+        "node": 257,
+        "probability": 0.31152981519699097,
+        "opened": false
+      },
+      {
+        "node": 258,
+        "probability": 0.4506935775279999,
+        "opened": false
+      },
+      {
+        "node": 259,
+        "probability": 0.014366541057825089,
+        "opened": false
+      },
+      {
+        "node": 260,
+        "probability": 0.1640455573797226,
+        "opened": false
+      },
+      {
+        "node": 261,
+        "probability": 0.09125716984272003,
+        "opened": false
+      },
+      {
+        "node": 262,
+        "probability": 0.11488142609596252,
+        "opened": false
+      },
+      {
+        "node": 263,
+        "probability": 0.13193143904209137,
+        "opened": false
+      },
+      {
+        "node": 264,
+        "probability": 0.21410727500915527,
+        "opened": false
+      },
+      {
+        "node": 265,
+        "probability": 0.04546411335468292,
+        "opened": false
+      },
+      {
+        "node": 266,
+        "probability": 0.16734348237514496,
+        "opened": false
+      },
+      {
+        "node": 267,
+        "probability": 0.09185947477817535,
+        "opened": false
+      },
+      {
+        "node": 268,
+        "probability": 0.21070975065231323,
+        "opened": false
+      },
+      {
+        "node": 269,
+        "probability": 0.3016342520713806,
+        "opened": false
+      },
+      {
+        "node": 270,
+        "probability": 0.15627045929431915,
+        "opened": false
+      },
+      {
+        "node": 271,
+        "probability": 0.26028329133987427,
+        "opened": false
+      },
+      {
+        "node": 272,
+        "probability": 0.1770087033510208,
+        "opened": false
+      },
+      {
+        "node": 273,
+        "probability": 0.07595837861299515,
+        "opened": false
+      },
+      {
+        "node": 274,
+        "probability": 0.20460519194602966,
+        "opened": false
+      },
+      {
+        "node": 275,
+        "probability": 0.020562192425131798,
+        "opened": false
+      },
+      {
+        "node": 276,
+        "probability": 0.02426130697131157,
+        "opened": false
+      },
+      {
+        "node": 277,
+        "probability": 0.2042687088251114,
+        "opened": false
+      },
+      {
+        "node": 278,
+        "probability": 0.23036406934261322,
+        "opened": false
+      },
+      {
+        "node": 279,
+        "probability": 0.16595558822155,
+        "opened": false
+      },
+      {
+        "node": 280,
+        "probability": 0.17705494165420532,
+        "opened": false
+      },
+      {
+        "node": 281,
+        "probability": 0.27607226371765137,
+        "opened": false
+      },
+      {
+        "node": 282,
+        "probability": 0.21553955972194672,
+        "opened": false
+      },
+      {
+        "node": 283,
+        "probability": 0.12890411913394928,
+        "opened": false
+      },
+      {
+        "node": 284,
+        "probability": 0.3322073221206665,
+        "opened": false
+      },
+      {
+        "node": 285,
+        "probability": 0.5896711945533752,
+        "opened": true
+      },
+      {
+        "node": 286,
+        "probability": 0.05720209702849388,
+        "opened": false
+      },
+      {
+        "node": 287,
+        "probability": 0.18012301623821259,
+        "opened": false
+      },
+      {
+        "node": 288,
+        "probability": 0.2452799528837204,
+        "opened": false
+      },
+      {
+        "node": 289,
+        "probability": 0.023029474541544914,
+        "opened": false
+      },
+      {
+        "node": 290,
+        "probability": 0.17350615561008453,
+        "opened": false
+      },
+      {
+        "node": 291,
+        "probability": 0.09787628799676895,
+        "opened": false
+      },
+      {
+        "node": 292,
+        "probability": 0.156960129737854,
+        "opened": false
+      },
+      {
+        "node": 293,
+        "probability": 0.10216754674911499,
+        "opened": false
+      },
+      {
+        "node": 294,
+        "probability": 0.13058245182037354,
+        "opened": false
+      },
+      {
+        "node": 295,
+        "probability": 0.15082943439483643,
+        "opened": false
+      },
+      {
+        "node": 296,
+        "probability": 0.06736043840646744,
+        "opened": false
+      },
+      {
+        "node": 297,
+        "probability": 0.1485666185617447,
+        "opened": false
+      },
+      {
+        "node": 298,
+        "probability": 0.21302258968353271,
+        "opened": false
+      },
+      {
+        "node": 299,
+        "probability": 0.18539458513259888,
+        "opened": false
+      },
+      {
+        "node": 300,
+        "probability": 0.20616912841796875,
+        "opened": false
+      },
+      {
+        "node": 301,
+        "probability": 0.5795910358428955,
+        "opened": true
+      },
+      {
+        "node": 302,
+        "probability": 0.3198394775390625,
+        "opened": false
+      },
+      {
+        "node": 303,
+        "probability": 0.36629602313041687,
+        "opened": false
+      },
+      {
+        "node": 304,
+        "probability": 0.12757420539855957,
+        "opened": false
+      },
+      {
+        "node": 305,
+        "probability": 0.030084241181612015,
+        "opened": false
+      },
+      {
+        "node": 306,
+        "probability": 0.4252285957336426,
+        "opened": false
+      },
+      {
+        "node": 307,
+        "probability": 0.44810739159584045,
+        "opened": false
+      },
+      {
+        "node": 308,
+        "probability": 0.20894642174243927,
+        "opened": false
+      },
+      {
+        "node": 309,
+        "probability": 0.19561992585659027,
+        "opened": false
+      },
+      {
+        "node": 310,
+        "probability": 0.05610831454396248,
+        "opened": false
+      },
+      {
+        "node": 311,
+        "probability": 0.14663086831569672,
+        "opened": false
+      },
+      {
+        "node": 312,
+        "probability": 0.014798011630773544,
+        "opened": false
+      },
+      {
+        "node": 313,
+        "probability": 0.10838765650987625,
+        "opened": false
+      },
+      {
+        "node": 314,
+        "probability": 0.6981427073478699,
+        "opened": true
+      },
+      {
+        "node": 315,
+        "probability": 0.4094362258911133,
+        "opened": false
+      },
+      {
+        "node": 316,
+        "probability": 0.2990926206111908,
+        "opened": false
+      },
+      {
+        "node": 317,
+        "probability": 0.07883094251155853,
+        "opened": false
+      },
+      {
+        "node": 318,
+        "probability": 0.11136078834533691,
+        "opened": false
+      },
+      {
+        "node": 319,
+        "probability": 0.44484981894493103,
+        "opened": false
+      },
+      {
+        "node": 320,
+        "probability": 0.19244195520877838,
+        "opened": false
+      },
+      {
+        "node": 321,
+        "probability": 0.23615430295467377,
+        "opened": false
+      },
+      {
+        "node": 322,
+        "probability": 0.18139033019542694,
+        "opened": false
+      },
+      {
+        "node": 323,
+        "probability": 0.04942336678504944,
+        "opened": false
+      },
+      {
+        "node": 324,
+        "probability": 0.33233141899108887,
+        "opened": false
+      },
+      {
+        "node": 325,
+        "probability": 0.11553733050823212,
+        "opened": false
+      },
+      {
+        "node": 326,
+        "probability": 0.40058183670043945,
+        "opened": false
+      },
+      {
+        "node": 327,
+        "probability": 0.1534007042646408,
+        "opened": false
+      },
+      {
+        "node": 328,
+        "probability": 0.07261388748884201,
+        "opened": false
+      },
+      {
+        "node": 329,
+        "probability": 0.3659301698207855,
+        "opened": false
+      },
+      {
+        "node": 330,
+        "probability": 0.8198660016059875,
+        "opened": true
+      },
+      {
+        "node": 331,
+        "probability": 0.37017622590065,
+        "opened": false
+      },
+      {
+        "node": 332,
+        "probability": 0.36840513348579407,
+        "opened": false
+      },
+      {
+        "node": 333,
+        "probability": 0.7198253273963928,
+        "opened": true
+      },
+      {
+        "node": 334,
+        "probability": 0.5255506634712219,
+        "opened": true
+      },
+      {
+        "node": 335,
+        "probability": 0.05800324305891991,
+        "opened": false
+      },
+      {
+        "node": 336,
+        "probability": 0.10779120028018951,
+        "opened": false
+      },
+      {
+        "node": 337,
+        "probability": 0.025684162974357605,
+        "opened": false
+      },
+      {
+        "node": 338,
+        "probability": 0.04092239588499069,
+        "opened": false
+      },
+      {
+        "node": 339,
+        "probability": 0.046657297760248184,
+        "opened": false
+      },
+      {
+        "node": 340,
+        "probability": 0.03522046282887459,
+        "opened": false
+      },
+      {
+        "node": 341,
+        "probability": 0.04000382870435715,
+        "opened": false
+      },
+      {
+        "node": 342,
+        "probability": 0.05338149517774582,
+        "opened": false
+      },
+      {
+        "node": 343,
+        "probability": 0.05201476067304611,
+        "opened": false
+      },
+      {
+        "node": 344,
+        "probability": 0.031498346477746964,
+        "opened": false
+      },
+      {
+        "node": 345,
+        "probability": 0.28757503628730774,
+        "opened": false
+      },
+      {
+        "node": 346,
+        "probability": 0.07784590125083923,
+        "opened": false
+      },
+      {
+        "node": 347,
+        "probability": 0.5852448344230652,
+        "opened": true
+      },
+      {
+        "node": 348,
+        "probability": 0.02082042209804058,
+        "opened": false
+      },
+      {
+        "node": 349,
+        "probability": 0.4788941740989685,
+        "opened": false
+      },
+      {
+        "node": 350,
+        "probability": 0.7591424584388733,
+        "opened": true
+      },
+      {
+        "node": 351,
+        "probability": 0.08383189886808395,
+        "opened": false
+      },
+      {
+        "node": 352,
+        "probability": 0.1461358517408371,
+        "opened": false
+      },
+      {
+        "node": 353,
+        "probability": 0.6515294313430786,
+        "opened": true
+      },
+      {
+        "node": 354,
+        "probability": 0.3177996277809143,
+        "opened": false
+      },
+      {
+        "node": 355,
+        "probability": 0.6315786242485046,
+        "opened": true
+      },
+      {
+        "node": 356,
+        "probability": 0.08591526001691818,
+        "opened": false
+      },
+      {
+        "node": 357,
+        "probability": 0.23160144686698914,
+        "opened": false
+      },
+      {
+        "node": 358,
+        "probability": 0.8228197693824768,
+        "opened": true
+      },
+      {
+        "node": 359,
+        "probability": 0.9165698885917664,
+        "opened": true
+      },
+      {
+        "node": 360,
+        "probability": 0.9344356060028076,
+        "opened": true
+      },
+      {
+        "node": 361,
+        "probability": 0.14164598286151886,
+        "opened": false
+      },
+      {
+        "node": 362,
+        "probability": 0.24096161127090454,
+        "opened": false
+      },
+      {
+        "node": 363,
+        "probability": 0.07242734730243683,
+        "opened": false
+      },
+      {
+        "node": 364,
+        "probability": 0.62250155210495,
+        "opened": true
+      },
+      {
+        "node": 365,
+        "probability": 0.2491166889667511,
+        "opened": false
+      },
+      {
+        "node": 366,
+        "probability": 0.37856003642082214,
+        "opened": false
+      },
+      {
+        "node": 367,
+        "probability": 0.1801224946975708,
+        "opened": false
+      },
+      {
+        "node": 368,
+        "probability": 0.30402782559394836,
+        "opened": false
+      },
+      {
+        "node": 369,
+        "probability": 0.7202259302139282,
+        "opened": true
+      },
+      {
+        "node": 370,
+        "probability": 0.1358775496482849,
+        "opened": false
+      },
+      {
+        "node": 371,
+        "probability": 0.3496240973472595,
+        "opened": false
+      },
+      {
+        "node": 372,
+        "probability": 0.0944410189986229,
+        "opened": false
+      },
+      {
+        "node": 373,
+        "probability": 0.07564476877450943,
+        "opened": false
+      },
+      {
+        "node": 374,
+        "probability": 0.6470277905464172,
+        "opened": true
+      },
+      {
+        "node": 375,
+        "probability": 0.19407647848129272,
+        "opened": false
+      },
+      {
+        "node": 376,
+        "probability": 0.7845404744148254,
+        "opened": true
+      },
+      {
+        "node": 377,
+        "probability": 0.19103987514972687,
+        "opened": false
+      },
+      {
+        "node": 378,
+        "probability": 0.14522910118103027,
+        "opened": false
+      },
+      {
+        "node": 379,
+        "probability": 0.33689984679222107,
+        "opened": false
+      },
+      {
+        "node": 380,
+        "probability": 0.10864884406328201,
+        "opened": false
+      },
+      {
+        "node": 381,
+        "probability": 0.07614606618881226,
+        "opened": false
+      },
+      {
+        "node": 382,
+        "probability": 0.025572162121534348,
+        "opened": false
+      },
+      {
+        "node": 383,
+        "probability": 0.04883231595158577,
+        "opened": false
+      },
+      {
+        "node": 384,
+        "probability": 0.04818648099899292,
+        "opened": false
+      },
+      {
+        "node": 385,
+        "probability": 0.4856579303741455,
+        "opened": false
+      },
+      {
+        "node": 386,
+        "probability": 0.0450516939163208,
+        "opened": false
+      },
+      {
+        "node": 387,
+        "probability": 0.49810492992401123,
+        "opened": false
+      },
+      {
+        "node": 388,
+        "probability": 0.0510946623980999,
+        "opened": false
+      },
+      {
+        "node": 389,
+        "probability": 0.03738425299525261,
+        "opened": false
+      },
+      {
+        "node": 390,
+        "probability": 0.1782122105360031,
+        "opened": false
+      },
+      {
+        "node": 391,
+        "probability": 0.00915486179292202,
+        "opened": false
+      },
+      {
+        "node": 392,
+        "probability": 0.23544907569885254,
+        "opened": false
+      },
+      {
+        "node": 393,
+        "probability": 0.07668261975049973,
+        "opened": false
+      },
+      {
+        "node": 394,
+        "probability": 0.20708149671554565,
+        "opened": false
+      },
+      {
+        "node": 395,
+        "probability": 0.16731557250022888,
+        "opened": false
+      },
+      {
+        "node": 396,
+        "probability": 0.5355138182640076,
+        "opened": true
+      },
+      {
+        "node": 397,
+        "probability": 0.33878690004348755,
+        "opened": false
+      },
+      {
+        "node": 398,
+        "probability": 0.11349249631166458,
+        "opened": false
+      },
+      {
+        "node": 399,
+        "probability": 0.45192214846611023,
+        "opened": false
+      },
+      {
+        "node": 400,
+        "probability": 0.21351628005504608,
+        "opened": false
+      },
+      {
+        "node": 401,
+        "probability": 0.6548889875411987,
+        "opened": true
+      },
+      {
+        "node": 402,
+        "probability": 0.43724325299263,
+        "opened": false
+      },
+      {
+        "node": 403,
+        "probability": 0.024894243106245995,
+        "opened": false
+      },
+      {
+        "node": 404,
+        "probability": 0.6065620183944702,
+        "opened": true
+      },
+      {
+        "node": 405,
+        "probability": 0.7045905590057373,
+        "opened": true
+      },
+      {
+        "node": 406,
+        "probability": 0.15175668895244598,
+        "opened": false
+      },
+      {
+        "node": 407,
+        "probability": 0.27917131781578064,
+        "opened": false
+      },
+      {
+        "node": 408,
+        "probability": 0.11322680115699768,
+        "opened": false
+      },
+      {
+        "node": 409,
+        "probability": 0.04335842281579971,
+        "opened": false
+      },
+      {
+        "node": 410,
+        "probability": 0.05910630524158478,
+        "opened": false
+      },
+      {
+        "node": 411,
+        "probability": 0.16130833327770233,
+        "opened": false
+      },
+      {
+        "node": 412,
+        "probability": 0.07193305343389511,
+        "opened": false
+      },
+      {
+        "node": 413,
+        "probability": 0.3168962001800537,
+        "opened": false
+      },
+      {
+        "node": 414,
+        "probability": 0.16541142761707306,
+        "opened": false
+      },
+      {
+        "node": 415,
+        "probability": 0.49859845638275146,
+        "opened": false
+      },
+      {
+        "node": 416,
+        "probability": 0.030752254649996758,
+        "opened": false
+      },
+      {
+        "node": 417,
+        "probability": 0.236410990357399,
+        "opened": false
+      },
+      {
+        "node": 418,
+        "probability": 0.155971959233284,
+        "opened": false
+      },
+      {
+        "node": 419,
+        "probability": 0.31598708033561707,
+        "opened": false
+      },
+      {
+        "node": 420,
+        "probability": 0.5497296452522278,
+        "opened": true
+      },
+      {
+        "node": 421,
+        "probability": 0.2328043133020401,
+        "opened": false
+      },
+      {
+        "node": 422,
+        "probability": 0.3447793424129486,
+        "opened": false
+      },
+      {
+        "node": 423,
+        "probability": 0.17906153202056885,
+        "opened": false
+      },
+      {
+        "node": 424,
+        "probability": 0.02682516537606716,
+        "opened": false
+      },
+      {
+        "node": 425,
+        "probability": 0.15219274163246155,
+        "opened": false
+      },
+      {
+        "node": 426,
+        "probability": 0.21790489554405212,
+        "opened": false
+      },
+      {
+        "node": 427,
+        "probability": 0.24477209150791168,
+        "opened": false
+      },
+      {
+        "node": 428,
+        "probability": 0.2342589795589447,
+        "opened": false
+      },
+      {
+        "node": 429,
+        "probability": 0.6976519227027893,
+        "opened": true
+      },
+      {
+        "node": 430,
+        "probability": 0.43230411410331726,
+        "opened": false
+      },
+      {
+        "node": 431,
+        "probability": 0.04047812148928642,
+        "opened": false
+      },
+      {
+        "node": 432,
+        "probability": 0.5185209512710571,
+        "opened": true
+      },
+      {
+        "node": 433,
+        "probability": 0.01974935084581375,
+        "opened": false
+      },
+      {
+        "node": 434,
+        "probability": 0.042186856269836426,
+        "opened": false
+      },
+      {
+        "node": 435,
+        "probability": 0.11267419159412384,
+        "opened": false
+      },
+      {
+        "node": 436,
+        "probability": 0.014988473616540432,
+        "opened": false
+      },
+      {
+        "node": 437,
+        "probability": 0.042142223566770554,
+        "opened": false
+      },
+      {
+        "node": 438,
+        "probability": 0.5161622762680054,
+        "opened": true
+      },
+      {
+        "node": 439,
+        "probability": 0.02204904519021511,
+        "opened": false
+      },
+      {
+        "node": 440,
+        "probability": 0.0288486760109663,
+        "opened": false
+      },
+      {
+        "node": 441,
+        "probability": 0.2719457745552063,
+        "opened": false
+      },
+      {
+        "node": 442,
+        "probability": 0.22333268821239471,
+        "opened": false
+      },
+      {
+        "node": 443,
+        "probability": 0.662369430065155,
+        "opened": true
+      },
+      {
+        "node": 444,
+        "probability": 0.1823265105485916,
+        "opened": false
+      },
+      {
+        "node": 445,
+        "probability": 0.6618020534515381,
+        "opened": true
+      },
+      {
+        "node": 446,
+        "probability": 0.5492833256721497,
+        "opened": true
+      },
+      {
+        "node": 447,
+        "probability": 0.1274174004793167,
+        "opened": false
+      },
+      {
+        "node": 448,
+        "probability": 0.13101862370967865,
+        "opened": false
+      },
+      {
+        "node": 449,
+        "probability": 0.6560944318771362,
+        "opened": true
+      },
+      {
+        "node": 450,
+        "probability": 0.04699622467160225,
+        "opened": false
+      },
+      {
+        "node": 451,
+        "probability": 0.28790217638015747,
+        "opened": false
+      },
+      {
+        "node": 452,
+        "probability": 0.2514559030532837,
+        "opened": false
+      },
+      {
+        "node": 453,
+        "probability": 0.46298748254776,
+        "opened": false
+      },
+      {
+        "node": 454,
+        "probability": 0.08639167994260788,
+        "opened": false
+      },
+      {
+        "node": 455,
+        "probability": 0.03865465521812439,
+        "opened": false
+      },
+      {
+        "node": 456,
+        "probability": 0.09407934546470642,
+        "opened": false
+      },
+      {
+        "node": 457,
+        "probability": 0.6103797554969788,
+        "opened": true
+      },
+      {
+        "node": 458,
+        "probability": 0.013853995129466057,
+        "opened": false
+      },
+      {
+        "node": 459,
+        "probability": 0.0572848841547966,
+        "opened": false
+      },
+      {
+        "node": 460,
+        "probability": 0.016416678205132484,
+        "opened": false
+      },
+      {
+        "node": 461,
+        "probability": 0.016963422298431396,
+        "opened": false
+      },
+      {
+        "node": 462,
+        "probability": 0.05790424719452858,
+        "opened": false
+      },
+      {
+        "node": 463,
+        "probability": 0.04121857509016991,
+        "opened": false
+      },
+      {
+        "node": 464,
+        "probability": 0.23241616785526276,
+        "opened": false
+      },
+      {
+        "node": 465,
+        "probability": 0.7767183780670166,
+        "opened": true
+      },
+      {
+        "node": 466,
+        "probability": 0.11401275545358658,
+        "opened": false
+      },
+      {
+        "node": 467,
+        "probability": 0.5065844655036926,
+        "opened": true
+      },
+      {
+        "node": 468,
+        "probability": 0.2794205844402313,
+        "opened": false
+      },
+      {
+        "node": 469,
+        "probability": 0.25756093859672546,
+        "opened": false
+      },
+      {
+        "node": 470,
+        "probability": 0.40475472807884216,
+        "opened": false
+      },
+      {
+        "node": 471,
+        "probability": 0.3329949676990509,
+        "opened": false
+      },
+      {
+        "node": 472,
+        "probability": 0.636133074760437,
+        "opened": true
+      },
+      {
+        "node": 473,
+        "probability": 0.12028181552886963,
+        "opened": false
+      },
+      {
+        "node": 474,
+        "probability": 0.07242390513420105,
+        "opened": false
+      },
+      {
+        "node": 475,
+        "probability": 0.6150094866752625,
+        "opened": true
+      },
+      {
+        "node": 476,
+        "probability": 0.008370856754481792,
+        "opened": false
+      },
+      {
+        "node": 477,
+        "probability": 0.014839881099760532,
+        "opened": false
+      },
+      {
+        "node": 478,
+        "probability": 0.17049892246723175,
+        "opened": false
+      },
+      {
+        "node": 479,
+        "probability": 0.1572684347629547,
+        "opened": false
+      },
+      {
+        "node": 480,
+        "probability": 0.07274484634399414,
+        "opened": false
+      },
+      {
+        "node": 481,
+        "probability": 0.01006113737821579,
+        "opened": false
+      },
+      {
+        "node": 482,
+        "probability": 0.9101607799530029,
+        "opened": true
+      },
+      {
+        "node": 483,
+        "probability": 0.02951565943658352,
+        "opened": false
+      },
+      {
+        "node": 484,
+        "probability": 0.06212286278605461,
+        "opened": false
+      },
+      {
+        "node": 485,
+        "probability": 0.2658403515815735,
+        "opened": false
+      },
+      {
+        "node": 486,
+        "probability": 0.011307083070278168,
+        "opened": false
+      },
+      {
+        "node": 487,
+        "probability": 0.7951343655586243,
+        "opened": true
+      },
+      {
+        "node": 488,
+        "probability": 0.052044060081243515,
+        "opened": false
+      },
+      {
+        "node": 489,
+        "probability": 0.2516021132469177,
+        "opened": false
+      },
+      {
+        "node": 490,
+        "probability": 0.03311289846897125,
+        "opened": false
+      },
+      {
+        "node": 491,
+        "probability": 0.13890916109085083,
+        "opened": false
+      },
+      {
+        "node": 492,
+        "probability": 0.10809984803199768,
+        "opened": false
+      },
+      {
+        "node": 493,
+        "probability": 0.014031180180609226,
+        "opened": false
+      },
+      {
+        "node": 494,
+        "probability": 0.03921594098210335,
+        "opened": false
+      },
+      {
+        "node": 495,
+        "probability": 0.45412078499794006,
+        "opened": false
+      },
+      {
+        "node": 496,
+        "probability": 0.686783492565155,
+        "opened": true
+      },
+      {
+        "node": 497,
+        "probability": 0.010130034759640694,
+        "opened": false
+      },
+      {
+        "node": 498,
+        "probability": 0.6636654734611511,
+        "opened": true
+      },
+      {
+        "node": 499,
+        "probability": 0.08574644476175308,
+        "opened": false
+      },
+      {
+        "node": 500,
+        "probability": 0.7145310044288635,
+        "opened": true
+      },
+      {
+        "node": 501,
+        "probability": 0.039514850825071335,
+        "opened": false
+      },
+      {
+        "node": 502,
+        "probability": 0.20417489111423492,
+        "opened": false
+      },
+      {
+        "node": 503,
+        "probability": 0.07252125442028046,
+        "opened": false
+      },
+      {
+        "node": 504,
+        "probability": 0.01265230868011713,
+        "opened": false
+      },
+      {
+        "node": 505,
+        "probability": 0.009177476167678833,
+        "opened": false
+      },
+      {
+        "node": 506,
+        "probability": 0.009117336012423038,
+        "opened": false
+      },
+      {
+        "node": 507,
+        "probability": 0.013993240892887115,
+        "opened": false
+      },
+      {
+        "node": 508,
+        "probability": 0.2772483229637146,
+        "opened": false
+      },
+      {
+        "node": 509,
+        "probability": 0.021539704874157906,
+        "opened": false
+      },
+      {
+        "node": 510,
+        "probability": 0.011596666648983955,
+        "opened": false
+      },
+      {
+        "node": 511,
+        "probability": 0.01533428579568863,
+        "opened": false
+      },
+      {
+        "node": 512,
+        "probability": 0.010005424730479717,
+        "opened": false
+      },
+      {
+        "node": 513,
+        "probability": 0.6887836456298828,
+        "opened": true
+      },
+      {
+        "node": 514,
+        "probability": 0.10876305401325226,
+        "opened": false
+      },
+      {
+        "node": 515,
+        "probability": 0.0655047744512558,
+        "opened": false
+      },
+      {
+        "node": 516,
+        "probability": 0.8988890647888184,
+        "opened": true
+      },
+      {
+        "node": 517,
+        "probability": 0.0120829613879323,
+        "opened": false
+      },
+      {
+        "node": 518,
+        "probability": 0.04124064743518829,
+        "opened": false
+      },
+      {
+        "node": 519,
+        "probability": 0.14630332589149475,
+        "opened": false
+      },
+      {
+        "node": 520,
+        "probability": 0.9255313277244568,
+        "opened": true
+      },
+      {
+        "node": 521,
+        "probability": 0.5897691249847412,
+        "opened": true
+      },
+      {
+        "node": 522,
+        "probability": 0.026734283193945885,
+        "opened": false
+      },
+      {
+        "node": 523,
+        "probability": 0.1680520474910736,
+        "opened": false
+      },
+      {
+        "node": 524,
+        "probability": 0.044085558503866196,
+        "opened": false
+      },
+      {
+        "node": 525,
+        "probability": 0.04884164035320282,
+        "opened": false
+      },
+      {
+        "node": 526,
+        "probability": 0.12553031742572784,
+        "opened": false
+      },
+      {
+        "node": 527,
+        "probability": 0.8161848783493042,
+        "opened": true
+      },
+      {
+        "node": 528,
+        "probability": 0.09740697592496872,
+        "opened": false
+      },
+      {
+        "node": 529,
+        "probability": 0.09106872230768204,
+        "opened": false
+      },
+      {
+        "node": 530,
+        "probability": 0.2173640877008438,
+        "opened": false
+      },
+      {
+        "node": 531,
+        "probability": 0.8619455099105835,
+        "opened": true
+      },
+      {
+        "node": 532,
+        "probability": 0.1166820377111435,
+        "opened": false
+      },
+      {
+        "node": 533,
+        "probability": 0.7995102405548096,
+        "opened": true
+      },
+      {
+        "node": 534,
+        "probability": 0.11506297439336777,
+        "opened": false
+      },
+      {
+        "node": 535,
+        "probability": 0.3727302849292755,
+        "opened": false
+      },
+      {
+        "node": 536,
+        "probability": 0.06723549216985703,
+        "opened": false
+      },
+      {
+        "node": 537,
+        "probability": 0.12428336590528488,
+        "opened": false
+      },
+      {
+        "node": 538,
+        "probability": 0.12948763370513916,
+        "opened": false
+      },
+      {
+        "node": 539,
+        "probability": 0.14820712804794312,
+        "opened": false
+      },
+      {
+        "node": 540,
+        "probability": 0.050236836075782776,
+        "opened": false
+      },
+      {
+        "node": 541,
+        "probability": 0.02448265627026558,
+        "opened": false
+      },
+      {
+        "node": 542,
+        "probability": 0.25196313858032227,
+        "opened": false
+      },
+      {
+        "node": 543,
+        "probability": 0.04140220955014229,
+        "opened": false
+      },
+      {
+        "node": 544,
+        "probability": 0.09483195096254349,
+        "opened": false
+      },
+      {
+        "node": 545,
+        "probability": 0.021865643560886383,
+        "opened": false
+      },
+      {
+        "node": 546,
+        "probability": 0.05594703555107117,
+        "opened": false
+      },
+      {
+        "node": 547,
+        "probability": 0.18005837500095367,
+        "opened": false
+      },
+      {
+        "node": 548,
+        "probability": 0.21616892516613007,
+        "opened": false
+      },
+      {
+        "node": 549,
+        "probability": 0.16925187408924103,
+        "opened": false
+      },
+      {
+        "node": 550,
+        "probability": 0.04104726389050484,
+        "opened": false
+      },
+      {
+        "node": 551,
+        "probability": 0.26899608969688416,
+        "opened": false
+      },
+      {
+        "node": 552,
+        "probability": 0.1417812556028366,
+        "opened": false
+      },
+      {
+        "node": 553,
+        "probability": 0.3120118975639343,
+        "opened": false
+      },
+      {
+        "node": 554,
+        "probability": 0.029951054602861404,
+        "opened": false
+      },
+      {
+        "node": 555,
+        "probability": 0.8596163392066956,
+        "opened": true
+      },
+      {
+        "node": 556,
+        "probability": 0.0663977637887001,
+        "opened": false
+      },
+      {
+        "node": 557,
+        "probability": 0.06878183782100677,
+        "opened": false
+      },
+      {
+        "node": 558,
+        "probability": 0.2002624124288559,
+        "opened": false
+      },
+      {
+        "node": 559,
+        "probability": 0.050264302641153336,
+        "opened": false
+      },
+      {
+        "node": 560,
+        "probability": 0.6397250890731812,
+        "opened": true
+      },
+      {
+        "node": 561,
+        "probability": 0.049294233322143555,
+        "opened": false
+      },
+      {
+        "node": 562,
+        "probability": 0.043262723833322525,
+        "opened": false
+      },
+      {
+        "node": 563,
+        "probability": 0.08918745070695877,
+        "opened": false
+      },
+      {
+        "node": 564,
+        "probability": 0.02210443839430809,
+        "opened": false
+      },
+      {
+        "node": 565,
+        "probability": 0.16885559260845184,
+        "opened": false
+      },
+      {
+        "node": 566,
+        "probability": 0.07123085111379623,
+        "opened": false
+      },
+      {
+        "node": 567,
+        "probability": 0.05731508135795593,
+        "opened": false
+      },
+      {
+        "node": 568,
+        "probability": 0.03035777062177658,
+        "opened": false
+      },
+      {
+        "node": 569,
+        "probability": 0.08286546170711517,
+        "opened": false
+      },
+      {
+        "node": 570,
+        "probability": 0.0947025939822197,
+        "opened": false
+      },
+      {
+        "node": 571,
+        "probability": 0.30280598998069763,
+        "opened": false
+      },
+      {
+        "node": 572,
+        "probability": 0.03816340118646622,
+        "opened": false
+      },
+      {
+        "node": 573,
+        "probability": 0.19405347108840942,
+        "opened": false
+      },
+      {
+        "node": 574,
+        "probability": 0.09584388881921768,
+        "opened": false
+      },
+      {
+        "node": 575,
+        "probability": 0.21403998136520386,
+        "opened": false
+      },
+      {
+        "node": 576,
+        "probability": 0.2012120634317398,
+        "opened": false
+      },
+      {
+        "node": 577,
+        "probability": 0.09742018580436707,
+        "opened": false
+      },
+      {
+        "node": 578,
+        "probability": 0.04601031914353371,
+        "opened": false
+      },
+      {
+        "node": 579,
+        "probability": 0.06772622466087341,
+        "opened": false
+      },
+      {
+        "node": 580,
+        "probability": 0.18662187457084656,
+        "opened": false
+      },
+      {
+        "node": 581,
+        "probability": 0.09447985142469406,
+        "opened": false
+      },
+      {
+        "node": 582,
+        "probability": 0.42395246028900146,
+        "opened": false
+      },
+      {
+        "node": 583,
+        "probability": 0.025213493034243584,
+        "opened": false
+      },
+      {
+        "node": 584,
+        "probability": 0.3933330774307251,
+        "opened": false
+      }
+    ]
+  },
+  "birth_control": {
+    "clone_added": 905,
+    "split_added": 0,
+    "pruned": 905,
+    "source_tracked": true,
+    "retirement": {
+      "rule": "multiview_gain_retirement",
+      "previous_count": 128901,
+      "candidate_count": 905,
+      "birth_count": 0,
+      "rejected_birth_count": 905,
+      "retired_count": 0,
+      "count_tolerance": 0.1,
+      "count_difference": 0,
+      "allowed_count_difference": 0,
+      "retired_older_count": 0,
+      "retired_previous_birth_count": 0,
+      "surviving_count": 128901,
+      "protected_source_count": 0,
+      "contribution_rule": "two_frame_compositing_max",
+      "baseline": {
+        "psnr": 36.858333587646484,
+        "ssim": 0.9714017659425735,
+        "mse": 0.00021502590971067548
+      },
+      "trial_retirements": [
+        815,
+        905,
+        995
+      ],
+      "trial_metrics": [
+        {
+          "psnr": 36.831101417541504,
+          "ssim": 0.9712746292352676,
+          "mse": 0.0002162862292607315
+        },
+        {
+          "psnr": 36.83109951019287,
+          "ssim": 0.9712746441364288,
+          "mse": 0.0002162862874683924
+        },
+        {
+          "psnr": 36.83109951019287,
+          "ssim": 0.9712746292352676,
+          "mse": 0.00021628630565828644
+        }
+      ],
+      "accepted": false,
+      "protected_count": 1154,
+      "protected_recent_births": 947,
+      "min_gain_db": 0.005,
+      "max_ssim_drop": 0.0001,
+      "validation_cameras": [
+        "cam04.png",
+        "cam08.png",
+        "cam12.png",
+        "cam16.png"
+      ]
+    },
+    "previous_birth_count": 947,
+    "motion_frustum_samples": 32197479,
+    "motion_observed_samples": 31341936,
+    "tree_edit_count": 276,
+    "multiview_proposal": {
+      "proposed_rays": 1536,
+      "tested_depths": 13824,
+      "supported_rays": 905,
+      "accepted": 905,
+      "mean_support": 6.1303863525390625,
+      "mean_visible": 8.70165729522705,
+      "mean_depth_offset_extent": 0.01964640736579895
+    },
+    "prune_reasons": {
+      "low_opacity": 0,
+      "screen_size": 0,
+      "world_size": 0,
+      "multiple": 0
+    },
+    "birth_admission": {
+      "contribution_rule": "two_frame_compositing_max",
+      "baseline": {
+        "psnr": 36.858333587646484,
+        "ssim": 0.9714017659425735,
+        "mse": 0.00021502590971067548
+      },
+      "trial_retirements": [
+        815,
+        905,
+        995
+      ],
+      "trial_metrics": [
+        {
+          "psnr": 36.831101417541504,
+          "ssim": 0.9712746292352676,
+          "mse": 0.0002162862292607315
+        },
+        {
+          "psnr": 36.83109951019287,
+          "ssim": 0.9712746441364288,
+          "mse": 0.0002162862874683924
+        },
+        {
+          "psnr": 36.83109951019287,
+          "ssim": 0.9712746292352676,
+          "mse": 0.00021628630565828644
+        }
+      ],
+      "accepted": false,
+      "protected_count": 1154,
+      "protected_recent_births": 947,
+      "min_gain_db": 0.005,
+      "max_ssim_drop": 0.0001,
+      "validation_cameras": [
+        "cam04.png",
+        "cam08.png",
+        "cam12.png",
+        "cam16.png"
+      ]
+    },
+    "replacement_committed": true,
+    "fixed_pool_refit": true,
+    "refit_active": false
+  },
+  "semantics": "Spatial gate motion and quantized births; shared first frame counted once. Previous-row deletions are encoded in motion; optional quantized old-opacity deltas; old scale and higher-order SH fixed.",
+  "evaluation": {
+    "test": {
+      "l1": 0.0145352091640234,
+      "psnr": 34.33668518066406,
+      "ssim": 0.9692679047584534,
+      "lpips": 0.12084690481424332
+    }
+  },
+  "final_train_metrics": {
+    "image_loss": 0.000226887539611198,
+    "motion_image_factor": 1.0,
+    "psnr": 36.942142486572266,
+    "gs": 128901
+  },
+  "render_timing": {
+    "warmup_renders": 10,
+    "timed_renders": 50,
+    "render_seconds": 0.16579413900035433,
+    "render_fps": 301.5788151587985,
+    "fps_notice": "FPS\u4ec5\u4f9b\u53c2\u8003",
+    "frame": 10,
+    "camera": "cam00.png",
+    "image_size": [
+      1345,
+      1008
+    ],
+    "device": "cuda:0"
+  },
+  "mean_train_loss": 0.008774044095383337,
+  "train_loss_steps": 300,
+  "elapsed_seconds": 29.19400483701611,
+  "checkpoint": null,
+  "timing": {
+    "version": 2,
+    "phases": {
+      "preparation": 0.08774383200216107,
+      "motion": 14.673765017767437,
+      "model_setup": 0.06863912899279967,
+      "data_loading": 0.2514126687310636,
+      "diagnostics": 0.009968279977329075,
+      "stage_evaluation": 0.23575739600346424,
+      "birth": 7.77303069041227,
+      "refit": 2.9057288481271826,
+      "encoding": 0.7582839230017271,
+      "validation": 2.4296687800087966,
+      "bookkeeping": 0.00011031099711544812
+    },
+    "training_seconds": 25.35252455630689,
+    "optimization_seconds": 25.35252455630689,
+    "preparation_seconds": 0.15638296099496074,
+    "data_loading_seconds": 0.2514126687310636,
+    "encoding_seconds": 0.7582839230017271,
+    "diagnostics_seconds": 0.009968279977329075,
+    "training_loop_seconds": 26.52857238901197,
+    "evaluation_seconds": 2.665426176012261,
+    "checkpoint_seconds": 0.0,
+    "bookkeeping_seconds": 0.00011031099711544812,
+    "frame_wall_seconds": 29.194108876021346,
+    "scope": "Synchronized wall time. Training is model forward/backward, optimizer updates and training regularization/quantization. Frame setup, image loading/transfers, final stream encoding, progress diagnostics, heldout renders, validation and checkpoint writes are separate. Offline video/COLMAP preprocessing is outside this timer. Frame wall time ends before the summary JSON write and final log."
+  },
+  "training_seconds": 25.35252455630689,
+  "optimization_seconds": 25.35252455630689,
+  "evaluation_seconds": 2.665426176012261,
+  "checkpoint_seconds": 0.0,
+  "frame_wall_seconds": 29.194108876021346,
+  "preparation_seconds": 0.15638296099496074,
+  "data_loading_seconds": 0.2514126687310636,
+  "encoding_seconds": 0.7582839230017271,
+  "diagnostics_seconds": 0.009968279977329075,
+  "training_loop_seconds": 26.52857238901197
+}

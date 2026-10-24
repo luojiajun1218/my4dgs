@@ -1,0 +1,52 @@
+{
+  "run_dir": "/tmp/my4dgs_multiview_frame001_cyni054q/output/native_frame001_multiview/20261024T001539_4cdcb9",
+  "source_checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv/flame_steak_1020/frame0.pth",
+  "source_checkpoint_sha256": "fc1c7822198f265b0c0641671411b4d952b4cbc53fa25ff748fc0dbb1c1f534f",
+  "source_checkpoint_unchanged": true,
+  "native_count": 132586,
+  "retained_initial_count": 128963,
+  "stages": [
+    {
+      "step": 180,
+      "phase": "hard_spatial_motion_old_only",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0001/cam00.png",
+      "mse": 0.00038792137638665736,
+      "psnr": 34.130470275878906,
+      "old_only": true,
+      "gaussian_count": 128963,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 260,
+      "phase": "after_balanced_replacement_before_refit",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0001/cam00.png",
+      "mse": 0.00038792137638665736,
+      "psnr": 34.130470275878906,
+      "old_only": false,
+      "gaussian_count": 128963,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 300,
+      "phase": "final_decoded_with_birth",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0001/cam00.png",
+      "mse": 0.00038792137638665736,
+      "psnr": 34.130470275878906,
+      "old_only": false,
+      "gaussian_count": 128963,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    }
+  ],
+  "decoded_fields_bit_exact": {
+    "xyz": true,
+    "rotation": true,
+    "logscale": true,
+    "opacity": true,
+    "sh_dc": true,
+    "sh_rest": true
+  },
+  "scope": "Published recipe, native frame0 bootstrap and one dynamic frame001; no full300 run."
+}

@@ -1,0 +1,1354 @@
+{
+  "scope": "Short independent saved-frame prototypes, not sequential runs or codec/storage validation.",
+  "frames": [
+    1,
+    149,
+    299
+  ],
+  "script": "scripts/probe_birth_revision.py",
+  "results": {
+    "paired_refresh_single_view": [
+      {
+        "frame": 1,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 36.73568859100342,
+            "photo": 0.013476297166198492
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 36.73568916320801,
+            "photo": 0.013476297678425907
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 36.682953643798825,
+              "photo": 0.013597092311829328
+            },
+            "test": {
+              "psnr": 33.65880584716797,
+              "photo": 0.01859479397535324
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 36.77764530181885,
+              "photo": 0.013406060310080648
+            },
+            "test": {
+              "psnr": 33.83522415161133,
+              "photo": 0.018310923129320145
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.78826847076416,
+              "photo": 0.013392688613384962
+            },
+            "test": {
+              "psnr": 33.93055725097656,
+              "photo": 0.01811365783214569
+            }
+          }
+        },
+        "wall_seconds": 6.262802462995751,
+        "scope": "Fixed step-180 input; training-only selection, 120 single-view iterations. No codec or full sequence."
+      },
+      {
+        "frame": 149,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 35.26274528503418,
+            "photo": 0.015813689725473524
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 35.26274471282959,
+            "photo": 0.0158136913087219
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 35.19658117294311,
+              "photo": 0.01595916775986552
+            },
+            "test": {
+              "psnr": 34.53690719604492,
+              "photo": 0.017200244590640068
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 35.32074108123779,
+              "photo": 0.015689547499641777
+            },
+            "test": {
+              "psnr": 34.707332611083984,
+              "photo": 0.016937004402279854
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.331921863555905,
+              "photo": 0.01567155448719859
+            },
+            "test": {
+              "psnr": 34.781761169433594,
+              "photo": 0.016808684915304184
+            }
+          }
+        },
+        "wall_seconds": 5.516078774002381,
+        "scope": "Fixed step-180 input; training-only selection, 120 single-view iterations. No codec or full sequence."
+      },
+      {
+        "frame": 299,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605951458214
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605672061445
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 34.79108381271362,
+              "photo": 0.016850695852190255
+            },
+            "test": {
+              "psnr": 34.118247985839844,
+              "photo": 0.018100837245583534
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 34.953661155700686,
+              "photo": 0.016526142368093133
+            },
+            "test": {
+              "psnr": 34.48505401611328,
+              "photo": 0.01763591542840004
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.968513298034665,
+              "photo": 0.016500188410282134
+            },
+            "test": {
+              "psnr": 34.676849365234375,
+              "photo": 0.017298154532909393
+            }
+          }
+        },
+        "wall_seconds": 5.459081862994935,
+        "scope": "Fixed step-180 input; training-only selection, 120 single-view iterations. No codec or full sequence."
+      }
+    ],
+    "paired_refresh_multi_view": [
+      {
+        "frame": 1,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 36.73568859100342,
+            "photo": 0.013476297166198492
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 36.73568916320801,
+            "photo": 0.013476297678425907
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 36.773622608184816,
+              "photo": 0.013411622494459152
+            },
+            "test": {
+              "psnr": 33.88298416137695,
+              "photo": 0.018194133415818214
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 36.7837947845459,
+              "photo": 0.013394066458567977
+            },
+            "test": {
+              "psnr": 33.9207763671875,
+              "photo": 0.018128400668501854
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.78589496612549,
+              "photo": 0.013390687806531788
+            },
+            "test": {
+              "psnr": 33.91997528076172,
+              "photo": 0.018129151314496994
+            }
+          }
+        },
+        "wall_seconds": 16.332809504005127,
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC/xyz/scale/alpha fit; higher SH fixed. Conservative rates. No codec or full sequence."
+      },
+      {
+        "frame": 149,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 35.26274528503418,
+            "photo": 0.015813689725473524
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 35.26274471282959,
+            "photo": 0.0158136913087219
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 35.28967132568359,
+              "photo": 0.015759010845795274
+            },
+            "test": {
+              "psnr": 34.75410461425781,
+              "photo": 0.016844799742102623
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 35.31242275238037,
+              "photo": 0.015708942851051688
+            },
+            "test": {
+              "psnr": 34.789283752441406,
+              "photo": 0.016789566725492477
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.317345428466794,
+              "photo": 0.0156981997191906
+            },
+            "test": {
+              "psnr": 34.77231979370117,
+              "photo": 0.016818134114146233
+            }
+          }
+        },
+        "wall_seconds": 15.360836114996346,
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC/xyz/scale/alpha fit; higher SH fixed. Conservative rates. No codec or full sequence."
+      },
+      {
+        "frame": 299,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605951458214
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605672061445
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 34.891128635406496,
+              "photo": 0.0166444496717304
+            },
+            "test": {
+              "psnr": 34.557106018066406,
+              "photo": 0.01746467873454094
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 34.927635955810544,
+              "photo": 0.016573008568957447
+            },
+            "test": {
+              "psnr": 34.60890197753906,
+              "photo": 0.017401520162820816
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.936878299713136,
+              "photo": 0.016555412905290723
+            },
+            "test": {
+              "psnr": 34.60154724121094,
+              "photo": 0.01741534098982811
+            }
+          }
+        },
+        "wall_seconds": 15.240015803981805,
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC/xyz/scale/alpha fit; higher SH fixed. Conservative rates. No codec or full sequence."
+      }
+    ],
+    "paired_refresh_dc_only": [
+      {
+        "frame": 1,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 36.73568859100342,
+            "photo": 0.013476297166198492
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 36.73568916320801,
+            "photo": 0.013476297678425907
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 36.76270179748535,
+              "photo": 0.013432346656918526
+            },
+            "test": {
+              "psnr": 34.05710983276367,
+              "photo": 0.017893023788928986
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 36.77132511138916,
+              "photo": 0.013416047068312764
+            },
+            "test": {
+              "psnr": 34.01929473876953,
+              "photo": 0.017960824072360992
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.77267599105835,
+              "photo": 0.01341361370868981
+            },
+            "test": {
+              "psnr": 34.009559631347656,
+              "photo": 0.017976172268390656
+            }
+          }
+        },
+        "wall_seconds": 16.070846104994416,
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC-only fit; geometry, higher SH and alpha fixed. No codec or full sequence."
+      },
+      {
+        "frame": 149,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 35.26274528503418,
+            "photo": 0.015813689725473524
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 35.26274471282959,
+            "photo": 0.0158136913087219
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 35.28479690551758,
+              "photo": 0.015769818564876914
+            },
+            "test": {
+              "psnr": 34.74153137207031,
+              "photo": 0.016871001571416855
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 35.2989164352417,
+              "photo": 0.015739437798038124
+            },
+            "test": {
+              "psnr": 34.748714447021484,
+              "photo": 0.01686170883476734
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.301499366760254,
+              "photo": 0.015733675565570593
+            },
+            "test": {
+              "psnr": 34.743553161621094,
+              "photo": 0.01687118597328663
+            }
+          }
+        },
+        "wall_seconds": 15.20426999402116,
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC-only fit; geometry, higher SH and alpha fixed. No codec or full sequence."
+      },
+      {
+        "frame": 299,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605951458214
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605672061445
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 34.88057098388672,
+              "photo": 0.016665119538083674
+            },
+            "test": {
+              "psnr": 34.55793380737305,
+              "photo": 0.017467932775616646
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 34.90704469680786,
+              "photo": 0.01661792485974729
+            },
+            "test": {
+              "psnr": 34.58293914794922,
+              "photo": 0.017438340932130814
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.91221370697021,
+              "photo": 0.016609089402481913
+            },
+            "test": {
+              "psnr": 34.58323287963867,
+              "photo": 0.017441822215914726
+            }
+          }
+        },
+        "wall_seconds": 15.180369676003465,
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC-only fit; geometry, higher SH and alpha fixed. No codec or full sequence."
+      }
+    ],
+    "paired_refresh_temporal_target": [
+      {
+        "frame": 1,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 36.73568859100342,
+            "photo": 0.013476297166198492
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 36.73568916320801,
+            "photo": 0.013476297771558166
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 36.66770677566528,
+              "photo": 0.013626130810007454
+            },
+            "test": {
+              "psnr": 33.59606170654297,
+              "photo": 0.018742989748716354
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 36.661337566375735,
+              "photo": 0.013633995270356535
+            },
+            "test": {
+              "psnr": 33.660804748535156,
+              "photo": 0.018636392429471016
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.662063694000246,
+              "photo": 0.013632490439340473
+            },
+            "test": {
+              "psnr": 33.682647705078125,
+              "photo": 0.01859712414443493
+            }
+          }
+        },
+        "wall_seconds": 17.46279365400551,
+        "target": "R_previous + GT_current - GT_previous, clamped; training only",
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC/xyz/scale/alpha fit; higher SH fixed. Conservative rates. No codec or full sequence."
+      },
+      {
+        "frame": 149,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 35.26274528503418,
+            "photo": 0.015813689725473524
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 35.26274490356445,
+            "photo": 0.015813691075891256
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 35.261968803405765,
+              "photo": 0.0158265539444983
+            },
+            "test": {
+              "psnr": 34.80350875854492,
+              "photo": 0.016762670129537582
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 35.26455230712891,
+              "photo": 0.015820615319535138
+            },
+            "test": {
+              "psnr": 34.76673889160156,
+              "photo": 0.016824739053845406
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.264332389831544,
+              "photo": 0.015820910409092902
+            },
+            "test": {
+              "psnr": 34.76165008544922,
+              "photo": 0.016832608729600906
+            }
+          }
+        },
+        "wall_seconds": 16.280038197000977,
+        "target": "R_previous + GT_current - GT_previous, clamped; training only",
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC/xyz/scale/alpha fit; higher SH fixed. Conservative rates. No codec or full sequence."
+      },
+      {
+        "frame": 299,
+        "refreshed_gs": 1024,
+        "baseline": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605951458214
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605672061445
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "stages": {
+          "20": {
+            "train": {
+              "psnr": 34.85305433273315,
+              "photo": 0.016729382146149874
+            },
+            "test": {
+              "psnr": 34.42449188232422,
+              "photo": 0.017709268257021904
+            }
+          },
+          "80": {
+            "train": {
+              "psnr": 34.860115718841556,
+              "photo": 0.016724185040220618
+            },
+            "test": {
+              "psnr": 34.443851470947266,
+              "photo": 0.017680393531918526
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.860811710357666,
+              "photo": 0.016724717617034913
+            },
+            "test": {
+              "psnr": 34.44000244140625,
+              "photo": 0.017684776335954666
+            }
+          }
+        },
+        "wall_seconds": 16.757196474005468,
+        "target": "R_previous + GT_current - GT_previous, clamped; training only",
+        "scope": "Fixed step-180 input; training-only selection, 120 four-view iterations, DC/xyz/scale/alpha fit; higher SH fixed. Conservative rates. No codec or full sequence."
+      }
+    ],
+    "pixel_birth_source_scale": [
+      {
+        "frame": 1,
+        "new_count": 1040,
+        "retired_count": 936,
+        "accepted_by_training_loss": false,
+        "baseline": {
+          "train": {
+            "psnr": 36.73568859100342,
+            "photo": 0.013476297166198492
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 33.52511405944824,
+            "photo": 0.0168366433121264
+          },
+          "test": {
+            "psnr": 31.07608413696289,
+            "photo": 0.02225605770945549
+          }
+        },
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 36.63607597351074,
+              "photo": 0.013656658492982388
+            },
+            "test": {
+              "psnr": 33.935813903808594,
+              "photo": 0.018084093928337097
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.67332859039307,
+              "photo": 0.013604988111183047
+            },
+            "test": {
+              "psnr": 33.9971923828125,
+              "photo": 0.017987459897994995
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 36.67332859039307,
+            "photo": 0.01360498769208789
+          },
+          "test": {
+            "psnr": 33.9971923828125,
+            "photo": 0.017987459897994995
+          }
+        },
+        "wall_seconds": 15.513724293006817,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning, 120 x 4 views, all newborns kept; no codec or full sequence."
+      },
+      {
+        "frame": 149,
+        "new_count": 1040,
+        "retired_count": 936,
+        "accepted_by_training_loss": false,
+        "baseline": {
+          "train": {
+            "psnr": 35.26274528503418,
+            "photo": 0.015813689725473524
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 33.42011756896973,
+            "photo": 0.018258694931864737
+          },
+          "test": {
+            "psnr": 32.77387237548828,
+            "photo": 0.019632749259471893
+          }
+        },
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 35.26194086074829,
+              "photo": 0.015918362559750675
+            },
+            "test": {
+              "psnr": 34.633052825927734,
+              "photo": 0.01702886074781418
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.28405628204346,
+              "photo": 0.01588055593892932
+            },
+            "test": {
+              "psnr": 34.653099060058594,
+              "photo": 0.016980739310383797
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 35.28405628204346,
+            "photo": 0.01588055589236319
+          },
+          "test": {
+            "psnr": 34.653099060058594,
+            "photo": 0.016980739310383797
+          }
+        },
+        "wall_seconds": 14.557074648007983,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning, 120 x 4 views, all newborns kept; no codec or full sequence."
+      },
+      {
+        "frame": 299,
+        "new_count": 1038,
+        "retired_count": 935,
+        "accepted_by_training_loss": true,
+        "baseline": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605951458214
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 33.77827291488647,
+            "photo": 0.018080687522888182
+          },
+          "test": {
+            "psnr": 33.34309387207031,
+            "photo": 0.019055122509598732
+          }
+        },
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 34.90175590515137,
+              "photo": 0.016728332592174412
+            },
+            "test": {
+              "psnr": 34.50090026855469,
+              "photo": 0.017560351639986038
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.91752338409424,
+              "photo": 0.016699844785034657
+            },
+            "test": {
+              "psnr": 34.520320892333984,
+              "photo": 0.017523251473903656
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 34.91752338409424,
+            "photo": 0.01669984422624111
+          },
+          "test": {
+            "psnr": 34.520320892333984,
+            "photo": 0.017523251473903656
+          }
+        },
+        "wall_seconds": 14.218262971000513,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning, 120 x 4 views, all newborns kept; no codec or full sequence."
+      }
+    ],
+    "pixel_birth_two_pixel_scale": [
+      {
+        "frame": 1,
+        "new_count": 1040,
+        "retired_count": 936,
+        "accepted_by_training_loss": true,
+        "baseline": {
+          "train": {
+            "psnr": 36.73568859100342,
+            "photo": 0.013476297166198492
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 36.728705978393556,
+            "photo": 0.013543331995606422
+          },
+          "test": {
+            "psnr": 34.23507308959961,
+            "photo": 0.01763082481920719
+          }
+        },
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 36.75002279281616,
+              "photo": 0.01347487629391253
+            },
+            "test": {
+              "psnr": 34.24212646484375,
+              "photo": 0.01757301390171051
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.751206398010254,
+              "photo": 0.01347313355654478
+            },
+            "test": {
+              "psnr": 34.24158477783203,
+              "photo": 0.01757236011326313
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 36.751206398010254,
+            "photo": 0.01347313355654478
+          },
+          "test": {
+            "psnr": 34.24158477783203,
+            "photo": 0.01757236011326313
+          }
+        },
+        "wall_seconds": 15.443071512010647,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning with two-pixel scale cap, 120 x 4 views, all newborns kept; no codec or full sequence."
+      },
+      {
+        "frame": 149,
+        "new_count": 1040,
+        "retired_count": 1144,
+        "accepted_by_training_loss": true,
+        "baseline": {
+          "train": {
+            "psnr": 35.26274528503418,
+            "photo": 0.015813689725473524
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 35.27311735153198,
+            "photo": 0.015884897811338304
+          },
+          "test": {
+            "psnr": 34.74479293823242,
+            "photo": 0.016903968527913094
+          }
+        },
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 35.31017017364502,
+              "photo": 0.01580291809514165
+            },
+            "test": {
+              "psnr": 34.75531768798828,
+              "photo": 0.016821645200252533
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.31462078094482,
+              "photo": 0.015799919422715903
+            },
+            "test": {
+              "psnr": 34.75209045410156,
+              "photo": 0.016820713877677917
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 35.314620399475096,
+            "photo": 0.015799920167773963
+          },
+          "test": {
+            "psnr": 34.75209045410156,
+            "photo": 0.016820713877677917
+          }
+        },
+        "wall_seconds": 14.508864698989782,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning with two-pixel scale cap, 120 x 4 views, all newborns kept; no codec or full sequence."
+      },
+      {
+        "frame": 299,
+        "new_count": 1038,
+        "retired_count": 1141,
+        "accepted_by_training_loss": true,
+        "baseline": {
+          "train": {
+            "psnr": 34.84897394180298,
+            "photo": 0.016724605951458214
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 34.85368127822876,
+            "photo": 0.016796983126550914
+          },
+          "test": {
+            "psnr": 34.52833557128906,
+            "photo": 0.017560435459017754
+          }
+        },
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 34.90754871368408,
+              "photo": 0.016700789518654346
+            },
+            "test": {
+              "psnr": 34.56849670410156,
+              "photo": 0.01747092232108116
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.91383533477783,
+              "photo": 0.016695311944931745
+            },
+            "test": {
+              "psnr": 34.57115173339844,
+              "photo": 0.017466528341174126
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 34.91383533477783,
+            "photo": 0.01669531250372529
+          },
+          "test": {
+            "psnr": 34.57115173339844,
+            "photo": 0.017466528341174126
+          }
+        },
+        "wall_seconds": 14.245471359987278,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning with two-pixel scale cap, 120 x 4 views, all newborns kept; no codec or full sequence."
+      }
+    ],
+    "pixel_birth_validation": [
+      {
+        "frame": 1,
+        "new_count": 832,
+        "retired_count": 749,
+        "baseline": {
+          "train": {
+            "psnr": 36.62374687194824,
+            "photo": 0.013651713030412793
+          },
+          "validation": {
+            "psnr": 37.18345546722412,
+            "photo": 0.012774633709341288
+          },
+          "test": {
+            "psnr": 34.245914459228516,
+            "photo": 0.017562557011842728
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 36.61987662315369,
+            "photo": 0.013704981945920736
+          },
+          "validation": {
+            "psnr": 37.16584873199463,
+            "photo": 0.01284264330752194
+          },
+          "test": {
+            "psnr": 34.237571716308594,
+            "photo": 0.017619609832763672
+          }
+        },
+        "validation_camera_names": [
+          "cam04.png",
+          "cam08.png",
+          "cam12.png",
+          "cam16.png"
+        ],
+        "minimum_relative_validation_gain": 0.001,
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 36.638203144073486,
+              "photo": 0.013649087399244308
+            },
+            "validation": {
+              "psnr": 37.18624973297119,
+              "photo": 0.012780965538695455
+            },
+            "test": {
+              "psnr": 34.24440383911133,
+              "photo": 0.017570126801729202
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 36.639655113220215,
+              "photo": 0.013647486048284918
+            },
+            "validation": {
+              "psnr": 37.18610382080078,
+              "photo": 0.012780649121850729
+            },
+            "test": {
+              "psnr": 34.24358367919922,
+              "photo": 0.01756977289915085
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 36.639655113220215,
+            "photo": 0.013647486048284918
+          },
+          "validation": {
+            "psnr": 37.18464660644531,
+            "photo": 0.01278204657137394
+          },
+          "test": {
+            "psnr": 34.24358367919922,
+            "photo": 0.01756977289915085
+          }
+        },
+        "wall_seconds": 15.115806460991735,
+        "committed_test_psnr": 34.245914459228516,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning with two-pixel scale cap, 120 x 4 views, 16 fit / 4 validation cameras; all newborns kept; no codec or full sequence.",
+        "accepted_by_validation_loss": false,
+        "committed_new_count": 0,
+        "committed_retired_count": 0
+      },
+      {
+        "frame": 149,
+        "new_count": 832,
+        "retired_count": 749,
+        "baseline": {
+          "train": {
+            "psnr": 35.13190746307373,
+            "photo": 0.016086964693386108
+          },
+          "validation": {
+            "psnr": 35.78609657287598,
+            "photo": 0.014720589853823185
+          },
+          "test": {
+            "psnr": 34.76383590698242,
+            "photo": 0.01681644842028618
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 35.143099784851074,
+            "photo": 0.016145789937581867
+          },
+          "validation": {
+            "psnr": 35.77587699890137,
+            "photo": 0.014797416049987078
+          },
+          "test": {
+            "psnr": 34.746009826660156,
+            "photo": 0.016892747953534126
+          }
+        },
+        "validation_camera_names": [
+          "cam04.png",
+          "cam08.png",
+          "cam12.png",
+          "cam16.png"
+        ],
+        "minimum_relative_validation_gain": 0.001,
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 35.176389336586,
+              "photo": 0.016075164603535086
+            },
+            "validation": {
+              "psnr": 35.81317138671875,
+              "photo": 0.014721974963322282
+            },
+            "test": {
+              "psnr": 34.76002883911133,
+              "photo": 0.016820356249809265
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 35.18150210380554,
+              "photo": 0.01607239607255906
+            },
+            "validation": {
+              "psnr": 35.81641674041748,
+              "photo": 0.01472075842320919
+            },
+            "test": {
+              "psnr": 34.756141662597656,
+              "photo": 0.016820237040519714
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 35.18150210380554,
+            "photo": 0.016072394675575197
+          },
+          "validation": {
+            "psnr": 35.81599426269531,
+            "photo": 0.014721473213285208
+          },
+          "test": {
+            "psnr": 34.756141662597656,
+            "photo": 0.016820237040519714
+          }
+        },
+        "wall_seconds": 14.122866644000169,
+        "committed_test_psnr": 34.76383590698242,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning with two-pixel scale cap, 120 x 4 views, 16 fit / 4 validation cameras; all newborns kept; no codec or full sequence.",
+        "accepted_by_validation_loss": false,
+        "committed_new_count": 0,
+        "committed_retired_count": 0
+      },
+      {
+        "frame": 299,
+        "new_count": 831,
+        "retired_count": 831,
+        "baseline": {
+          "train": {
+            "psnr": 34.725705742836,
+            "photo": 0.01700613653520122
+          },
+          "validation": {
+            "psnr": 35.3420467376709,
+            "photo": 0.015598483616486192
+          },
+          "test": {
+            "psnr": 34.549949645996094,
+            "photo": 0.017482932657003403
+          }
+        },
+        "initial": {
+          "train": {
+            "psnr": 34.73238730430603,
+            "photo": 0.01706501847365871
+          },
+          "validation": {
+            "psnr": 35.346961975097656,
+            "photo": 0.01566384290345013
+          },
+          "test": {
+            "psnr": 34.53218460083008,
+            "photo": 0.01754736341536045
+          }
+        },
+        "validation_camera_names": [
+          "cam04.png",
+          "cam08.png",
+          "cam12.png",
+          "cam16.png"
+        ],
+        "minimum_relative_validation_gain": 0.001,
+        "stages": {
+          "80": {
+            "train": {
+              "psnr": 34.775285959243774,
+              "photo": 0.016984636371489614
+            },
+            "validation": {
+              "psnr": 35.398390769958496,
+              "photo": 0.015582478605210781
+            },
+            "test": {
+              "psnr": 34.55365753173828,
+              "photo": 0.01747795008122921
+            }
+          },
+          "120": {
+            "train": {
+              "psnr": 34.78122162818909,
+              "photo": 0.016979840816929936
+            },
+            "validation": {
+              "psnr": 35.40474319458008,
+              "photo": 0.015578757505863905
+            },
+            "test": {
+              "psnr": 34.55529022216797,
+              "photo": 0.01747480034828186
+            }
+          }
+        },
+        "retirement_trial": {
+          "train": {
+            "psnr": 34.78122162818909,
+            "photo": 0.016979840002022684
+          },
+          "validation": {
+            "psnr": 35.4033088684082,
+            "photo": 0.01558015146292746
+          },
+          "test": {
+            "psnr": 34.55529022216797,
+            "photo": 0.01747480034828186
+          }
+        },
+        "wall_seconds": 14.013218618987594,
+        "committed_test_psnr": 34.55529022216797,
+        "scope": "Prototype only: fixed motion, pixel-depth spawning with two-pixel scale cap, 120 x 4 views, 16 fit / 4 validation cameras; all newborns kept; no codec or full sequence.",
+        "accepted_by_validation_loss": true,
+        "committed_new_count": 831,
+        "committed_retired_count": 831
+      }
+    ]
+  }
+}

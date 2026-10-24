@@ -1,0 +1,12 @@
+{
+  "verified_dynamic_frames": 299,
+  "initial_gs": 128963,
+  "final_gs": 136672,
+  "final_frame0_survivors": 112021,
+  "final_newborn_survivors": 24651,
+  "total_dynamic_bytes": 11722504,
+  "all_raw_and_motion_hashes_verified": true,
+  "deleted_at_age1_including_reference": 43915,
+  "newborns_deleted_in_next_frame": 43719,
+  "newborns_with_next_frame_observation": 81828
+}

@@ -1,4 +1,4 @@
-"""Constant-size birth competition, fixed-pool refit and exact stream resume."""
+"""Birth-driven retirement, legacy competition, fixed-pool refit and replay."""
 import copy
 import json
 from pathlib import Path
@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import tempfile
 import sys
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from pipeline.module import (BirthConfig, GaussianConfig, Module, ModuleConfig,
-                             balanced_replacement_rows)
+                             balanced_replacement_rows, birth_driven_retirement_rows)
 from pipeline.model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     QuantizedNewGaussianView, model_raw)
 from pipeline.model.gaussian import GaussianModel, BirthGaussianModel
@@ -124,6 +125,46 @@ class BalancedSelectionTests(unittest.TestCase):
                         replacement_policy='balanced_current_births').validate(200)
 
 
+class BirthDrivenRetirementTests(unittest.TestCase):
+    def test_same_birth_count_can_retire_below_equal_or_above_it(self):
+        for natural, expected in ((0, 90), (97, 97), (100, 100), (150, 110)):
+            with self.subTest(natural=natural):
+                alpha = torch.full((500,), .5)
+                alpha[:natural] = .001
+                sources = torch.full((100,), 499, dtype=torch.long)
+                rows, info = birth_driven_retirement_rows(alpha, sources,
+                    count_tolerance=.1, opacity_threshold=.01)
+                self.assertEqual(500 - len(rows), expected)
+                self.assertEqual(info['natural_retirements'], natural)
+                self.assertEqual((info['min_retirements'], info['max_retirements']), (90, 110))
+                self.assertIn(499, rows.tolist())
+
+    def test_zero_births_and_integer_bounds(self):
+        for births in (0, 1, 9, 10):
+            alpha = torch.full((50,), .5)
+            rows, info = birth_driven_retirement_rows(alpha,
+                torch.full((births,), 49, dtype=torch.long),
+                count_tolerance=.1, opacity_threshold=.01)
+            expected = births - int(.1 * births)
+            self.assertEqual(50 - len(rows), expected)
+            self.assertEqual(info['min_retirements'], expected)
+
+    def test_impossible_source_capacity_raises_instead_of_discarding_births(self):
+        sources = torch.tensor([0, 1])
+        with self.assertRaisesRegex(ValueError, 'No admitted births have been discarded'):
+            birth_driven_retirement_rows(torch.tensor([.1, .2]), sources,
+                count_tolerance=.1, opacity_threshold=.01)
+        self.assertEqual(sources.tolist(), [0, 1])
+
+    def test_natural_count_excludes_sources_and_ties_retire_oldest_row_first(self):
+        alpha = torch.full((20,), .001)
+        rows, info = birth_driven_retirement_rows(alpha, torch.tensor([0] * 10),
+            count_tolerance=.1, opacity_threshold=.01)
+        self.assertEqual(info['natural_retirements'], 19)
+        self.assertEqual(20 - len(rows), 11)
+        self.assertEqual(rows.tolist(), [0, *range(12, 20)])
+
+
 class PoseRenderer:
     """A differentiable pose objective exercising the real merged model path."""
     def __init__(self, model):
@@ -152,16 +193,26 @@ class BalancedLifecycleCudaTests(unittest.TestCase):
             model.source_rows = sources.cuda().clone()
         return model
 
-    def active(self, directory):
+    def active(self, directory, *, policy='balanced_current_births', repeats=1,
+               birth_count=None, low_opacity_rows=0, warmup_steps=0, joint_opacity=False):
         motion_cfg = copy.deepcopy(current_motion(points_per_axis=2,
             max_depth=2, amplitude_refit_steps=20).config)
         config = ModuleConfig(rigid_tree=motion_cfg,
-            birth=BirthConfig(replacement_policy='balanced_current_births', refit_steps=40,
+            birth=BirthConfig(replacement_policy=policy, refit_steps=40,
+                              replacement_count_tolerance=.1 if policy=='birth_driven_retirement' else 0.,
+                              warmup_steps=warmup_steps,
+                              initial_opacity=.1 if warmup_steps else None,
                               rotation_updates=False),
-            opacity_update=OpacityUpdateConfig(enabled=True, mode='alpha', step=.01))
+            opacity_update=OpacityUpdateConfig(enabled=True, mode='alpha', step=.01,
+                                              joint_with_birth=joint_opacity))
         raw = reference_raw()
+        if repeats != 1:
+            raw = {name: value.repeat((repeats,) + (1,) * (value.ndim - 1))
+                   for name, value in raw.items()}
+        count = len(raw['xyz'])
         raw['logscale'].fill_(-3.)
-        raw['opacity'] = torch.logit(torch.linspace(.1, .8, 8)[:, None])
+        raw['opacity'] = torch.logit(torch.linspace(.1, .8, count)[:, None])
+        raw['opacity'][:low_opacity_rows] = torch.logit(torch.tensor(.001))
         data = SimpleNamespace(current_frame=1, cameras_extent=2.)
         module = Module(config, data)
         module.trainer = SimpleNamespace(global_step=260, device=torch.device('cuda'),
@@ -187,21 +238,27 @@ class BalancedLifecycleCudaTests(unittest.TestCase):
         module.opacity_update.setup(raw['opacity'].cuda())
         module.frame_prepared = module.motion_committed = True
         module.frame_finalized = False
-        module.reference_count = 8
-        module.initial_reference = dict(original_count=8, retained_count=8,
+        module.reference_count = count
+        module.initial_reference = dict(original_count=count, retained_count=count,
             removed_count=0, threshold=0.)
         module.birth_control = dict(pruned=0, split_added=0, previous_birth_count=0)
         module.retired_reference = None
         module.frame_report = None
         module.stage_image_metrics = []
         module._commit_opacity_and_retire()
-        sources = torch.tensor([0, 5, 6])
+        sources = (torch.tensor([0, 5, 6]) if birth_count is None else
+                   torch.zeros(birth_count, dtype=torch.long))
         newborn = {name: value[sources].clone() for name, value in model_raw(module.gaussians).items()}
         newborn['xyz'][:, 0] += .003
-        newborn['opacity'][:] = torch.logit(torch.tensor([[.95], [.98], [.02]], device='cuda'))
+        newborn['opacity'][:] = (torch.logit(torch.tensor([[.95], [.98], [.02]], device='cuda'))
+                                if birth_count is None else
+                                torch.logit(torch.full((birth_count, 1), .9, device='cuda')))
+        if warmup_steps:
+            newborn['opacity'].fill_(torch.logit(torch.tensor(.1)).item())
         module.births = self.gaussian(newborn, config.gaussian_stage2,
                                      births=True, sources=sources)
         module._freeze_base()
+        module._configure_birth_phase(module.motion_steps + 1)
         Trainer._write_reference(module.trainer, 0, initial)
         return module, raw, initial
 
@@ -213,7 +270,9 @@ class BalancedLifecycleCudaTests(unittest.TestCase):
         if module.birth_refit_active:
             expected, _ = module.motion(step)
             torch.testing.assert_close(pose[:old_count], expected, rtol=0, atol=0)
-        (pose[:, 0] - .04).square().mean().backward()
+        loss = (pose[:, 0] - .04).square().mean()
+        if loss.requires_grad:
+            loss.backward()
         points = torch.zeros(len(pose), 3, device='cuda', requires_grad=True)
         points.grad = torch.zeros_like(points)
         package = dict(visibility_filter=torch.ones(len(pose), dtype=torch.bool, device='cuda'),
@@ -275,6 +334,92 @@ class BalancedLifecycleCudaTests(unittest.TestCase):
             next_frame.prepare_frame()
             self.assertEqual(len(next_frame.gaussians._xyz), 8)
             self.assertEqual(next_frame.birth_control['previous_birth_count'], 2)
+
+    def test_birth_driven_policy_keeps_all_births_with_unequal_deletions_and_exact_resume(self):
+        for low_rows, natural, deleted in ((0, 0, 9), (15, 14, 11)):
+            with self.subTest(deleted=deleted), tempfile.TemporaryDirectory() as temporary:
+                first_dir = Path(temporary) / 'original'
+                fixture = dict(policy='birth_driven_retirement', repeats=4,
+                               birth_count=10, low_opacity_rows=low_rows)
+                module, raw, initial = self.active(first_dir, **fixture)
+                self.train_pose_step(module, 260)
+                self.assertEqual(len(module.births._xyz), 10)
+                retired = module.birth_control['retirement']
+                self.assertEqual((retired['natural_retirements'], retired['retired_count']),
+                                 (natural, deleted))
+                final_count = 32 + 10 - deleted
+                self.assertEqual(len(module.gaussians._xyz) + len(module.births._xyz), final_count)
+                checkpoint = dict(global_step=260, current_frame=1)
+                module.on_save_checkpoint(checkpoint)
+                resumed, _, _ = self.active(Path(temporary) / 'resumed', **fixture)
+                resumed.on_load_checkpoint(copy.deepcopy(checkpoint))
+                Trainer._write_reference(resumed.trainer, 0, initial)
+                for step in range(261, 301):
+                    for worker in (module, resumed):
+                        self.train_pose_step(worker, step)
+                        self.assertEqual(len(worker.gaussians._xyz) + len(worker.births._xyz), final_count)
+                for worker in (module, resumed):
+                    stream = worker.output_dir / 'frame_storage/rigid_tree'
+                    _, decoded = decode_frame(stream, 1, initial, raw)
+                    for name, value in model_raw(worker.gaussians).items():
+                        torch.testing.assert_close(value.cpu(), decoded[name], rtol=0, atol=0)
+                    self.assertEqual(worker.frame_report['birth_count'], 10)
+                    self.assertEqual(worker.frame_report['retired_count'], deleted)
+                for name in ('motion_001.bin', 'birth_001.bin', 'frame_001.json'):
+                    self.assertEqual((first_dir / 'frame_storage/rigid_tree' / name).read_bytes(),
+                        (resumed.output_dir / 'frame_storage/rigid_tree' / name).read_bytes())
+
+    def test_multiview_commit_accept_or_reject_resumes_with_fixed_old_attributes_and_exact_stream(self):
+        for selected_count in (10, 3, 0):
+            accepted = bool(selected_count)
+            with self.subTest(selected_count=selected_count), tempfile.TemporaryDirectory() as temporary:
+                def active(directory):
+                    worker, raw, initial = self.active(directory,
+                        policy='birth_driven_retirement', repeats=4, birth_count=10)
+                    worker.config.birth = BirthConfig(strategy='multiview_residual',
+                        replacement_policy='multiview_gain_retirement',
+                        replacement_count_tolerance=.1, refit_steps=40,
+                        rotation_updates=False, refit_motion=False, fit_loss='mse',
+                        validation_cameras=['cam04.png'])
+                    worker.config.birth.validate(worker.motion_steps)
+                    return worker, raw, initial
+
+                module, raw, initial = active(Path(temporary) / 'original')
+                old = model_raw(module.gaussians)
+                deleted = selected_count - int(.1*selected_count)
+                rows = torch.tensor([0, *range(deleted+1, 32)], device='cuda')
+                selected = (torch.tensor([1, 3, 6], device='cuda') if selected_count == 3 else
+                            torch.arange(selected_count, device='cuda'))
+                with patch.object(module, '_multiview_retirement_rows',
+                        return_value=(rows, selected, dict(accepted=accepted))):
+                    self.train_pose_step(module, 260)
+                self.assertFalse(module.birth_refit_active)
+                self.assertTrue(module.birth_control['fixed_pool_refit'])
+                self.assertEqual(len(module.births._xyz), selected_count)
+                for name, value in model_raw(module.gaussians).items():
+                    torch.testing.assert_close(value, old[name][rows], rtol=0, atol=0)
+                checkpoint = dict(global_step=260, current_frame=1)
+                module.on_save_checkpoint(checkpoint)
+                resumed, _, _ = active(Path(temporary) / 'resumed')
+                resumed.on_load_checkpoint(copy.deepcopy(checkpoint))
+                Trainer._write_reference(resumed.trainer, 0, initial)
+                for step in range(261, 301):
+                    for worker in (module, resumed):
+                        self.train_pose_step(worker, step)
+                        state = model_raw(worker.gaussians)
+                        for name in RAW_FIELDS:
+                            torch.testing.assert_close(state[name][:len(rows)], old[name][rows],
+                                                       rtol=0, atol=0)
+                for worker in (module, resumed):
+                    stream = worker.output_dir / 'frame_storage/rigid_tree'
+                    _, decoded = decode_frame(stream, 1, initial, raw)
+                    for name, value in model_raw(worker.gaussians).items():
+                        torch.testing.assert_close(value.cpu(), decoded[name], rtol=0, atol=0)
+                    self.assertEqual(worker.frame_report['birth_count'], len(selected))
+                    self.assertEqual(worker.frame_report['retired_count'], 32 - len(rows))
+                for name in ('motion_001.bin', 'frame_001.json', *(['birth_001.bin'] if accepted else [])):
+                    self.assertEqual((module.output_dir / 'frame_storage/rigid_tree' / name).read_bytes(),
+                                     (resumed.output_dir / 'frame_storage/rigid_tree' / name).read_bytes())
 
 
 if __name__ == '__main__':

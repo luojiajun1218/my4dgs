@@ -1,0 +1,582 @@
+{
+  "scope": "12 saved-frame cam00 heldout and all 20 training-view fixed-attribute render diagnostics. No retraining. Not a causal comparison of full training policies.",
+  "frames": [
+    1,
+    3,
+    29,
+    59,
+    89,
+    119,
+    149,
+    179,
+    209,
+    239,
+    269,
+    299
+  ],
+  "old_attributes_180_to_260_equal_on_survivors": true,
+  "original_stage_psnr_reproduced_tolerance": 0.0001,
+  "mean_psnr_changes_db": {
+    "births_before_retirement": 0.0044027964274088545,
+    "retirement_without_births": -0.000370025634765625,
+    "retirement_with_births": -0.0004024505615234375,
+    "births_after_retirement": 0.004370371500651042,
+    "net_births_and_retirement": 0.004000345865885417
+  },
+  "mean_training_metrics": {
+    "psnr": {
+      "A_old_full": 35.458187762896216,
+      "B_old_survivors": 35.45812613169352,
+      "C_old_survivors_plus_new": 35.473266355196635,
+      "D_old_full_plus_new": 35.473359966278075
+    },
+    "photometric_loss": {
+      "A_old_full": 0.015470997965894639,
+      "B_old_survivors": 0.015471168510460605,
+      "C_old_survivors_plus_new": 0.01546707161857436,
+      "D_old_full_plus_new": 0.015466895350255073
+    }
+  },
+  "records": [
+    {
+      "frame": 1,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 34.245914459228516,
+          "mse": 0.0003776549128815532,
+          "gs": 128963
+        },
+        "B_old_survivors": {
+          "psnr": 34.245914459228516,
+          "mse": 0.0003776549128815532,
+          "gs": 128767
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 34.245948791503906,
+          "mse": 0.00037765191518701613,
+          "gs": 128946
+        },
+        "D_old_full_plus_new": {
+          "psnr": 34.245948791503906,
+          "mse": 0.00037765191518701613,
+          "gs": 129142
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 36.73568859100342,
+          "B_old_survivors": 36.73568859100342,
+          "C_old_survivors_plus_new": 36.735734939575195,
+          "D_old_full_plus_new": 36.735734939575195
+        },
+        "photometric_loss": {
+          "A_old_full": 0.013476297166198492,
+          "B_old_survivors": 0.013476297166198492,
+          "C_old_survivors_plus_new": 0.013476180145516992,
+          "D_old_full_plus_new": 0.013476180145516992
+        }
+      },
+      "births_before_retirement": 3.4332275390625e-05,
+      "retirement_without_births": 0.0,
+      "retirement_with_births": 0.0,
+      "births_after_retirement": 3.4332275390625e-05,
+      "net_births_and_retirement": 3.4332275390625e-05
+    },
+    {
+      "frame": 3,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 33.861568450927734,
+          "mse": 0.0004131965688429773,
+          "gs": 128927
+        },
+        "B_old_survivors": {
+          "psnr": 33.86369323730469,
+          "mse": 0.00041298731230199337,
+          "gs": 128658
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 33.864219665527344,
+          "mse": 0.00041294103721156716,
+          "gs": 128903
+        },
+        "D_old_full_plus_new": {
+          "psnr": 33.86209487915039,
+          "mse": 0.0004131502937525511,
+          "gs": 129172
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 36.76617193222046,
+          "B_old_survivors": 36.765717124938966,
+          "C_old_survivors_plus_new": 36.76587724685669,
+          "D_old_full_plus_new": 36.76633262634277
+        },
+        "photometric_loss": {
+          "A_old_full": 0.013545386819168925,
+          "B_old_survivors": 0.013545978907495737,
+          "C_old_survivors_plus_new": 0.013545807264745236,
+          "D_old_full_plus_new": 0.013545215921476483
+        }
+      },
+      "births_before_retirement": 0.00052642822265625,
+      "retirement_without_births": 0.002124786376953125,
+      "retirement_with_births": 0.002124786376953125,
+      "births_after_retirement": 0.00052642822265625,
+      "net_births_and_retirement": 0.002651214599609375
+    },
+    {
+      "frame": 29,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 33.722679138183594,
+          "mse": 0.0004263538576196879,
+          "gs": 129148
+        },
+        "B_old_survivors": {
+          "psnr": 33.72275924682617,
+          "mse": 0.00042634684359654784,
+          "gs": 128944
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 33.72283935546875,
+          "mse": 0.0004263384034857154,
+          "gs": 129170
+        },
+        "D_old_full_plus_new": {
+          "psnr": 33.72275924682617,
+          "mse": 0.00042634535930119455,
+          "gs": 129374
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 36.34543991088867,
+          "B_old_survivors": 36.34550313949585,
+          "C_old_survivors_plus_new": 36.34568748474121,
+          "D_old_full_plus_new": 36.34562473297119
+        },
+        "photometric_loss": {
+          "A_old_full": 0.014279256155714393,
+          "B_old_survivors": 0.014279228216037155,
+          "C_old_survivors_plus_new": 0.014278804184868932,
+          "D_old_full_plus_new": 0.01427883212454617
+        }
+      },
+      "births_before_retirement": 8.0108642578125e-05,
+      "retirement_without_births": 8.0108642578125e-05,
+      "retirement_with_births": 8.0108642578125e-05,
+      "births_after_retirement": 8.0108642578125e-05,
+      "net_births_and_retirement": 0.00016021728515625
+    },
+    {
+      "frame": 59,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 34.341644287109375,
+          "mse": 0.0003684443945530802,
+          "gs": 129849
+        },
+        "B_old_survivors": {
+          "psnr": 34.340877532958984,
+          "mse": 0.00036850955802947283,
+          "gs": 129633
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 34.35311508178711,
+          "mse": 0.00036746839759871364,
+          "gs": 129872
+        },
+        "D_old_full_plus_new": {
+          "psnr": 34.3538818359375,
+          "mse": 0.00036740288487635553,
+          "gs": 130088
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 35.63509635925293,
+          "B_old_survivors": 35.635579109191895,
+          "C_old_survivors_plus_new": 35.648753833770755,
+          "D_old_full_plus_new": 35.64828243255615
+        },
+        "photometric_loss": {
+          "A_old_full": 0.015108600491657853,
+          "B_old_survivors": 0.015108314575627446,
+          "C_old_survivors_plus_new": 0.015105185238644481,
+          "D_old_full_plus_new": 0.015105470130220056
+        }
+      },
+      "births_before_retirement": 0.012237548828125,
+      "retirement_without_births": -0.000766754150390625,
+      "retirement_with_births": -0.000766754150390625,
+      "births_after_retirement": 0.012237548828125,
+      "net_births_and_retirement": 0.011470794677734375
+    },
+    {
+      "frame": 89,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 33.74478530883789,
+          "mse": 0.00042288113036192954,
+          "gs": 130646
+        },
+        "B_old_survivors": {
+          "psnr": 33.744606018066406,
+          "mse": 0.0004228997859172523,
+          "gs": 130418
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 33.734901428222656,
+          "mse": 0.0004239003174006939,
+          "gs": 130671
+        },
+        "D_old_full_plus_new": {
+          "psnr": 33.735076904296875,
+          "mse": 0.00042388218571431935,
+          "gs": 130899
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 34.95517978668213,
+          "B_old_survivors": 34.955171298980716,
+          "C_old_survivors_plus_new": 34.97947959899902,
+          "D_old_full_plus_new": 34.97948379516602
+        },
+        "photometric_loss": {
+          "A_old_full": 0.016054033022373914,
+          "B_old_survivors": 0.016054116189479828,
+          "C_old_survivors_plus_new": 0.016044054040685297,
+          "D_old_full_plus_new": 0.016043969243764878
+        }
+      },
+      "births_before_retirement": -0.009708404541015625,
+      "retirement_without_births": -0.000179290771484375,
+      "retirement_with_births": -0.00017547607421875,
+      "births_after_retirement": -0.00970458984375,
+      "net_births_and_retirement": -0.009883880615234375
+    },
+    {
+      "frame": 119,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 34.9749641418457,
+          "mse": 0.00031901380862109363,
+          "gs": 131452
+        },
+        "B_old_survivors": {
+          "psnr": 34.974918365478516,
+          "mse": 0.00031901750480756164,
+          "gs": 131208
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 34.98854064941406,
+          "mse": 0.0003179619961883873,
+          "gs": 131479
+        },
+        "D_old_full_plus_new": {
+          "psnr": 34.988590240478516,
+          "mse": 0.0003179583291057497,
+          "gs": 131723
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 35.34849376678467,
+          "B_old_survivors": 35.34845685958862,
+          "C_old_survivors_plus_new": 35.37728853225708,
+          "D_old_full_plus_new": 35.37732429504395
+        },
+        "photometric_loss": {
+          "A_old_full": 0.015636607026681303,
+          "B_old_survivors": 0.015636698622256518,
+          "C_old_survivors_plus_new": 0.015632271440699695,
+          "D_old_full_plus_new": 0.015632173418998717
+        }
+      },
+      "births_before_retirement": 0.0136260986328125,
+      "retirement_without_births": -4.57763671875e-05,
+      "retirement_with_births": -4.9591064453125e-05,
+      "births_after_retirement": 0.013622283935546875,
+      "net_births_and_retirement": 0.013576507568359375
+    },
+    {
+      "frame": 149,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 34.76383590698242,
+          "mse": 0.00033489131601527333,
+          "gs": 132260
+        },
+        "B_old_survivors": {
+          "psnr": 34.76194381713867,
+          "mse": 0.00033504029852338135,
+          "gs": 131979
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 34.74494934082031,
+          "mse": 0.00033652500133030117,
+          "gs": 132291
+        },
+        "D_old_full_plus_new": {
+          "psnr": 34.746822357177734,
+          "mse": 0.0003363765717949718,
+          "gs": 132572
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 35.26274528503418,
+          "B_old_survivors": 35.2626350402832,
+          "C_old_survivors_plus_new": 35.31272163391113,
+          "D_old_full_plus_new": 35.31282224655151
+        },
+        "photometric_loss": {
+          "A_old_full": 0.015813689725473524,
+          "B_old_survivors": 0.015814062673598528,
+          "C_old_survivors_plus_new": 0.015803358191624282,
+          "D_old_full_plus_new": 0.01580298296175897
+        }
+      },
+      "births_before_retirement": -0.0170135498046875,
+      "retirement_without_births": -0.00189208984375,
+      "retirement_with_births": -0.001873016357421875,
+      "births_after_retirement": -0.016994476318359375,
+      "net_births_and_retirement": -0.018886566162109375
+    },
+    {
+      "frame": 179,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 33.97663879394531,
+          "mse": 0.00040105110383592546,
+          "gs": 133128
+        },
+        "B_old_survivors": {
+          "psnr": 33.974937438964844,
+          "mse": 0.0004012080898974091,
+          "gs": 132819
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 33.9739990234375,
+          "mse": 0.0004013185389339924,
+          "gs": 133162
+        },
+        "D_old_full_plus_new": {
+          "psnr": 33.97568893432617,
+          "mse": 0.0004011625424027443,
+          "gs": 133471
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 34.610789108276364,
+          "B_old_survivors": 34.6101279258728,
+          "C_old_survivors_plus_new": 34.624670600891115,
+          "D_old_full_plus_new": 34.62532348632813
+        },
+        "photometric_loss": {
+          "A_old_full": 0.01645061057060957,
+          "B_old_survivors": 0.016450994974002243,
+          "C_old_survivors_plus_new": 0.01644600508734584,
+          "D_old_full_plus_new": 0.016445625200867654
+        }
+      },
+      "births_before_retirement": -0.000949859619140625,
+      "retirement_without_births": -0.00170135498046875,
+      "retirement_with_births": -0.001689910888671875,
+      "births_after_retirement": -0.00093841552734375,
+      "net_births_and_retirement": -0.0026397705078125
+    },
+    {
+      "frame": 209,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 33.8109245300293,
+          "mse": 0.0004164564306847751,
+          "gs": 134009
+        },
+        "B_old_survivors": {
+          "psnr": 33.811073303222656,
+          "mse": 0.00041644275188446045,
+          "gs": 133706
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 33.81140899658203,
+          "mse": 0.0004164123674854636,
+          "gs": 134042
+        },
+        "D_old_full_plus_new": {
+          "psnr": 33.811256408691406,
+          "mse": 0.00041642619180493057,
+          "gs": 134345
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 35.37946319580078,
+          "B_old_survivors": 35.37943439483642,
+          "C_old_survivors_plus_new": 35.379564476013186,
+          "D_old_full_plus_new": 35.37959251403809
+        },
+        "photometric_loss": {
+          "A_old_full": 0.01596241039223969,
+          "B_old_survivors": 0.01596249295398593,
+          "C_old_survivors_plus_new": 0.015962304919958113,
+          "D_old_full_plus_new": 0.015962225198745728
+        }
+      },
+      "births_before_retirement": 0.000331878662109375,
+      "retirement_without_births": 0.000148773193359375,
+      "retirement_with_births": 0.000152587890625,
+      "births_after_retirement": 0.000335693359375,
+      "net_births_and_retirement": 0.000484466552734375
+    },
+    {
+      "frame": 239,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 34.09131622314453,
+          "mse": 0.00039087675395421684,
+          "gs": 134846
+        },
+        "B_old_survivors": {
+          "psnr": 34.090972900390625,
+          "mse": 0.00039090774953365326,
+          "gs": 134593
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 34.1005859375,
+          "mse": 0.0003900340525433421,
+          "gs": 134874
+        },
+        "D_old_full_plus_new": {
+          "psnr": 34.100929260253906,
+          "mse": 0.000390003202483058,
+          "gs": 135127
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 35.100862407684325,
+          "B_old_survivors": 35.10083427429199,
+          "C_old_survivors_plus_new": 35.10948104858399,
+          "D_old_full_plus_new": 35.10950832366943
+        },
+        "photometric_loss": {
+          "A_old_full": 0.01622130749747157,
+          "B_old_survivors": 0.01622148063033819,
+          "C_old_survivors_plus_new": 0.016217739041894674,
+          "D_old_full_plus_new": 0.01621756427921355
+        }
+      },
+      "births_before_retirement": 0.009613037109375,
+      "retirement_without_births": -0.00034332275390625,
+      "retirement_with_births": -0.00034332275390625,
+      "births_after_retirement": 0.009613037109375,
+      "net_births_and_retirement": 0.00926971435546875
+    },
+    {
+      "frame": 269,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 33.77638244628906,
+          "mse": 0.00042770447907969356,
+          "gs": 135738
+        },
+        "B_old_survivors": {
+          "psnr": 33.7761344909668,
+          "mse": 0.00042773541645146906,
+          "gs": 135479
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 33.822574615478516,
+          "mse": 0.000422212848206982,
+          "gs": 135766
+        },
+        "D_old_full_plus_new": {
+          "psnr": 33.82282638549805,
+          "mse": 0.0004221819108352065,
+          "gs": 136025
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 34.50934886932373,
+          "B_old_survivors": 34.50921897888183,
+          "C_old_survivors_plus_new": 34.534848308563234,
+          "D_old_full_plus_new": 34.53497552871704
+        },
+        "photometric_loss": {
+          "A_old_full": 0.016379170771688222,
+          "B_old_survivors": 0.016379535617306828,
+          "C_old_survivors_plus_new": 0.016373590333387256,
+          "D_old_full_plus_new": 0.016373224277049302
+        }
+      },
+      "births_before_retirement": 0.046443939208984375,
+      "retirement_without_births": -0.000247955322265625,
+      "retirement_with_births": -0.00025177001953125,
+      "births_after_retirement": 0.04644012451171875,
+      "net_births_and_retirement": 0.046192169189453125
+    },
+    {
+      "frame": 299,
+      "conditions": {
+        "A_old_full": {
+          "psnr": 34.549949645996094,
+          "mse": 0.00035312960972078145,
+          "gs": 136635
+        },
+        "B_old_survivors": {
+          "psnr": 34.54833221435547,
+          "mse": 0.0003532699483912438,
+          "gs": 136296
+        },
+        "C_old_survivors_plus_new": {
+          "psnr": 34.54552459716797,
+          "mse": 0.0003535028954502195,
+          "gs": 136672
+        },
+        "D_old_full_plus_new": {
+          "psnr": 34.54756164550781,
+          "mse": 0.0003533245762810111,
+          "gs": 137011
+        }
+      },
+      "training_views": {
+        "view_count": 20,
+        "psnr": {
+          "A_old_full": 34.84897394180298,
+          "B_old_survivors": 34.84914684295654,
+          "C_old_survivors_plus_new": 34.86508855819702,
+          "D_old_full_plus_new": 34.865314674377444
+        },
+        "photometric_loss": {
+          "A_old_full": 0.016724605951458214,
+          "B_old_survivors": 0.016724821599200367,
+          "C_old_survivors_plus_new": 0.016719559533521534,
+          "D_old_full_plus_new": 0.016719281300902368
+        }
+      },
+      "births_before_retirement": -0.00238800048828125,
+      "retirement_without_births": -0.001617431640625,
+      "retirement_with_births": -0.00203704833984375,
+      "births_after_retirement": -0.0028076171875,
+      "net_births_and_retirement": -0.004425048828125
+    }
+  ]
+}

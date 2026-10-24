@@ -9,6 +9,9 @@ from statistics import mean
 from .timing import summarize_frame_timings
 
 
+FPS_REFERENCE_NOTICE = 'FPS仅供参考'
+
+
 def time_render(render, synchronize, warmups=10, repeats=50, clock=time.perf_counter):
     """Time full renders after warmup, excluding queued work and metrics."""
     for _ in range(warmups):
@@ -20,7 +23,8 @@ def time_render(render, synchronize, warmups=10, repeats=50, clock=time.perf_cou
     synchronize()
     seconds = clock() - started
     return dict(warmup_renders=warmups, timed_renders=repeats,
-                render_seconds=seconds, render_fps=repeats / seconds)
+                render_seconds=seconds, render_fps=repeats / seconds,
+                fps_notice=FPS_REFERENCE_NOTICE)
 
 
 def build_run_summary(run, expected_frames, *, initial_report=None,
@@ -94,6 +98,7 @@ def build_run_summary(run, expected_frames, *, initial_report=None,
         model_training_measured_frames=timings['model_training']['measured_frame_count'],
         fit_elapsed_seconds=elapsed_seconds,
         pure_render_fps=render_count / render_seconds if render_seconds else None,
+        fps_notice=FPS_REFERENCE_NOTICE,
         render_measured_frames=len(renders), render_seconds=render_seconds,
         timed_renders=render_count,
         render_scope='Validation-time synchronized forward+clamp; excludes decode, upload, '
@@ -134,7 +139,8 @@ def format_run_summary(summary):
                      f'{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}')
     lines.append('Pure render (validation, excludes decode/upload): '
                  f'{number(summary["pure_render_fps"])} FPS '
-                 f'({summary["render_measured_frames"]}/{expected} frames)')
+                 f'({summary["render_measured_frames"]}/{expected} frames) | '
+                 f'{summary.get("fps_notice", FPS_REFERENCE_NOTICE)}')
     lines.append(f'Summary saved: {Path(summary["run"]) / "run_summary.json"}')
     lines.append('==================================================')
     return lines

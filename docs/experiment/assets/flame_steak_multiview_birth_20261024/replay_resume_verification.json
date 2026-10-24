@@ -1,0 +1,143 @@
+{
+  "source_run": "/tmp/my4dgs_multiview_formal9_gauvauq3/output/frame009_multiview_formal/20261024T000412_74857f",
+  "run_dir": "/tmp/my4dgs_multiview_resume_gxex99fm/output/resume009_continue010/20261024T001112_67f727",
+  "source_replay": {
+    "frame": 9,
+    "all_attributes_bit_exact": true,
+    "fields": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    },
+    "count": 128901,
+    "reference": "/tmp/my4dgs_multiview_formal9_gauvauq3/output/frame009_multiview_formal/20261024T000412_74857f/frame_storage/rigid_tree/reference_frame8.npz"
+  },
+  "old_attributes_fixed_260_to_300": {
+    "xyz": true,
+    "sh_dc": true,
+    "sh_rest": true,
+    "logscale": true,
+    "rotation": true,
+    "opacity": true
+  },
+  "motion_tensors_fixed_260_to_300": {
+    "owner": true,
+    "parents": true,
+    "base_xyz": true,
+    "base_rotation": true,
+    "previous_rows": true,
+    "observations": true,
+    "spatial_paths": true,
+    "opened": true,
+    "node_counts": true,
+    "split_eligible": true
+  },
+  "resumed_frame009_stages": [
+    {
+      "step": 180,
+      "phase": "hard_spatial_motion_old_only",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0009/cam00.png",
+      "mse": 0.0004124786937609315,
+      "psnr": 33.87534713745117,
+      "old_only": true,
+      "gaussian_count": 128807,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 260,
+      "phase": "after_balanced_replacement_before_refit",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0009/cam00.png",
+      "mse": 0.00040302786510437727,
+      "psnr": 33.969139099121094,
+      "old_only": false,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 300,
+      "phase": "final_decoded_with_birth",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0009/cam00.png",
+      "mse": 0.00040184910176321864,
+      "psnr": 33.98164367675781,
+      "old_only": false,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    }
+  ],
+  "resumed_frame009_replay": {
+    "frame": 9,
+    "all_attributes_bit_exact": true,
+    "fields": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    },
+    "count": 128901,
+    "reference": "/tmp/my4dgs_multiview_resume_gxex99fm/output/resume009_continue010/20261024T001112_67f727/frame_storage/rigid_tree/reference_frame8.npz"
+  },
+  "frame010_replay": {
+    "frame": 10,
+    "all_attributes_bit_exact": true,
+    "fields": {
+      "xyz": true,
+      "rotation": true,
+      "logscale": true,
+      "opacity": true,
+      "sh_dc": true,
+      "sh_rest": true
+    },
+    "count": 128901,
+    "reference": "/tmp/my4dgs_multiview_resume_gxex99fm/output/resume009_continue010/20261024T001112_67f727/frame_storage/rigid_tree/reference_frame8.npz"
+  },
+  "frame010_stages": [
+    {
+      "step": 180,
+      "phase": "hard_spatial_motion_old_only",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0010/cam00.png",
+      "mse": 0.0003695255727507174,
+      "psnr": 34.33668518066406,
+      "old_only": true,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 260,
+      "phase": "after_balanced_replacement_before_refit",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0010/cam00.png",
+      "mse": 0.0003695255727507174,
+      "psnr": 34.33668518066406,
+      "old_only": false,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    },
+    {
+      "step": 300,
+      "phase": "final_decoded_with_birth",
+      "camera": "/home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/flame_steak_half/frames/0010/cam00.png",
+      "mse": 0.0003695255727507174,
+      "psnr": 34.33668518066406,
+      "old_only": false,
+      "gaussian_count": 128901,
+      "shared_prestructure_active": false,
+      "participates_in_training_or_selection": false
+    }
+  ],
+  "scope": "Strict native frame009 step260 resume and one frame010 continuation; no full300 run.",
+  "actual_resume_packets_bit_exact": {
+    "motion_009.bin": true,
+    "birth_009.bin": true,
+    "opacity_009.bin": true,
+    "frame_009.json": true
+  }
+}
