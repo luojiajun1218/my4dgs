@@ -1,0 +1,100 @@
+{
+  "complete": true,
+  "run": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de",
+  "frames": 299,
+  "scope": "Read-only completed training diagnostics; final independent proof and render timing are separate. Stage200->300 includes birth, retirement and continued regionalDC fitting; not isolated causal newborn benefit.",
+  "mean_birth_phase_psnr_change": 0.022244048357807276,
+  "positive_phase_frames": 185,
+  "negative_phase_frames": 114,
+  "coarse_only_frames": [
+    16,
+    17,
+    18,
+    53,
+    54,
+    55,
+    112,
+    113,
+    238,
+    243,
+    245,
+    268,
+    269,
+    270,
+    271,
+    299
+  ],
+  "coarse_only_count": 16,
+  "fine_frames": 283,
+  "min_regions": 8,
+  "max_regions": 306,
+  "initial_reference_points": 206237,
+  "final_points": 225707,
+  "mean_final_frame_points": 210712.77926421404,
+  "baseline_final_points": 221926,
+  "baseline_mean_final_frame_points": 208782.32775919733,
+  "mean_births": 166.76254180602007,
+  "mean_retired": 101.64548494983278,
+  "segments": [
+    {
+      "first": 1,
+      "last": 29,
+      "phase_change": -0.02405719099373653,
+      "coarse_frames": 3
+    },
+    {
+      "first": 30,
+      "last": 59,
+      "phase_change": 0.018899154663085938,
+      "coarse_frames": 3
+    },
+    {
+      "first": 60,
+      "last": 89,
+      "phase_change": 0.07602386474609375,
+      "coarse_frames": 0
+    },
+    {
+      "first": 90,
+      "last": 119,
+      "phase_change": 0.01564369201660156,
+      "coarse_frames": 2
+    },
+    {
+      "first": 120,
+      "last": 149,
+      "phase_change": 0.025469334920247395,
+      "coarse_frames": 0
+    },
+    {
+      "first": 150,
+      "last": 179,
+      "phase_change": 0.0022708892822265623,
+      "coarse_frames": 0
+    },
+    {
+      "first": 180,
+      "last": 209,
+      "phase_change": -0.0011449178059895833,
+      "coarse_frames": 0
+    },
+    {
+      "first": 210,
+      "last": 239,
+      "phase_change": 0.02233289082845052,
+      "coarse_frames": 1
+    },
+    {
+      "first": 240,
+      "last": 269,
+      "phase_change": 0.048680750528971355,
+      "coarse_frames": 4
+    },
+    {
+      "first": 270,
+      "last": 299,
+      "phase_change": 0.03677864074707031,
+      "coarse_frames": 3
+    }
+  ]
+}

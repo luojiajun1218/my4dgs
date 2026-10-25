@@ -1,0 +1,2518 @@
+{
+  "complete": true,
+  "frame": 269,
+  "run": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de",
+  "gpu_check": {
+    "method": "nvidia_smi",
+    "foreign_contexts": [],
+    "inaccessible_process_fd_tables": 0,
+    "verified": true,
+    "nvml_error": null
+  },
+  "train_cameras": [
+    "cam01.png",
+    "cam02.png",
+    "cam03.png",
+    "cam04.png",
+    "cam05.png",
+    "cam06.png",
+    "cam07.png",
+    "cam08.png",
+    "cam09.png",
+    "cam10.png",
+    "cam11.png",
+    "cam12.png",
+    "cam13.png",
+    "cam14.png",
+    "cam15.png",
+    "cam16.png",
+    "cam17.png",
+    "cam18.png",
+    "cam19.png",
+    "cam20.png"
+  ],
+  "train_views": 20,
+  "scope": "Read-only posthoc fields, no retraining or gate selection. True un-clamped training photo objective; evaluation PSNR/SSIM clamped. Canonical alpha fixed. Joint candidate colors available only before freeze, since freeze discards unselected color tables. Uniform-depth fields are not optimally retrained alternatives.",
+  "results": [
+    {
+      "step": 20,
+      "checkpoint": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de/rigid-ckpt-269-20.pth",
+      "checkpoint_unchanged": true,
+      "selected_regions": 8,
+      "training_image_factor": 1,
+      "joint_candidate_colors_available": true,
+      "measurements": [
+        {
+          "field": "hard_owner_canonical",
+          "train": {
+            "photo_loss": 0.014685813290998339,
+            "psnr": 34.91180057525635,
+            "ssim": 0.9712589740753174
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.017360402271151543,
+            "psnr": 33.553367614746094,
+            "ssim": 0.9716238975524902
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.017360402271151543,
+              "psnr": 33.553367614746094,
+              "ssim": 0.9716238975524902
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01914075016975403,
+              "psnr": 32.501739501953125,
+              "ssim": 0.9607734680175781
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.01589314080774784,
+              "psnr": 34.57345199584961,
+              "ssim": 0.967295229434967
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.021331988275051117,
+              "psnr": 32.11224365234375,
+              "ssim": 0.9703589081764221
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.015294177457690239,
+              "psnr": 34.37152862548828,
+              "ssim": 0.9717191457748413
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011064577847719193,
+              "psnr": 37.561279296875,
+              "ssim": 0.9782685041427612
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014627617783844471,
+              "psnr": 34.92613983154297,
+              "ssim": 0.9710726737976074
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013594668358564377,
+              "psnr": 33.171146392822266,
+              "ssim": 0.9728760719299316
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.01246279664337635,
+              "psnr": 36.74645233154297,
+              "ssim": 0.975349485874176
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.022915804758667946,
+              "psnr": 31.2083740234375,
+              "ssim": 0.9552358984947205
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016139687970280647,
+              "psnr": 34.48577117919922,
+              "ssim": 0.9659581780433655
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013259273953735828,
+              "psnr": 36.12697219848633,
+              "ssim": 0.9723789095878601
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.014145547524094582,
+              "psnr": 35.87934875488281,
+              "ssim": 0.9721089005470276
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013064876198768616,
+              "psnr": 36.45443344116211,
+              "ssim": 0.9743897914886475
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.01210255641490221,
+              "psnr": 35.35573959350586,
+              "ssim": 0.975686252117157
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.01371330302208662,
+              "psnr": 35.70838165283203,
+              "ssim": 0.9696636199951172
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012199398130178452,
+              "psnr": 34.7097282409668,
+              "ssim": 0.9748925566673279
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011805981397628784,
+              "psnr": 37.075843811035156,
+              "ssim": 0.9760175347328186
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.0154676279053092,
+              "psnr": 35.21519088745117,
+              "ssim": 0.9722388386726379
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013270244933664799,
+              "psnr": 33.45387268066406,
+              "ssim": 0.9725126028060913
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012222246266901493,
+              "psnr": 36.59837341308594,
+              "ssim": 0.9763829112052917
+            }
+          ]
+        },
+        {
+          "field": "depth1_canonical_color",
+          "train": {
+            "photo_loss": 0.014685813290998339,
+            "psnr": 34.91180057525635,
+            "ssim": 0.9712589740753174
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.017360402271151543,
+            "psnr": 33.553367614746094,
+            "ssim": 0.9716238975524902
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.017360402271151543,
+              "psnr": 33.553367614746094,
+              "ssim": 0.9716238975524902
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01914075016975403,
+              "psnr": 32.501739501953125,
+              "ssim": 0.9607734680175781
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.01589314080774784,
+              "psnr": 34.57345199584961,
+              "ssim": 0.967295229434967
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.021331988275051117,
+              "psnr": 32.11224365234375,
+              "ssim": 0.9703589081764221
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.015294177457690239,
+              "psnr": 34.37152862548828,
+              "ssim": 0.9717191457748413
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011064577847719193,
+              "psnr": 37.561279296875,
+              "ssim": 0.9782685041427612
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014627617783844471,
+              "psnr": 34.92613983154297,
+              "ssim": 0.9710726737976074
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013594668358564377,
+              "psnr": 33.171146392822266,
+              "ssim": 0.9728760719299316
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.01246279664337635,
+              "psnr": 36.74645233154297,
+              "ssim": 0.975349485874176
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.022915804758667946,
+              "psnr": 31.2083740234375,
+              "ssim": 0.9552358984947205
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016139687970280647,
+              "psnr": 34.48577117919922,
+              "ssim": 0.9659581780433655
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013259273953735828,
+              "psnr": 36.12697219848633,
+              "ssim": 0.9723789095878601
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.014145547524094582,
+              "psnr": 35.87934875488281,
+              "ssim": 0.9721089005470276
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013064876198768616,
+              "psnr": 36.45443344116211,
+              "ssim": 0.9743897914886475
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.01210255641490221,
+              "psnr": 35.35573959350586,
+              "ssim": 0.975686252117157
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.01371330302208662,
+              "psnr": 35.70838165283203,
+              "ssim": 0.9696636199951172
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012199398130178452,
+              "psnr": 34.7097282409668,
+              "ssim": 0.9748925566673279
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011805981397628784,
+              "psnr": 37.075843811035156,
+              "ssim": 0.9760175347328186
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.0154676279053092,
+              "psnr": 35.21519088745117,
+              "ssim": 0.9722388386726379
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013270244933664799,
+              "psnr": 33.45387268066406,
+              "ssim": 0.9725126028060913
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012222246266901493,
+              "psnr": 36.59837341308594,
+              "ssim": 0.9763829112052917
+            }
+          ]
+        },
+        {
+          "field": "depth2_canonical_color",
+          "train": {
+            "photo_loss": 0.01467595468275249,
+            "psnr": 34.93100433349609,
+            "ssim": 0.9712840288877487
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.017423881217837334,
+            "psnr": 33.5323486328125,
+            "ssim": 0.9714580774307251
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.017423881217837334,
+              "psnr": 33.5323486328125,
+              "ssim": 0.9714580774307251
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01899762824177742,
+              "psnr": 32.57618713378906,
+              "ssim": 0.9612802267074585
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.016054853796958923,
+              "psnr": 34.49724578857422,
+              "ssim": 0.966749906539917
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02138466015458107,
+              "psnr": 32.10078430175781,
+              "ssim": 0.9701734781265259
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.015223348513245583,
+              "psnr": 34.42157745361328,
+              "ssim": 0.9719160795211792
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011064593680202961,
+              "psnr": 37.57543182373047,
+              "ssim": 0.9782747626304626
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014623332768678665,
+              "psnr": 34.935821533203125,
+              "ssim": 0.9710755348205566
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013548292219638824,
+              "psnr": 33.190948486328125,
+              "ssim": 0.9730559587478638
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012453174218535423,
+              "psnr": 36.77458953857422,
+              "ssim": 0.9753199815750122
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.022947221994400024,
+              "psnr": 31.201488494873047,
+              "ssim": 0.9550701975822449
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016150668263435364,
+              "psnr": 34.475852966308594,
+              "ssim": 0.9659069180488586
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013302680104970932,
+              "psnr": 36.104190826416016,
+              "ssim": 0.9722676873207092
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.014180447906255722,
+              "psnr": 35.857540130615234,
+              "ssim": 0.9720597863197327
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.01301150768995285,
+              "psnr": 36.50630187988281,
+              "ssim": 0.974541962146759
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.012117438018321991,
+              "psnr": 35.35208511352539,
+              "ssim": 0.9756873846054077
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.013597221113741398,
+              "psnr": 35.851043701171875,
+              "ssim": 0.9699958562850952
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012194540351629257,
+              "psnr": 34.738101959228516,
+              "ssim": 0.974901556968689
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011777907609939575,
+              "psnr": 37.12482833862305,
+              "ssim": 0.9760458469390869
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015470552258193493,
+              "psnr": 35.22463607788086,
+              "ssim": 0.9721818566322327
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013237535953521729,
+              "psnr": 33.47770309448242,
+              "ssim": 0.972639262676239
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012181488797068596,
+              "psnr": 36.63372802734375,
+              "ssim": 0.9765363335609436
+            }
+          ]
+        },
+        {
+          "field": "depth3_canonical_color",
+          "train": {
+            "photo_loss": 0.014742638217285275,
+            "psnr": 34.848794555664064,
+            "ssim": 0.9710872381925583
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.01752270758152008,
+            "psnr": 33.464290618896484,
+            "ssim": 0.9711577296257019
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.01752270758152008,
+              "psnr": 33.464290618896484,
+              "ssim": 0.9711577296257019
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01900361105799675,
+              "psnr": 32.533668518066406,
+              "ssim": 0.9612221717834473
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.01617308333516121,
+              "psnr": 34.43226623535156,
+              "ssim": 0.9664161205291748
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.021471476182341576,
+              "psnr": 32.06339645385742,
+              "ssim": 0.9699155688285828
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.015166958793997765,
+              "psnr": 34.424583435058594,
+              "ssim": 0.9720586538314819
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011112536303699017,
+              "psnr": 37.456520080566406,
+              "ssim": 0.9781392216682434
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014706956222653389,
+              "psnr": 34.84960174560547,
+              "ssim": 0.9708058834075928
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013609329238533974,
+              "psnr": 33.12065124511719,
+              "ssim": 0.9728868007659912
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.01253591850399971,
+              "psnr": 36.675140380859375,
+              "ssim": 0.9751076698303223
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.0229469183832407,
+              "psnr": 31.195384979248047,
+              "ssim": 0.9550333023071289
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.01627824269235134,
+              "psnr": 34.40245819091797,
+              "ssim": 0.9655174612998962
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013423396274447441,
+              "psnr": 35.997928619384766,
+              "ssim": 0.9720078110694885
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.014213919639587402,
+              "psnr": 35.80058670043945,
+              "ssim": 0.9718526601791382
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013042828068137169,
+              "psnr": 36.44466781616211,
+              "ssim": 0.974453866481781
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.012219831347465515,
+              "psnr": 35.21003723144531,
+              "ssim": 0.9753695726394653
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.013651637360453606,
+              "psnr": 35.77201461791992,
+              "ssim": 0.9698419570922852
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012291526421904564,
+              "psnr": 34.603328704833984,
+              "ssim": 0.974639892578125
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011882690712809563,
+              "psnr": 36.95804214477539,
+              "ssim": 0.9757622480392456
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015574736520648003,
+              "psnr": 35.128868103027344,
+              "ssim": 0.9718454480171204
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013311559334397316,
+              "psnr": 33.37633514404297,
+              "ssim": 0.972453236579895
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012235607951879501,
+              "psnr": 36.53041076660156,
+              "ssim": 0.97641521692276
+            }
+          ]
+        },
+        {
+          "field": "depth4_canonical_color",
+          "train": {
+            "photo_loss": 0.014826459530740976,
+            "psnr": 34.7548168182373,
+            "ssim": 0.9708428770303726
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.01763717271387577,
+            "psnr": 33.39936828613281,
+            "ssim": 0.9708495736122131
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.01763717271387577,
+              "psnr": 33.39936828613281,
+              "ssim": 0.9708495736122131
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.018979156389832497,
+              "psnr": 32.61833190917969,
+              "ssim": 0.9613375067710876
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.016308283433318138,
+              "psnr": 34.384246826171875,
+              "ssim": 0.9659819006919861
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.021560512483119965,
+              "psnr": 32.03593444824219,
+              "ssim": 0.9696860313415527
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.015171072445809841,
+              "psnr": 34.46214294433594,
+              "ssim": 0.9719733595848083
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.01115366630256176,
+              "psnr": 37.36227035522461,
+              "ssim": 0.9780258536338806
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014775224030017853,
+              "psnr": 34.767784118652344,
+              "ssim": 0.9705334305763245
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013712642714381218,
+              "psnr": 33.00033950805664,
+              "ssim": 0.9726176261901855
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012647704221308231,
+              "psnr": 36.44126892089844,
+              "ssim": 0.9747430086135864
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.02306029573082924,
+              "psnr": 31.149890899658203,
+              "ssim": 0.9546847939491272
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.01637512817978859,
+              "psnr": 34.372066497802734,
+              "ssim": 0.9651920199394226
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013457415625452995,
+              "psnr": 36.040191650390625,
+              "ssim": 0.9719202518463135
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.014259733259677887,
+              "psnr": 35.82533264160156,
+              "ssim": 0.9718159437179565
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.01308968011289835,
+              "psnr": 36.42549514770508,
+              "ssim": 0.9742944836616516
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.012286005541682243,
+              "psnr": 35.17265319824219,
+              "ssim": 0.9752410054206848
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.013728490099310875,
+              "psnr": 35.666419982910156,
+              "ssim": 0.9696964621543884
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012332415208220482,
+              "psnr": 34.47877502441406,
+              "ssim": 0.9745044708251953
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.01197046972811222,
+              "psnr": 36.709617614746094,
+              "ssim": 0.9754776358604431
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015760228037834167,
+              "psnr": 34.918304443359375,
+              "ssim": 0.9712049961090088
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013504886999726295,
+              "psnr": 33.110443115234375,
+              "ssim": 0.9719247221946716
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.01239618007093668,
+              "psnr": 36.15482711791992,
+              "ssim": 0.976002037525177
+            }
+          ]
+        },
+        {
+          "field": "depth1_joint_color",
+          "train": {
+            "photo_loss": 0.014685813290998339,
+            "psnr": 34.91180057525635,
+            "ssim": 0.9712589740753174
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.017360402271151543,
+            "psnr": 33.553367614746094,
+            "ssim": 0.9716238975524902
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.017360402271151543,
+              "psnr": 33.553367614746094,
+              "ssim": 0.9716238975524902
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01914075016975403,
+              "psnr": 32.501739501953125,
+              "ssim": 0.9607734680175781
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.01589314080774784,
+              "psnr": 34.57345199584961,
+              "ssim": 0.967295229434967
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.021331988275051117,
+              "psnr": 32.11224365234375,
+              "ssim": 0.9703589081764221
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.015294177457690239,
+              "psnr": 34.37152862548828,
+              "ssim": 0.9717191457748413
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011064577847719193,
+              "psnr": 37.561279296875,
+              "ssim": 0.9782685041427612
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014627617783844471,
+              "psnr": 34.92613983154297,
+              "ssim": 0.9710726737976074
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013594668358564377,
+              "psnr": 33.171146392822266,
+              "ssim": 0.9728760719299316
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.01246279664337635,
+              "psnr": 36.74645233154297,
+              "ssim": 0.975349485874176
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.022915804758667946,
+              "psnr": 31.2083740234375,
+              "ssim": 0.9552358984947205
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016139687970280647,
+              "psnr": 34.48577117919922,
+              "ssim": 0.9659581780433655
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013259273953735828,
+              "psnr": 36.12697219848633,
+              "ssim": 0.9723789095878601
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.014145547524094582,
+              "psnr": 35.87934875488281,
+              "ssim": 0.9721089005470276
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013064876198768616,
+              "psnr": 36.45443344116211,
+              "ssim": 0.9743897914886475
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.01210255641490221,
+              "psnr": 35.35573959350586,
+              "ssim": 0.975686252117157
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.01371330302208662,
+              "psnr": 35.70838165283203,
+              "ssim": 0.9696636199951172
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012199398130178452,
+              "psnr": 34.7097282409668,
+              "ssim": 0.9748925566673279
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011805981397628784,
+              "psnr": 37.075843811035156,
+              "ssim": 0.9760175347328186
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.0154676279053092,
+              "psnr": 35.21519088745117,
+              "ssim": 0.9722388386726379
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013270244933664799,
+              "psnr": 33.45387268066406,
+              "ssim": 0.9725126028060913
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012222246266901493,
+              "psnr": 36.59837341308594,
+              "ssim": 0.9763829112052917
+            }
+          ]
+        },
+        {
+          "field": "depth2_joint_color",
+          "train": {
+            "photo_loss": 0.014771011983975768,
+            "psnr": 34.88781204223633,
+            "ssim": 0.9712478905916214
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.017035139724612236,
+            "psnr": 33.7271842956543,
+            "ssim": 0.9714928865432739
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.017035139724612236,
+              "psnr": 33.7271842956543,
+              "ssim": 0.9714928865432739
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.018711041659116745,
+              "psnr": 32.624176025390625,
+              "ssim": 0.9613807201385498
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.016447074711322784,
+              "psnr": 34.36021423339844,
+              "ssim": 0.9666160345077515
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02189691923558712,
+              "psnr": 31.86944580078125,
+              "ssim": 0.9702932238578796
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.01504163071513176,
+              "psnr": 34.560550689697266,
+              "ssim": 0.9717480540275574
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.010988940484821796,
+              "psnr": 37.603515625,
+              "ssim": 0.9782033562660217
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.014876876957714558,
+              "psnr": 34.8701171875,
+              "ssim": 0.9710800647735596
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013488275930285454,
+              "psnr": 33.16667175292969,
+              "ssim": 0.9730812311172485
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.01234017126262188,
+              "psnr": 36.82235336303711,
+              "ssim": 0.97529137134552
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.023275159299373627,
+              "psnr": 31.145469665527344,
+              "ssim": 0.9549593329429626
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016203265637159348,
+              "psnr": 34.40359115600586,
+              "ssim": 0.9659859538078308
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013795604929327965,
+              "psnr": 35.836830139160156,
+              "ssim": 0.9722470045089722
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013755818828940392,
+              "psnr": 36.082481384277344,
+              "ssim": 0.9719992280006409
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013005128130316734,
+              "psnr": 36.478389739990234,
+              "ssim": 0.9744900465011597
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.012399515137076378,
+              "psnr": 35.218299865722656,
+              "ssim": 0.9755499362945557
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.013713397085666656,
+              "psnr": 35.8110466003418,
+              "ssim": 0.9699061512947083
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012379380874335766,
+              "psnr": 34.66535186767578,
+              "ssim": 0.9747298955917358
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011935459449887276,
+              "psnr": 37.00798797607422,
+              "ssim": 0.9761494994163513
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015098689123988152,
+              "psnr": 35.41980743408203,
+              "ssim": 0.9721671938896179
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.01359141618013382,
+              "psnr": 33.35515594482422,
+              "ssim": 0.9726333618164062
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012476474046707153,
+              "psnr": 36.45478439331055,
+              "ssim": 0.9764461517333984
+            }
+          ]
+        },
+        {
+          "field": "depth3_joint_color",
+          "train": {
+            "photo_loss": 0.015046399785205722,
+            "psnr": 34.715113925933835,
+            "ssim": 0.9709662437438965
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.01687704212963581,
+            "psnr": 33.78363800048828,
+            "ssim": 0.9712841510772705
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.01687704212963581,
+              "psnr": 33.78363800048828,
+              "ssim": 0.9712841510772705
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.018751278519630432,
+              "psnr": 32.57130813598633,
+              "ssim": 0.9610356092453003
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.01682441309094429,
+              "psnr": 34.19098663330078,
+              "ssim": 0.9661024212837219
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.022619567811489105,
+              "psnr": 31.60833740234375,
+              "ssim": 0.9696165919303894
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014730138704180717,
+              "psnr": 34.6950569152832,
+              "ssim": 0.9720770120620728
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011196103878319263,
+              "psnr": 37.350379943847656,
+              "ssim": 0.9780913591384888
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015183305367827415,
+              "psnr": 34.703147888183594,
+              "ssim": 0.9709572792053223
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.01377459242939949,
+              "psnr": 32.99544906616211,
+              "ssim": 0.9727807641029358
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012477818876504898,
+              "psnr": 36.676918029785156,
+              "ssim": 0.9750328660011292
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.0235814917832613,
+              "psnr": 31.079069137573242,
+              "ssim": 0.9548951983451843
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.0165206640958786,
+              "psnr": 34.23594665527344,
+              "ssim": 0.9653998017311096
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.014493653550744057,
+              "psnr": 35.42401123046875,
+              "ssim": 0.9718096852302551
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013615613803267479,
+              "psnr": 36.117088317871094,
+              "ssim": 0.9717639684677124
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013162867166101933,
+              "psnr": 36.34544372558594,
+              "ssim": 0.9743581414222717
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.012817847542464733,
+              "psnr": 34.939048767089844,
+              "ssim": 0.975210428237915
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.01406458392739296,
+              "psnr": 35.60322189331055,
+              "ssim": 0.9696763753890991
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012640383094549179,
+              "psnr": 34.47978973388672,
+              "ssim": 0.9743973016738892
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.01242387667298317,
+              "psnr": 36.60356140136719,
+              "ssim": 0.9757593274116516
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015153019689023495,
+              "psnr": 35.34668731689453,
+              "ssim": 0.9717059135437012
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.01413723360747099,
+              "psnr": 33.11992263793945,
+              "ssim": 0.9722280502319336
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012759542092680931,
+              "psnr": 36.21690368652344,
+              "ssim": 0.9764267802238464
+            }
+          ]
+        },
+        {
+          "field": "depth4_joint_color",
+          "train": {
+            "photo_loss": 0.015284883882850408,
+            "psnr": 34.5598123550415,
+            "ssim": 0.9706539213657379
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.016922732815146446,
+            "psnr": 33.75589370727539,
+            "ssim": 0.970980703830719
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.016922732815146446,
+              "psnr": 33.75589370727539,
+              "ssim": 0.970980703830719
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.018783792853355408,
+              "psnr": 32.634559631347656,
+              "ssim": 0.9609836935997009
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.017099542543292046,
+              "psnr": 34.09360885620117,
+              "ssim": 0.9655957221984863
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02309240773320198,
+              "psnr": 31.448638916015625,
+              "ssim": 0.969110369682312
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014656877145171165,
+              "psnr": 34.77580261230469,
+              "ssim": 0.9720313549041748
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011404741555452347,
+              "psnr": 37.128746032714844,
+              "ssim": 0.97794109582901
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015448059886693954,
+              "psnr": 34.548583984375,
+              "ssim": 0.9707557559013367
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.014025760814547539,
+              "psnr": 32.83397674560547,
+              "ssim": 0.9723795056343079
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012702135369181633,
+              "psnr": 36.38133239746094,
+              "ssim": 0.9745970368385315
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.023873575031757355,
+              "psnr": 30.99773406982422,
+              "ssim": 0.954598605632782
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016722314059734344,
+              "psnr": 34.160850524902344,
+              "ssim": 0.9649122357368469
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.014911135658621788,
+              "psnr": 35.26023864746094,
+              "ssim": 0.97159343957901
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013632308691740036,
+              "psnr": 36.15574645996094,
+              "ssim": 0.9716783761978149
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013290273025631905,
+              "psnr": 36.28099822998047,
+              "ssim": 0.974141538143158
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.01310928724706173,
+              "psnr": 34.820648193359375,
+              "ssim": 0.9750488996505737
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.01431371085345745,
+              "psnr": 35.419063568115234,
+              "ssim": 0.9695007801055908
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012879185378551483,
+              "psnr": 34.29869842529297,
+              "ssim": 0.97420734167099
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.0127876540645957,
+              "psnr": 36.22907638549805,
+              "ssim": 0.9753249287605286
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015330173075199127,
+              "psnr": 35.12683868408203,
+              "ssim": 0.9710010290145874
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.01459619402885437,
+              "psnr": 32.805274963378906,
+              "ssim": 0.9715601801872253
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.01303854864090681,
+              "psnr": 35.79582977294922,
+              "ssim": 0.9761165380477905
+            }
+          ]
+        },
+        {
+          "field": "last_sample_joint_color",
+          "train": {
+            "photo_loss": 0.014897353388369084,
+            "psnr": 34.82514181137085,
+            "ssim": 0.971210190653801
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.016737041994929314,
+            "psnr": 33.87747573852539,
+            "ssim": 0.9715448021888733
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.016737041994929314,
+              "psnr": 33.87747573852539,
+              "ssim": 0.9715448021888733
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01868310011923313,
+              "psnr": 32.61525344848633,
+              "ssim": 0.9612967371940613
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.016612011939287186,
+              "psnr": 34.282920837402344,
+              "ssim": 0.9664791822433472
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02239152044057846,
+              "psnr": 31.66839599609375,
+              "ssim": 0.9700562357902527
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014771217480301857,
+              "psnr": 34.693641662597656,
+              "ssim": 0.971947968006134
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.011050153523683548,
+              "psnr": 37.53703308105469,
+              "ssim": 0.9782763123512268
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015078119933605194,
+              "psnr": 34.79113006591797,
+              "ssim": 0.9711273312568665
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.013702502474188805,
+              "psnr": 33.06832504272461,
+              "ssim": 0.9729154706001282
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012314321473240852,
+              "psnr": 36.828704833984375,
+              "ssim": 0.9753715991973877
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.023545987904071808,
+              "psnr": 31.086942672729492,
+              "ssim": 0.9547761082649231
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.016161933541297913,
+              "psnr": 34.402530670166016,
+              "ssim": 0.9660027623176575
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.014222729951143265,
+              "psnr": 35.58013916015625,
+              "ssim": 0.97217857837677
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013592766597867012,
+              "psnr": 36.16577911376953,
+              "ssim": 0.9720336198806763
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.013066860847175121,
+              "psnr": 36.44207763671875,
+              "ssim": 0.9743887186050415
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.012622298672795296,
+              "psnr": 35.11488342285156,
+              "ssim": 0.9755159020423889
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.013874296098947525,
+              "psnr": 35.733482360839844,
+              "ssim": 0.969875693321228
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012415148317813873,
+              "psnr": 34.638423919677734,
+              "ssim": 0.9747214913368225
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.01219472661614418,
+              "psnr": 36.83467102050781,
+              "ssim": 0.9760804176330566
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.0150874312967062,
+              "psnr": 35.413108825683594,
+              "ssim": 0.9722001552581787
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013876290060579777,
+              "psnr": 33.263607025146484,
+              "ssim": 0.9725661873817444
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012683650478720665,
+              "psnr": 36.3417854309082,
+              "ssim": 0.9763933420181274
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 70,
+      "checkpoint": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de/rigid-ckpt-269-70.pth",
+      "checkpoint_unchanged": true,
+      "selected_regions": 8,
+      "training_image_factor": 1,
+      "joint_candidate_colors_available": false,
+      "measurements": [
+        {
+          "field": "hard_owner_canonical",
+          "train": {
+            "photo_loss": 0.014529739785939456,
+            "psnr": 35.13283462524414,
+            "ssim": 0.9714888751506805
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.01645674929022789,
+            "psnr": 34.12146759033203,
+            "ssim": 0.9717102646827698
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.01645674929022789,
+              "psnr": 34.12146759033203,
+              "ssim": 0.9717102646827698
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01778537407517433,
+              "psnr": 32.961971282958984,
+              "ssim": 0.9620339870452881
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.016939904540777206,
+              "psnr": 34.1787223815918,
+              "ssim": 0.9663341045379639
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02287878468632698,
+              "psnr": 31.480758666992188,
+              "ssim": 0.9699775576591492
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014317471534013748,
+              "psnr": 34.99867248535156,
+              "ssim": 0.9723113179206848
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.010861789807677269,
+              "psnr": 37.88676452636719,
+              "ssim": 0.9785463809967041
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015239322558045387,
+              "psnr": 34.795494079589844,
+              "ssim": 0.9703853130340576
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.01280231960117817,
+              "psnr": 33.51852035522461,
+              "ssim": 0.9734726548194885
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.011953897774219513,
+              "psnr": 37.259159088134766,
+              "ssim": 0.9758729338645935
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.024013996124267578,
+              "psnr": 30.948196411132812,
+              "ssim": 0.9541956782341003
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.01563088968396187,
+              "psnr": 34.783355712890625,
+              "ssim": 0.9665524959564209
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013463906943798065,
+              "psnr": 36.123626708984375,
+              "ssim": 0.9726902842521667
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013608205132186413,
+              "psnr": 36.28850555419922,
+              "ssim": 0.9720823168754578
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.012006185948848724,
+              "psnr": 37.226280212402344,
+              "ssim": 0.9752194285392761
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.011756968684494495,
+              "psnr": 35.6331787109375,
+              "ssim": 0.9758317470550537
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.012922907248139381,
+              "psnr": 36.357704162597656,
+              "ssim": 0.9708845615386963
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012170006521046162,
+              "psnr": 34.94697952270508,
+              "ssim": 0.9750860333442688
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011772275902330875,
+              "psnr": 37.329872131347656,
+              "ssim": 0.9764260053634644
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.014781486243009567,
+              "psnr": 35.66020202636719,
+              "ssim": 0.972618579864502
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.01324986107647419,
+              "psnr": 33.6788444519043,
+              "ssim": 0.9727955460548401
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012439241632819176,
+              "psnr": 36.599884033203125,
+              "ssim": 0.9764605760574341
+            }
+          ]
+        },
+        {
+          "field": "depth1_canonical_color",
+          "train": {
+            "photo_loss": 0.014529739785939456,
+            "psnr": 35.13283462524414,
+            "ssim": 0.9714888751506805
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.01645674929022789,
+            "psnr": 34.12146759033203,
+            "ssim": 0.9717102646827698
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.01645674929022789,
+              "psnr": 34.12146759033203,
+              "ssim": 0.9717102646827698
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.01778537407517433,
+              "psnr": 32.961971282958984,
+              "ssim": 0.9620339870452881
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.016939904540777206,
+              "psnr": 34.1787223815918,
+              "ssim": 0.9663341045379639
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02287878468632698,
+              "psnr": 31.480758666992188,
+              "ssim": 0.9699775576591492
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014317471534013748,
+              "psnr": 34.99867248535156,
+              "ssim": 0.9723113179206848
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.010861789807677269,
+              "psnr": 37.88676452636719,
+              "ssim": 0.9785463809967041
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015239322558045387,
+              "psnr": 34.795494079589844,
+              "ssim": 0.9703853130340576
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.01280231960117817,
+              "psnr": 33.51852035522461,
+              "ssim": 0.9734726548194885
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.011953897774219513,
+              "psnr": 37.259159088134766,
+              "ssim": 0.9758729338645935
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.024013996124267578,
+              "psnr": 30.948196411132812,
+              "ssim": 0.9541956782341003
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.01563088968396187,
+              "psnr": 34.783355712890625,
+              "ssim": 0.9665524959564209
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013463906943798065,
+              "psnr": 36.123626708984375,
+              "ssim": 0.9726902842521667
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013608205132186413,
+              "psnr": 36.28850555419922,
+              "ssim": 0.9720823168754578
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.012006185948848724,
+              "psnr": 37.226280212402344,
+              "ssim": 0.9752194285392761
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.011756968684494495,
+              "psnr": 35.6331787109375,
+              "ssim": 0.9758317470550537
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.012922907248139381,
+              "psnr": 36.357704162597656,
+              "ssim": 0.9708845615386963
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012170006521046162,
+              "psnr": 34.94697952270508,
+              "ssim": 0.9750860333442688
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011772275902330875,
+              "psnr": 37.329872131347656,
+              "ssim": 0.9764260053634644
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.014781486243009567,
+              "psnr": 35.66020202636719,
+              "ssim": 0.972618579864502
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.01324986107647419,
+              "psnr": 33.6788444519043,
+              "ssim": 0.9727955460548401
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012439241632819176,
+              "psnr": 36.599884033203125,
+              "ssim": 0.9764605760574341
+            }
+          ]
+        },
+        {
+          "field": "depth2_canonical_color",
+          "train": {
+            "photo_loss": 0.014536877628415823,
+            "psnr": 35.14213075637817,
+            "ssim": 0.971470981836319
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.01653144136071205,
+            "psnr": 34.091304779052734,
+            "ssim": 0.9715076088905334
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.01653144136071205,
+              "psnr": 34.091304779052734,
+              "ssim": 0.9715076088905334
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.017673345282673836,
+              "psnr": 33.03034210205078,
+              "ssim": 0.9624139666557312
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.017078053206205368,
+              "psnr": 34.11063766479492,
+              "ssim": 0.9658316969871521
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.02291695959866047,
+              "psnr": 31.47463035583496,
+              "ssim": 0.9698278307914734
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014256519265472889,
+              "psnr": 35.0447998046875,
+              "ssim": 0.9724876880645752
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.010862113907933235,
+              "psnr": 37.90359115600586,
+              "ssim": 0.9785521030426025
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015249669551849365,
+              "psnr": 34.80249786376953,
+              "ssim": 0.9703485369682312
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.012741977348923683,
+              "psnr": 33.55183792114258,
+              "ssim": 0.9736947417259216
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.011992175132036209,
+              "psnr": 37.260353088378906,
+              "ssim": 0.9757506251335144
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.024028122425079346,
+              "psnr": 30.94287872314453,
+              "ssim": 0.9541125297546387
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.015714343637228012,
+              "psnr": 34.72364044189453,
+              "ssim": 0.9662904739379883
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.01351113710552454,
+              "psnr": 36.089324951171875,
+              "ssim": 0.9725786447525024
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013678407296538353,
+              "psnr": 36.24030685424805,
+              "ssim": 0.9719264507293701
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.012017172761261463,
+              "psnr": 37.23405456542969,
+              "ssim": 0.9751662015914917
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.011778793297708035,
+              "psnr": 35.63318634033203,
+              "ssim": 0.9757928252220154
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.012793680652976036,
+              "psnr": 36.50981140136719,
+              "ssim": 0.9712705016136169
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012171274051070213,
+              "psnr": 34.98054122924805,
+              "ssim": 0.9750991463661194
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011775622144341469,
+              "psnr": 37.35252380371094,
+              "ssim": 0.9764089584350586
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.014841247349977493,
+              "psnr": 35.63423156738281,
+              "ssim": 0.9723947048187256
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013226963579654694,
+              "psnr": 33.7064208984375,
+              "ssim": 0.9729102253913879
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012429974973201752,
+              "psnr": 36.61700439453125,
+              "ssim": 0.9765617847442627
+            }
+          ]
+        },
+        {
+          "field": "depth3_canonical_color",
+          "train": {
+            "photo_loss": 0.014595106523483992,
+            "psnr": 35.072320747375485,
+            "ssim": 0.971303179860115
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.016594484448432922,
+            "psnr": 34.04111099243164,
+            "ssim": 0.9713131785392761
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.016594484448432922,
+              "psnr": 34.04111099243164,
+              "ssim": 0.9713131785392761
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.017680898308753967,
+              "psnr": 32.991722106933594,
+              "ssim": 0.9623126983642578
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.017156442627310753,
+              "psnr": 34.08053970336914,
+              "ssim": 0.9656237959861755
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.022984014824032784,
+              "psnr": 31.452884674072266,
+              "ssim": 0.9696394801139832
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014213591814041138,
+              "psnr": 35.05886459350586,
+              "ssim": 0.9725760817527771
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.010896733030676842,
+              "psnr": 37.82560729980469,
+              "ssim": 0.9784486889839172
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.01532993745058775,
+              "psnr": 34.7325439453125,
+              "ssim": 0.9701012372970581
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.012795751914381981,
+              "psnr": 33.476070404052734,
+              "ssim": 0.9735373258590698
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012069465592503548,
+              "psnr": 37.166725158691406,
+              "ssim": 0.9755301475524902
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.02400585450232029,
+              "psnr": 30.940906524658203,
+              "ssim": 0.9541962742805481
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.01586446352303028,
+              "psnr": 34.65337371826172,
+              "ssim": 0.9658302068710327
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013606389984488487,
+              "psnr": 36.02077865600586,
+              "ssim": 0.9724025130271912
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013685164973139763,
+              "psnr": 36.21997833251953,
+              "ssim": 0.9718192219734192
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.01205899752676487,
+              "psnr": 37.17629623413086,
+              "ssim": 0.9751040935516357
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.011844111606478691,
+              "psnr": 35.51862335205078,
+              "ssim": 0.9755792021751404
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.012847470119595528,
+              "psnr": 36.426177978515625,
+              "ssim": 0.971126139163971
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012247186154127121,
+              "psnr": 34.85327911376953,
+              "ssim": 0.9748901128768921
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.01187782734632492,
+              "psnr": 37.1967658996582,
+              "ssim": 0.9761577248573303
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.014952081255614758,
+              "psnr": 35.537506103515625,
+              "ssim": 0.972029447555542
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013295348733663559,
+              "psnr": 33.59680938720703,
+              "ssim": 0.9727351069450378
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012490399181842804,
+              "psnr": 36.52096176147461,
+              "ssim": 0.9764240980148315
+            }
+          ]
+        },
+        {
+          "field": "depth4_canonical_color",
+          "train": {
+            "photo_loss": 0.014673834992572665,
+            "psnr": 34.99118452072143,
+            "ssim": 0.9710801541805267
+          },
+          "test": {
+            "split": "test",
+            "camera": "cam00.png",
+            "photo_loss": 0.016685962677001953,
+            "psnr": 33.98612976074219,
+            "ssim": 0.9710724353790283
+          },
+          "views": [
+            {
+              "split": "test",
+              "camera": "cam00.png",
+              "photo_loss": 0.016685962677001953,
+              "psnr": 33.98612976074219,
+              "ssim": 0.9710724353790283
+            },
+            {
+              "split": "train",
+              "camera": "cam01.png",
+              "photo_loss": 0.017809463664889336,
+              "psnr": 32.976802825927734,
+              "ssim": 0.9622514247894287
+            },
+            {
+              "split": "train",
+              "camera": "cam02.png",
+              "photo_loss": 0.017233120277523994,
+              "psnr": 34.09532165527344,
+              "ssim": 0.9652721285820007
+            },
+            {
+              "split": "train",
+              "camera": "cam03.png",
+              "photo_loss": 0.023054448887705803,
+              "psnr": 31.435209274291992,
+              "ssim": 0.9694483280181885
+            },
+            {
+              "split": "train",
+              "camera": "cam04.png",
+              "photo_loss": 0.014235112816095352,
+              "psnr": 35.09051513671875,
+              "ssim": 0.972438633441925
+            },
+            {
+              "split": "train",
+              "camera": "cam05.png",
+              "photo_loss": 0.010930115357041359,
+              "psnr": 37.74742126464844,
+              "ssim": 0.9783609509468079
+            },
+            {
+              "split": "train",
+              "camera": "cam06.png",
+              "photo_loss": 0.015386627987027168,
+              "psnr": 34.681663513183594,
+              "ssim": 0.9698689579963684
+            },
+            {
+              "split": "train",
+              "camera": "cam07.png",
+              "photo_loss": 0.012880757451057434,
+              "psnr": 33.356040954589844,
+              "ssim": 0.9732998013496399
+            },
+            {
+              "split": "train",
+              "camera": "cam08.png",
+              "photo_loss": 0.012175600975751877,
+              "psnr": 36.94916534423828,
+              "ssim": 0.9751825928688049
+            },
+            {
+              "split": "train",
+              "camera": "cam09.png",
+              "photo_loss": 0.024080203846096992,
+              "psnr": 30.914108276367188,
+              "ssim": 0.9539835453033447
+            },
+            {
+              "split": "train",
+              "camera": "cam10.png",
+              "photo_loss": 0.015931006520986557,
+              "psnr": 34.6759147644043,
+              "ssim": 0.9655793905258179
+            },
+            {
+              "split": "train",
+              "camera": "cam11.png",
+              "photo_loss": 0.013655690476298332,
+              "psnr": 36.02996826171875,
+              "ssim": 0.972301721572876
+            },
+            {
+              "split": "train",
+              "camera": "cam12.png",
+              "photo_loss": 0.013726163655519485,
+              "psnr": 36.241668701171875,
+              "ssim": 0.971753716468811
+            },
+            {
+              "split": "train",
+              "camera": "cam13.png",
+              "photo_loss": 0.012116042897105217,
+              "psnr": 37.1568717956543,
+              "ssim": 0.9749165773391724
+            },
+            {
+              "split": "train",
+              "camera": "cam14.png",
+              "photo_loss": 0.011883528903126717,
+              "psnr": 35.50823974609375,
+              "ssim": 0.9754865765571594
+            },
+            {
+              "split": "train",
+              "camera": "cam15.png",
+              "photo_loss": 0.012901843525469303,
+              "psnr": 36.32646179199219,
+              "ssim": 0.9710044860839844
+            },
+            {
+              "split": "train",
+              "camera": "cam16.png",
+              "photo_loss": 0.012286696583032608,
+              "psnr": 34.736812591552734,
+              "ssim": 0.9747632741928101
+            },
+            {
+              "split": "train",
+              "camera": "cam17.png",
+              "photo_loss": 0.011960981413722038,
+              "psnr": 36.989559173583984,
+              "ssim": 0.975919246673584
+            },
+            {
+              "split": "train",
+              "camera": "cam18.png",
+              "photo_loss": 0.015124188736081123,
+              "psnr": 35.34890365600586,
+              "ssim": 0.9714369773864746
+            },
+            {
+              "split": "train",
+              "camera": "cam19.png",
+              "photo_loss": 0.013490734621882439,
+              "psnr": 33.327537536621094,
+              "ssim": 0.9722228646278381
+            },
+            {
+              "split": "train",
+              "camera": "cam20.png",
+              "photo_loss": 0.012614371255040169,
+              "psnr": 36.235504150390625,
+              "ssim": 0.976111888885498
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

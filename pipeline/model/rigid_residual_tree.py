@@ -29,7 +29,6 @@ class RigidTreeConfig:
     gs_rotation_lr: float = 1e-3
     rotation_updates: bool = True
     amplitude_refit_steps: int = 0
-    terminal_motion_proximal: bool = False
     motion_lr_final_ratio: float = 1.0
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
@@ -42,7 +41,6 @@ class RigidTreeConfig:
     codec_rate_interval: int = 20
     codec_rate_initial_steps: int = 20
     rate_normalization: str = 'frame'
-    rate_budget_bytes: Optional[int] = None
     relative_motion_loss_weight: float = 0.001
     relative_motion_units: str = 'extent_radians'
     rate_warmup_steps: int = 0
@@ -74,12 +72,6 @@ class RigidTreeConfig:
             raise ValueError('differentiable_rate_support must be boolean')
         if not isinstance(self.proximal_gs_regularization, bool):
             raise ValueError('proximal_gs_regularization must be boolean')
-        if not isinstance(self.terminal_motion_proximal, bool):
-            raise ValueError('terminal_motion_proximal must be boolean')
-        if self.terminal_motion_proximal and (
-                not self.proximal_gs_regularization or not self.amplitude_refit_steps or
-                self.spatial_gate.training_schedule != 'joint'):
-            raise ValueError('Terminal motion proximal requires joint proximal amplitude refitting')
         if not isinstance(self.defer_gs_sparsity_until_gate_freeze, bool):
             raise ValueError('defer_gs_sparsity_until_gate_freeze must be boolean')
         if self.defer_gs_sparsity_until_gate_freeze and (
@@ -92,6 +84,10 @@ class RigidTreeConfig:
         if (self.spatial_gate.private_full_motion and self.amplitude_refit_steps and
                 not self.spatial_gate.reparameterize_after_gate_freeze):
             raise ValueError('Private full-motion proposals do not support amplitude refitting')
+        if self.spatial_gate.predictor_objective == 'proximal_rd' and (
+                not self.proximal_gs_regularization or self.rate_model != 'raw_blocks' or
+                self.amplitude_refit_steps or self.defer_gs_sparsity_until_gate_freeze):
+            raise ValueError('Local proximal RD currently requires raw-block joint proximal fitting')
         if self.rate_model not in ('raw_blocks', 'codec'):
             raise ValueError('Unknown motion rate model')
         if self.rate_model == 'codec' and self.spatial_gate.training_schedule != 'joint':
@@ -128,14 +124,8 @@ class RigidTreeConfig:
         if window is not None and (isinstance(window, bool) or
                 not isinstance(window, int) or not 1 <= window <= self.motion_steps):
             raise ValueError('Motion fit window must be a positive integer within the motion phase')
-        if self.rate_normalization not in ('frame', 'reference', 'budget'):
-            raise ValueError('rate_normalization must be frame, reference, or budget')
-        if self.rate_normalization == 'budget':
-            if (isinstance(self.rate_budget_bytes, bool) or
-                    not isinstance(self.rate_budget_bytes, int) or self.rate_budget_bytes < 1):
-                raise ValueError('Budget normalization requires positive integer rate_budget_bytes')
-        elif self.rate_budget_bytes is not None:
-            raise ValueError('rate_budget_bytes requires budget normalization')
+        if self.rate_normalization not in ('frame', 'reference'):
+            raise ValueError('rate_normalization must be frame or reference')
         if self.relative_motion_units != 'extent_radians':
             raise ValueError('Active motion fitting uses extent-normalized translation and radians')
         for name in ('motion_xyz_step_extent', 'motion_rotation_step_rad',
@@ -379,32 +369,16 @@ class MotionBase(nn.Module):
     @property
     def steps(self):
         """Regional translation/rotation steps (legacy public property)."""
-        return self._step_grid(self.config.motion_xyz_step_extent,
-                               self.config.motion_rotation_step_rad)
+        return self.base_xyz.new_tensor(
+            [self.config.motion_xyz_step_extent * self.extent] * 3 +
+            [self.config.motion_rotation_step_rad] * 3)
+
 
     @property
     def gs_steps(self):
-        return self._step_grid(self.config.gs_xyz_step_extent,
-                               self.config.gs_rotation_step_rad)
+        return self.base_xyz.new_tensor([self.config.gs_xyz_step_extent * self.extent] * 3 +
+                                        [self.config.gs_rotation_step_rad] * 3)
 
-    def _step_grid(self, xyz_step_extent, rotation_step):
-        """Reuse constant grids, invalidating on config, device or dtype changes."""
-        xyz_step = xyz_step_extent * self.extent
-        key = (xyz_step, rotation_step, self.base_xyz.device, self.base_xyz.dtype)
-        cache = getattr(self, '_step_grid_cache', None)
-        if cache is None:
-            self._step_grid_cache = cache = {}
-        cached = cache.get(key)
-        if cached is not None and cached[0]._version == cached[1]:
-            return cached[0]
-        grid = self.base_xyz.new_tensor([xyz_step] * 3 + [rotation_step] * 3)
-        # Inference tensors cannot track mutations and must not enter a later
-        # training graph. Normal cached constants are safe in either mode.
-        if not torch.is_inference_mode_enabled():
-            if len(cache) >= 2:
-                cache.clear()
-            cache[key] = (grid, grid._version)
-        return grid
 
     @property
     def motion_steps(self):
@@ -423,11 +397,6 @@ class MotionBase(nn.Module):
 
     @property
     def rate_normalization_bytes(self):
-        # An explicit byte baseline keeps the cost of a byte independent of
-        # initialization density and later births. It is a loss scale, not a
-        # hard packet-size constraint; actual complete packets are measured.
-        if self.config.rate_normalization == 'budget':
-            return self.config.rate_budget_bytes
         return max(1, self.rate_normalization_count * 24)
 
 
@@ -652,6 +621,7 @@ class MotionBase(nn.Module):
             self.observations = torch.zeros(len(self.base_xyz), dtype=torch.long, device=self.base_xyz.device)
         self._region_id_lengths = _id_lengths(len(self.parents) - 1, self.base_xyz)
         self._gs_id_lengths = _id_lengths(len(self.base_xyz), self.base_xyz)
+        self.codec_previous_state = None if state is None else DecodedState.restore(state)
         self.frame_reference_state = (None if reference is None else
                                       DecodedState.restore(reference))
         if self.committed:

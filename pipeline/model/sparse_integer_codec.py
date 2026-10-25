@@ -11,8 +11,6 @@ import zlib
 import numpy as np
 
 MOTION_MAGICS = (b'SVI1', b'SVZ1', b'SVX1')
-GATE_DELTA_MAGICS = (b'SPG5', b'SPG6', b'SPG7', b'SPG8')
-TRANSLATION_ONLY_SPATIAL_MAGICS = (b'SPG3', b'SPG4', b'SPG7', b'SPG8')
 OPACITY_MAGICS = (b'OVI1', b'OVZ1', b'OVX1')
 OPACITY_HEADER = struct.Struct('<4sIIIfII32s')
 MAX_LZMA_MEMORY = 128 * 1024 * 1024
@@ -148,8 +146,7 @@ def _read_values(reader, count, components):
 
 
 def _spatial_prefix(reader):
-    magic = bytes(reader.take(4))
-    if magic not in (b'SPG1', b'SPG2', b'SPG3', b'SPG4', *GATE_DELTA_MAGICS):
+    if bytes(reader.take(4)) not in (b'SPG1', b'SPG2', b'SPG3', b'SPG4'):
         raise ValueError('Planar motion layout requires a spatial motion packet')
     reader.take(32)
     frame, regions, count, births = [reader.integer() for _ in range(4)]
@@ -164,12 +161,8 @@ def _spatial_prefix(reader):
         raise ValueError('Invalid survivor layout')
     if reader.integer() != 0:
         raise ValueError('Spatial layout requires a fixed parent tree')
-    gate_start = reader.cursor
-    if magic in GATE_DELTA_MAGICS:
-        reader.gaps(reader.integer(), regions)
-    else:
-        reader.take((regions + 7) // 8)
-    return regions, count, births, gate_start
+    reader.take((regions + 7) // 8)
+    return regions, count, births
 
 
 def _encode_sparse(reader, limit):
@@ -239,12 +232,12 @@ def _check_motion_tail(tail, births, count, pose_bytes=28):
 
 def encode_motion_layout(raw):
     reader = _Reader(raw)
-    regions, count, births, _ = _spatial_prefix(reader)
+    regions, count, births = _spatial_prefix(reader)
     prefix = raw[:reader.cursor]
     region = _encode_sparse(reader, regions - 1)
     point = _encode_sparse(reader, count)
     tail = bytes(reader.take(reader.remaining))
-    _check_motion_tail(tail, births, count, 12 if raw[:4] in TRANSLATION_ONLY_SPATIAL_MAGICS else 28)
+    _check_motion_tail(tail, births, count, 12 if raw[:4] in (b'SPG3', b'SPG4') else 28)
     return _varint(len(prefix)) + prefix + region + point + tail
 
 
@@ -252,13 +245,13 @@ def decode_motion_layout(layout, raw_length):
     reader = _Reader(layout)
     prefix = bytes(reader.take(reader.integer()))
     prefix_reader = _Reader(prefix)
-    regions, count, births, _ = _spatial_prefix(prefix_reader)
+    regions, count, births = _spatial_prefix(prefix_reader)
     if prefix_reader.remaining:
         raise ValueError('Unexpected spatial prefix trailer')
     region = _decode_sparse(reader, regions - 1)
     point = _decode_sparse(reader, count)
     tail = bytes(reader.take(reader.remaining))
-    _check_motion_tail(tail, births, count, 12 if prefix[:4] in TRANSLATION_ONLY_SPATIAL_MAGICS else 28)
+    _check_motion_tail(tail, births, count, 12 if prefix[:4] in (b'SPG3', b'SPG4') else 28)
     raw = prefix + region + point + tail
     if len(raw) != raw_length:
         raise ValueError('Reconstructed motion length mismatch')

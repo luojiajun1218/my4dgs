@@ -4,7 +4,7 @@ __pycache__/
 data/
 output/
 references/
-tmp/
+
 # Local CUDA extension build products (sources are not present here).
 submodules/
 build/

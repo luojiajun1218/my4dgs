@@ -1,0 +1,97 @@
+{
+  "sequence_verified": true,
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de",
+  "frames": 300,
+  "dynamic_frames": 299,
+  "psnr": 34.24441249847412,
+  "ssim": 0.9710666882991791,
+  "dynamic_complete_update_bytes": 50917.1872909699,
+  "dynamic_components": {
+    "motion_bytes": 41406.548494983275,
+    "opacity_bytes": 5067.5953177257525,
+    "feature_bytes": 259.2675585284281,
+    "birth_bytes": 3524.8929765886287,
+    "manifest_bytes": 658.8829431438127
+  },
+  "aggregate_materialized_fps": 226.93125313027755,
+  "mean_frame_fps": 227.21784832222227,
+  "shared_reference_bytes": 17720236,
+  "total_stream_bytes": 32944475,
+  "amortized_stream_bytes_per_frame": 109814.91666666667,
+  "mean_train_wall_seconds": 33.14219512768229,
+  "segments": [
+    {
+      "start": 0,
+      "end": 29,
+      "psnr": 34.30294253031413,
+      "dynamic_update_bytes": 50299.93103448276
+    },
+    {
+      "start": 30,
+      "end": 59,
+      "psnr": 34.314038340250654,
+      "dynamic_update_bytes": 47389.3
+    },
+    {
+      "start": 60,
+      "end": 89,
+      "psnr": 34.22537333170573,
+      "dynamic_update_bytes": 50803.8
+    },
+    {
+      "start": 90,
+      "end": 119,
+      "psnr": 34.85243288675944,
+      "dynamic_update_bytes": 49589.96666666667
+    },
+    {
+      "start": 120,
+      "end": 149,
+      "psnr": 34.776350021362305,
+      "dynamic_update_bytes": 49460.6
+    },
+    {
+      "start": 150,
+      "end": 179,
+      "psnr": 34.1007433573405,
+      "dynamic_update_bytes": 53051.333333333336
+    },
+    {
+      "start": 180,
+      "end": 209,
+      "psnr": 34.0029478708903,
+      "dynamic_update_bytes": 55201.03333333333
+    },
+    {
+      "start": 210,
+      "end": 239,
+      "psnr": 34.05879071553548,
+      "dynamic_update_bytes": 52003.933333333334
+    },
+    {
+      "start": 240,
+      "end": 269,
+      "psnr": 33.71066640218099,
+      "dynamic_update_bytes": 50443.26666666667
+    },
+    {
+      "start": 270,
+      "end": 299,
+      "psnr": 34.099839528401695,
+      "dynamic_update_bytes": 50908.13333333333
+    }
+  ],
+  "all_old_orientations_unchanged": true,
+  "all_new_orientations_inherited": true,
+  "max_quality_difference": 0.0,
+  "max_cache_pixel_difference": 0.0,
+  "checkpoint_states_checked": 10,
+  "targets": {
+    "psnr_over_34_2": true,
+    "dynamic_complete_bytes_at_most_50000": false,
+    "aggregate_materialized_fps_at_least_200": true
+  },
+  "all_targets_met": false,
+  "update_scope": "All motion/alpha/feature/birth payloads plus frame manifest; one-time reference separate",
+  "fps_scope": "50 materialized renders after10 warmups; excludes decode/upload"
+}

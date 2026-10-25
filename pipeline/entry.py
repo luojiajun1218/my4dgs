@@ -47,12 +47,6 @@ class Pipeline(BasePipeline):
         return super().setup()
 
     def setup_trainer_and_modules(self):
-        if self.config.ckpt_path is None:
-            raise ValueError('A completed first-frame checkpoint is required; set ckpt_path')
-        if not Path(self.config.ckpt_path).is_file():
-            raise FileNotFoundError(
-                f'Checkpoint does not exist or its symlink is broken: {self.config.ckpt_path}. '
-                'Restore the checkpoint or update ckpt_path before starting training.')
         output_dir = Path(self.config.output_dir) / self.config.experiment_name
         self.datamodule = DataModule(self.config.data)
         self.module = Module(self.config.module, datamodule=self.datamodule)

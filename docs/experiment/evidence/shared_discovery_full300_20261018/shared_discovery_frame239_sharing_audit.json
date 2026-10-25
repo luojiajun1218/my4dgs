@@ -1,0 +1,41 @@
+{
+  "complete": true,
+  "run": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de",
+  "frame": 239,
+  "checkpoint": "output/fs_goal_rd_20261017/gate_shared_discovery_warm20_full300/20261018T113940_72a5de/rigid-ckpt-239-200.pth",
+  "checkpoint_unchanged": true,
+  "scope": "Prebirth motion packet only, same integer total motion and reference. No image retraining or training gate selection. Eight fitted predictors minimize the existing raw-rate/L1 proxy, not exact entropy or optimal retrained fixed-tree performance.",
+  "rows": [
+    {
+      "representation": "actual_learned_hierarchy",
+      "bytes": 37202,
+      "gs_t": 13144,
+      "selected_regions": 50
+    },
+    {
+      "representation": "current_eight_coarse_predictors",
+      "bytes": 86471,
+      "gs_t": 48601,
+      "max_float_pose_roundoff": 3.814697265625e-06
+    },
+    {
+      "representation": "rate_l1_fitted_eight_coarse_predictors",
+      "bytes": 78947,
+      "gs_t": 39323,
+      "max_float_pose_roundoff": 1.9073486328125e-06
+    },
+    {
+      "representation": "all_gs_without_shared_predictor",
+      "bytes": 149451,
+      "gs_t": 183888,
+      "max_float_pose_roundoff": 1.9073486328125e-06
+    },
+    {
+      "representation": "rate_l1_refitted_predictors_same_learned_gate",
+      "bytes": 37202,
+      "gs_t": 13144,
+      "refitted_nodes": 50,
+      "max_float_pose_roundoff": 0.0
+    }
+  ]
+}

@@ -67,7 +67,7 @@ def decode_frame(directory: Path, frame: int, state, raw):
         raise ValueError('Unknown DC feature update timing')
     feature_path = directory / expected_feature_name
     if feature_name is not None:
-        feature_codec = importlib.import_module('pipeline.model.legacy_feature_codec')
+        feature_codec = importlib.import_module('pipeline.model.sparse_features')
         current['sh_dc'] = feature_codec.decode_feature_dc_delta(
             feature_path.read_bytes(), current['sh_dc'], frame_index=frame,
             owner=decoded.owner[:old_count], node_count=len(decoded.parents))

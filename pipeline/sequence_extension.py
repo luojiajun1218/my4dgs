@@ -140,8 +140,6 @@ def validate_sequence_extension(checkpoint, current_data_config,
     old_trainer.setdefault('stage_image_camera', None)
     old_trainer.setdefault('motion_views_per_step', 1)
     current_trainer_config.setdefault('motion_views_per_step', 1)
-    old_trainer.setdefault('birth_views_per_step', 1)
-    current_trainer_config.setdefault('birth_views_per_step', 1)
     old_saves, new_saves = old_trainer.get('saving_ckpt_frames'), current_trainer_config.get('saving_ckpt_frames')
     if (not isinstance(old_saves, list) or not isinstance(new_saves, list) or
             any(isinstance(n, bool) or not isinstance(n, int) for n in new_saves) or

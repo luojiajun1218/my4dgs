@@ -1,5 +1,7 @@
 运行项目前记得 conda activate ReConGS
 数据通过软链接访问，不复制大型数据。
+本地 data/colmap4d/flame_steak 指向 /home/gamer-02/Documents/DeepLearning/ReCon-GS/data/colmap4d/flame_steak；其帧图像与 COLMAP 文件链接到 /home/gamer-02/Documents/DeepLearning/S2GS/data/standard_flame_steak_300。当前 配置使用 resolution: -1、num_frames: 300，并加载共享首帧；libgs 会自动缩小宽图。
+output 中历史结果仅用于读取；目录可能包含软链接，不修改链接目标。新实验使用新的 experiment_name。Git 不保存原始训练产物。
 
 # 特别须知
 实验汇总：最理想的做法是每次做完实验后，在docs/experiment/文件夹下面 写一个对应的md文档（别乱写文档，做完实验 再写文档），
@@ -17,7 +19,7 @@
 
 ## 项目结构与模块组织
 
-`main.py` 是训练入口，默认使用 `--pipeline=my4dgs`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。`pipeline/__init__.py` 为 `libgs` 提供加载入口，`_compat.py` 兼容旧的 `pipeline.ReCon-GS` 导入，无需保留中间目录。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。临时输出文件都放在`tmp/`
+`main.py` 是训练入口，默认使用 `--pipeline=my4dgs`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。`pipeline/__init__.py` 为 `libgs` 提供加载入口，`_compat.py` 兼容旧的 `pipeline.ReCon-GS` 导入，无需保留中间目录。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
 
 ## 构建、测试与开发命令
 
@@ -30,7 +32,15 @@ python main.py --config=config/xxxxx.yaml
 
 测试脚本无需加载渲染器，可检查层级采样、权重混合、梯度诊断、训练调度和 checkpoint 恢复。本项目没有单独的构建步骤。
 
-## 代理命令
+## 本机故障恢复与代理命令
+
+### 显卡掉卡：`gpu-recover`
+
+- 适用情况：宿主机上的 `nvidia-smi` 无法识别显卡，或内核日志出现 `GPU has fallen off the bus`、Xid 79、要求重启的 Xid 154，且机器仍能执行终端或 SSH 命令。先区分真实掉卡与受限运行环境无法访问 GPU；仅训练报错或 CUDA 显存不足时，应先排查程序。
+- 先用 `gpu-recover --check` 检查远程连接所需服务；用 `gpu-recover --status` 查看当前状态和上次开机检查报告。两者都不会重启。
+- 确认需要通过重启恢复时运行 `gpu-recover`。它会申请 sudo 权限、收集诊断、配置网络/SSH/Tailscale/Clash 开机恢复，并在诊断完成后安排 **1 分钟后整机重启**。重启会中断训练，执行前应保存可保存的进度并确认其他任务状态。
+- 只收集诊断用 `gpu-recover --collect-only`；重启发生前可用 `gpu-recover --cancel` 取消。日志保存在 `/var/log/gpu-recovery/`，不要在仓库中保存 sudo 密码。
+- 重启后，从已接入同一 Tailscale 网络的设备尝试 `ssh gamer-02@100.124.74.30`，再检查 `gpu-recover --status` 和 `nvidia-smi`。本地服务检查通过不等于外部 SSH 已验证；整机完全卡死时也无法依靠此脚本恢复。
 
 ### 代理变慢或连接超时：`clash change`
 
