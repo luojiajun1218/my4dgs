@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from contextlib import nullcontext
 import json
 import math
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,8 @@ from libgs.pipeline import Module as BaseModule
 from libgs.pipeline import ModuleConfig as BaseModuleConfig
 from libgs.renderer import Renderer, RendererConfig
 
-from .model.gaussian import BirthGaussianModel, GaussianModel
+from .model.gaussian import BirthGaussianModel, GaussianModel, select_budget_mask
+from .model.recongs_birth import ReConGSBirthGaussianModel, recongs_survivor_rows
 from .model.rigid_tree_birth_codec import export_birth_attributes
 from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     QuantizedNewGaussianView, materialize_quantized_gaussians, model_raw,
@@ -28,15 +30,11 @@ from .model.contribution_renderer import ContributionRenderer
 from .model.spatial_gated_motion import SpatialGatedMotion
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
 from .model.multiview_birth import MultiViewBirthConfig, propose_multiview_births
-from .model.birth_retirement import (retirement_count_trials, rank_retirement_candidates,
-    choose_validation_trial, compositing_contributions)
-from .model.birth_selection import (birth_image_loss, midpoint_image_utility,
-    useful_birth_subsets)
+from .model.birth_retirement import (birth_retirement_rows,
+                                     compositing_contributions)
 
 
-BIRTH_ALLOCATION = 'clone_small_v1'
-CURRENT_BIRTH_POLICIES = ('balanced_current_births', 'birth_driven_retirement',
-                        'multiview_gain_retirement')
+BIRTH_ALLOCATION = 'covariance_small_source_v20'
 
 
 def materialize_motion_evidence_counts(control):
@@ -48,6 +46,27 @@ def materialize_motion_evidence_counts(control):
         counts = torch.stack([torch.as_tensor(value, device=tensors[0].device)
                               for value in values]).tolist()
         control.update(zip(keys, counts))
+
+
+def restore_retired_reference(raw, state, previous_rows, retired):
+    """Rebuild the prior-frame raw reference for a checkpoint after deletion."""
+    count = len(state.xyz)
+    rows = torch.as_tensor(previous_rows).detach().cpu().long()
+    deleted = torch.as_tensor(retired['rows']).detach().cpu().long()
+    all_rows = torch.cat((rows, deleted)).sort().values
+    if (rows.ndim != 1 or deleted.ndim != 1 or len(rows) != len(raw['xyz']) or
+            not torch.equal(all_rows, torch.arange(count))):
+        raise ValueError('Retired checkpoint rows do not partition the previous reference')
+    restored = dict(xyz=state.xyz, rotation=state.rotation)
+    for name in RAW_FIELDS[2:]:
+        value = raw[name].detach().cpu()
+        removed = retired['attributes'][name].detach().cpu()
+        if removed.shape != (len(deleted), *value.shape[1:]):
+            raise ValueError(f'Retired checkpoint lost {name} attributes')
+        full = value.new_empty((count, *value.shape[1:]))
+        full[rows], full[deleted] = value, removed
+        restored[name] = full
+    return restored
 
 
 @dataclass
@@ -65,101 +84,90 @@ class GaussianConfig:
 
 @dataclass
 class BirthConfig:
-    """Stage-two candidate fitting and exact quantized attribute grid."""
+    """One covariance-sampled birth pool, split/prune, and balanced retirement."""
 
-    source_covariance_init: bool = False
-    replace_low_opacity: bool = False
-    replacement_policy: str = 'none'
-    replacement_count_tolerance: float = 0.0
+    method: str = 'covariance'
+    replacement_count_tolerance: float = 0.2
     refit_steps: int = 0
-    warmup_steps: int = 0
-    initial_opacity: Optional[float] = None  # Actual alpha; None preserves legacy logit=0.1.
-    rotation_updates: bool = True
-    clone_sigma_scale: float = 2.0
+    rotation_updates: bool = False
+    clone_sigma_scale: float = 0.5
+    initial_alpha: float = 0.1
+    position_step_sigma_cap: Optional[float] = None
+    max_new_gaussians: Optional[int] = 400
+    residual_proposal_views: int = 0
+    residual_candidate_min_alpha: float = 0.5
+    source_gradient_rescore_views: int = 0
     densification_stats_steps: int = 30
     densify_interval: int = 40
     densify_grad_threshold: float = 1.5e-4
     opacity_threshold: float = 0.01
+    terminal_opacity_threshold: float = 0.01
+    terminal_max_gaussians: Optional[int] = None
     new_max_screen_size: float = 20.0
-    max_new_gaussians: Optional[int] = None
     new_xyz_step_extent: float = 1e-5
     new_rotation_step: float = 0.001
     new_logscale_step: float = 0.001
     new_opacity_step: float = 0.01
     new_sh_step: float = 0.001
-    strategy: str = 'gradient_clone'
-    multiview: MultiViewBirthConfig = field(default_factory=MultiViewBirthConfig)
-    validation_cameras: list[str] = field(default_factory=list)
-    validation_min_gain_db: float = .005
-    validation_max_ssim_drop: float = 1e-4
-    fit_loss: str = 'photo'
-    fit_ssim_weight: float = 0.
-    admission_useful_fractions: list[float] = field(default_factory=list)
-    refit_all_training_views: bool = False
-    refit_motion: bool = True
-    lr_final_ratio: float = 1.
+    lr_final_ratio: float = 1.0
     protect_previous_births: bool = True
 
     def validate(self, motion_steps):
-        if self.strategy not in ('gradient_clone', 'multiview_residual'):
-            raise ValueError('Unknown birth.strategy')
-        if self.fit_loss not in ('photo', 'mse', 'mse_ssim'):
-            raise ValueError('Unknown birth.fit_loss')
-        if (isinstance(self.fit_ssim_weight, bool) or not math.isfinite(self.fit_ssim_weight)
-                or self.fit_ssim_weight < 0 or
-                (self.fit_loss == 'mse_ssim' and self.fit_ssim_weight == 0)):
-            raise ValueError('mse_ssim needs a finite positive birth.fit_ssim_weight')
-        if (not isinstance(self.refit_all_training_views, bool) or
-                len(set(self.admission_useful_fractions)) != len(self.admission_useful_fractions) or
-                any(isinstance(f, bool) or not math.isfinite(f) or not 0 < f <= 1
-                    for f in self.admission_useful_fractions)):
-            raise ValueError('Invalid useful birth fractions or refit camera policy')
-        if self.admission_useful_fractions and self.strategy != 'multiview_residual':
-            raise ValueError('Image-utility selection requires multi-view births')
-        if (not isinstance(self.refit_motion, bool) or
-                not isinstance(self.protect_previous_births, bool)):
-            raise ValueError('Birth refit/protection flags must be boolean')
-        for name in ('validation_min_gain_db', 'validation_max_ssim_drop'):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
-                raise ValueError(f'birth.{name} must be finite and nonnegative')
+        if self.method not in ('covariance', 'recongs'):
+            raise ValueError('birth.method must be covariance or recongs')
+        if self.method == 'recongs' and (
+                self.refit_steps or self.residual_proposal_views or
+                self.source_gradient_rescore_views or self.max_new_gaussians is not None or
+                self.position_step_sigma_cap is not None or self.terminal_max_gaussians is not None or
+                self.lr_final_ratio != 1. or not self.rotation_updates):
+            raise ValueError('ReCon-GS birth requires uncapped native fitting with rotation, '
+                             'without residual proposals, step caps or refitting')
+        if self.max_new_gaussians is not None and (
+                isinstance(self.max_new_gaussians, bool) or
+                not isinstance(self.max_new_gaussians, int) or self.max_new_gaussians < 1):
+            raise ValueError('birth.max_new_gaussians must be positive or null')
+        if (isinstance(self.source_gradient_rescore_views, bool) or
+                not isinstance(self.source_gradient_rescore_views, int) or
+                self.source_gradient_rescore_views < 0):
+            raise ValueError('birth.source_gradient_rescore_views must be a nonnegative integer')
+        if (isinstance(self.residual_proposal_views, bool) or
+                not isinstance(self.residual_proposal_views, int) or
+                self.residual_proposal_views < 0 or
+                0 < self.residual_proposal_views < 3):
+            raise ValueError('birth.residual_proposal_views must be zero or at least three')
+        if (isinstance(self.residual_candidate_min_alpha, bool) or
+                not isinstance(self.residual_candidate_min_alpha, (int, float)) or
+                not math.isfinite(self.residual_candidate_min_alpha) or
+                not 0 < self.residual_candidate_min_alpha <= 1):
+            raise ValueError('birth.residual_candidate_min_alpha must be in (0, 1]')
+        if self.terminal_max_gaussians is not None and (
+                isinstance(self.terminal_max_gaussians, bool) or
+                not isinstance(self.terminal_max_gaussians, int) or
+                self.terminal_max_gaussians < 1):
+            raise ValueError('birth.terminal_max_gaussians must be positive or null')
+        if (isinstance(self.initial_alpha, bool) or
+                not isinstance(self.initial_alpha, (int, float)) or
+                not math.isfinite(self.initial_alpha) or
+                not 0 < self.initial_alpha < 1):
+            raise ValueError('birth.initial_alpha must be finite and in (0, 1)')
+        if self.position_step_sigma_cap is not None and (
+                isinstance(self.position_step_sigma_cap, bool) or
+                not isinstance(self.position_step_sigma_cap, (int, float)) or
+                not math.isfinite(self.position_step_sigma_cap) or
+                self.position_step_sigma_cap <= 0):
+            raise ValueError('birth.position_step_sigma_cap must be positive or null')
+        if not isinstance(self.protect_previous_births, bool):
+            raise ValueError('birth.protect_previous_births must be boolean')
         if not 0 < self.lr_final_ratio <= 1:
             raise ValueError('birth.lr_final_ratio must be in (0, 1]')
-        if self.strategy == 'multiview_residual':
-            self.multiview.validate()
-            if (not self.validation_cameras or len(set(self.validation_cameras)) != len(self.validation_cameras)
-                    or self.replacement_policy != 'multiview_gain_retirement' or self.warmup_steps):
-                raise ValueError('Multi-view births require validation cameras, gain retirement and no alpha warmup')
-        elif self.replacement_policy == 'multiview_gain_retirement':
-            raise ValueError('Multi-view retirement requires multi-view births')
-        if not isinstance(self.source_covariance_init, bool):
-            raise ValueError('source_covariance_init must be boolean')
-        if not isinstance(self.replace_low_opacity, bool):
-            raise ValueError('birth.replace_low_opacity must be boolean')
-        if self.replacement_policy not in ('none', *CURRENT_BIRTH_POLICIES):
-            raise ValueError('Unknown birth.replacement_policy')
-        if self.replace_low_opacity and self.replacement_policy != 'none':
-            raise ValueError('Legacy and current-frame GS replacement are mutually exclusive')
         if (isinstance(self.replacement_count_tolerance, bool) or
                 not isinstance(self.replacement_count_tolerance, (int, float)) or
                 not math.isfinite(self.replacement_count_tolerance) or
                 not 0 <= self.replacement_count_tolerance < 1):
             raise ValueError('birth.replacement_count_tolerance must be in [0, 1)')
-        if self.replacement_count_tolerance and self.replacement_policy not in CURRENT_BIRTH_POLICIES:
-            raise ValueError('Replacement count tolerance requires a current-birth retirement policy')
         if (isinstance(self.refit_steps, bool) or not isinstance(self.refit_steps, int) or
                 self.refit_steps < 0):
             raise ValueError('birth.refit_steps must be a nonnegative integer')
-        if (isinstance(self.warmup_steps, bool) or not isinstance(self.warmup_steps, int) or
-                self.warmup_steps < 0):
-            raise ValueError('birth.warmup_steps must be a nonnegative integer')
-        if self.initial_opacity is not None and (
-                isinstance(self.initial_opacity, bool) or
-                not isinstance(self.initial_opacity, (int, float)) or
-                not math.isfinite(self.initial_opacity) or not 0 < self.initial_opacity < 1):
-            raise ValueError('birth.initial_opacity must be an alpha in (0, 1) or null')
-        if self.warmup_steps and self.initial_opacity is None:
-            raise ValueError('Birth warmup needs an explicit initial_opacity alpha')
         if not isinstance(self.rotation_updates, bool):
             raise ValueError('birth.rotation_updates must be boolean')
         if (isinstance(self.densification_stats_steps, bool) or
@@ -179,11 +187,8 @@ class BirthConfig:
                 raise ValueError(f'birth.{name} must be positive')
         if not 0 < self.opacity_threshold < 1:
             raise ValueError('birth.opacity_threshold must be in (0, 1)')
-        if self.max_new_gaussians is not None and (
-                isinstance(self.max_new_gaussians, bool) or
-                not isinstance(self.max_new_gaussians, int) or
-                self.max_new_gaussians < 1):
-            raise ValueError('birth.max_new_gaussians must be positive or null')
+        if not 0 < self.terminal_opacity_threshold < 1:
+            raise ValueError('birth.terminal_opacity_threshold must be in (0, 1)')
 
 
 @dataclass
@@ -197,7 +202,10 @@ class ModuleConfig(BaseModuleConfig):
     num_saving_images: int = 5
     lpips_required: bool = True
     gaussian: GaussianConfig = field(default_factory=GaussianConfig)
-    gaussian_stage2: GaussianConfig = field(default_factory=GaussianConfig)
+    gaussian_stage2: GaussianConfig = field(default_factory=lambda: GaussianConfig(
+        position_lr_init=0.0024, position_lr_final=2.4e-5,
+        feature_lr=0.075, opacity_lr=0.05, scaling_lr=0.075,
+        rotation_lr=0.015))
     renderer: RendererConfig = field(default_factory=RendererConfig)
     rigid_tree: RigidTreeConfig = field(default_factory=RigidTreeConfig)
     birth: BirthConfig = field(default_factory=BirthConfig)
@@ -280,162 +288,6 @@ def old_gaussian_pose_activity(decoded_xyz, decoded_rotation,
         changed_pose_rotation_threshold_rad=rotation_threshold)
 
 
-@torch.no_grad()
-def replace_low_opacity_gaussians(model, previous_birth_count):
-    """ReCon-GS replacement: retire as many combined rows as were just added.
-
-    Keep the surviving order so the existing motion packet can encode deleted
-    previous-frame row IDs. Only retired appearance is retained for mid-frame
-    checkpoint bootstraps; it is not an extra transmitted appearance update.
-    """
-    count = len(model._xyz)
-    if (isinstance(previous_birth_count, bool) or
-            not isinstance(previous_birth_count, int) or
-            not 0 <= previous_birth_count < count):
-        raise ValueError('Previous birth count must leave at least one surviving GS')
-    remove = torch.zeros(count, dtype=torch.bool, device=model._xyz.device)
-    retired = None
-    if previous_birth_count:
-        opacity = torch.sigmoid(model._opacity.detach().flatten())
-        if opacity.shape != (count,) or not bool(torch.isfinite(opacity).all()):
-            raise ValueError('Replacement requires finite per-GS opacity')
-        weakest = torch.argsort(opacity, stable=True)[:previous_birth_count]
-        remove[weakest] = True
-        retired = dict(rows=remove.nonzero(as_tuple=True)[0].cpu(),
-            attributes={name: getattr(model, attr).detach()[remove].cpu().clone()
-                        for name, attr in zip(RAW_FIELDS[2:], RAW_ATTRIBUTES[2:])})
-        model.prune_points(remove)
-    rows = (~remove).nonzero(as_tuple=True)[0]
-    return rows, retired, dict(
-        previous_count=count, previous_birth_count=previous_birth_count,
-        retired_count=previous_birth_count,
-        retired_older_count=int(remove[:count - previous_birth_count].sum()),
-        retired_previous_birth_count=int(remove[count - previous_birth_count:].sum()),
-        surviving_count=len(rows))
-
-
-@torch.no_grad()
-def balanced_replacement_rows(old_alpha, birth_alpha, source_rows, *, count_tolerance=0.0):
-    """Select a constant-size pool by quantized alpha, retaining birth sources.
-
-    Start with the strongest N rows of N old + M newborn GS. A retained birth
-    needs its old source as a decoder predictor: restore missing sources one
-    at a time, then remove the weakest unprotected row if the allowed count
-    difference is exceeded. The tolerance is relative to final births, not N.
-    Weak newborns can lose
-    either competition. Equal alpha favors keeping old rows, avoiding a
-    replacement with no alpha benefit. Preserve row order for serialization.
-    """
-    old_alpha = torch.as_tensor(old_alpha).detach().flatten()
-    birth_alpha = torch.as_tensor(birth_alpha, device=old_alpha.device).detach().flatten()
-    sources = torch.as_tensor(source_rows, device=old_alpha.device)
-    if (isinstance(count_tolerance, bool) or not isinstance(count_tolerance, (int, float)) or
-            not math.isfinite(count_tolerance) or not 0 <= count_tolerance < 1):
-        raise ValueError('Replacement count tolerance must be in [0, 1)')
-    count, candidates = len(old_alpha), len(birth_alpha)
-    if (count < 1 or sources.shape != (candidates,) or
-            sources.dtype not in (torch.int32, torch.int64) or
-            bool(((sources < 0) | (sources >= count)).any()) or
-            not bool(torch.isfinite(old_alpha).all()) or
-            not bool(torch.isfinite(birth_alpha).all()) or
-            bool(((old_alpha < 0) | (old_alpha > 1)).any()) or
-            bool(((birth_alpha < 0) | (birth_alpha > 1)).any())):
-        raise ValueError('Balanced replacement requires finite alpha and aligned birth sources')
-    alpha = torch.cat((old_alpha, birth_alpha))
-    keep = torch.zeros(count + candidates, dtype=torch.bool, device=old_alpha.device)
-    keep[torch.argsort(alpha, descending=True, stable=True)[:count]] = True
-    protected = torch.zeros_like(keep)
-    while True:
-        selected_sources = sources[keep[count:]].long()
-        present = keep[selected_sources]
-        protected[selected_sources[present]] = True
-        missing = keep[count:] & ~keep[sources.long()]
-        if not bool(missing.any()):
-            break
-        # Handle the strongest dependent birth first. Restoring all parents
-        # together could unnecessarily reject every birth in a crowded pool.
-        strongest = birth_alpha.masked_fill(~missing, -torch.inf).argmax()
-        source = sources[strongest].long()
-        keep[source] = protected[source] = True
-        # Source protection may keep a few extra old rows. Recompute the
-        # integer allowance if a newborn loses this competition as well.
-        while (int(keep.sum()) - count >
-               math.floor(count_tolerance * int(keep[count:].sum()) + 1e-9)):
-            # Reverse pool order so equal-alpha newborns lose before old rows.
-            eligible_alpha = alpha.masked_fill(~keep | protected, torch.inf).flip(0)
-            weakest = len(alpha) - 1 - eligible_alpha.argmin()
-            keep[weakest] = False
-    survivors = keep[:count].nonzero(as_tuple=True)[0]
-    selected = keep[count:].nonzero(as_tuple=True)[0]
-    retired = count - len(survivors)
-    allowance = math.floor(count_tolerance * len(selected) + 1e-9)
-    if not len(survivors) or not 0 <= len(selected) - retired <= allowance:
-        raise AssertionError('Balanced replacement did not preserve a nonempty source pool')
-    return survivors, selected
-
-
-@torch.no_grad()
-def birth_driven_retirement_rows(old_alpha, source_rows, *, count_tolerance, opacity_threshold):
-    """Retain admitted births and clamp threshold-based old retirement to K±tK.
-
-    If too few old rows fall below the alpha threshold, also retire the next
-    weakest rows. If too many qualify, retire only the weakest within the band.
-    Birth predictor sources remain present for exact decoding.
-    """
-    old_alpha = torch.as_tensor(old_alpha).detach().flatten()
-    sources = torch.as_tensor(source_rows, device=old_alpha.device)
-    count, births = len(old_alpha), sources.numel()
-    if (isinstance(count_tolerance, bool) or not isinstance(count_tolerance, (int, float)) or
-            not math.isfinite(count_tolerance) or not 0 <= count_tolerance < 1 or
-            isinstance(opacity_threshold, bool) or not isinstance(opacity_threshold, (int, float)) or
-            not math.isfinite(opacity_threshold) or not 0 <= opacity_threshold < 1 or
-            count < 1 or sources.ndim != 1 or sources.dtype not in (torch.int32, torch.int64) or
-            bool(((sources < 0) | (sources >= count)).any()) or
-            not bool(torch.isfinite(old_alpha).all()) or
-            bool(((old_alpha < 0) | (old_alpha > 1)).any())):
-        raise ValueError('Birth-driven retirement requires valid alpha, sources and count bounds')
-    protected = torch.zeros(count, device=old_alpha.device, dtype=torch.bool)
-    protected[sources.long()] = True
-    eligible = (~protected).nonzero(as_tuple=True)[0]
-    difference = math.floor(count_tolerance * births + 1e-9)
-    lower, upper = births - difference, births + difference
-    capacity = min(len(eligible), count - 1)
-    if lower > capacity:
-        raise ValueError(f'Cannot retire at least {lower} old GS for {births} admitted births: '
-                         f'only {capacity} old rows can retire while preserving birth sources. '
-                         'No admitted births have been discarded.')
-    natural = int(old_alpha[eligible].lt(opacity_threshold).sum())
-    retired = min(max(natural, lower), upper, capacity)
-    ranked = eligible[torch.argsort(old_alpha[eligible], stable=True)]
-    remove = torch.zeros_like(protected)
-    remove[ranked[:retired]] = True
-    rows = (~remove).nonzero(as_tuple=True)[0]
-    return rows, dict(natural_retirements=natural, min_retirements=lower,
-        max_retirements=upper, eligible_old_count=len(eligible),
-        opacity_threshold=opacity_threshold)
-
-
-def restore_retired_reference(raw, state, previous_rows, retired):
-    """Reconstruct the preceding raw reference when resuming after retirement."""
-    count = len(state.xyz)
-    rows = torch.as_tensor(previous_rows).detach().cpu().long()
-    deleted = torch.as_tensor(retired['rows']).detach().cpu().long()
-    all_rows = torch.cat((rows, deleted)).sort().values
-    if (rows.ndim != 1 or deleted.ndim != 1 or len(rows) != len(raw['xyz']) or
-            not torch.equal(all_rows, torch.arange(count))):
-        raise ValueError('Retired checkpoint rows do not partition the previous reference')
-    restored = dict(xyz=state.xyz, rotation=state.rotation)
-    for name in RAW_FIELDS[2:]:
-        value = raw[name].detach().cpu()
-        removed = retired['attributes'][name].detach().cpu()
-        if removed.shape != (len(deleted), *value.shape[1:]):
-            raise ValueError(f'Retired checkpoint lost {name} attributes')
-        full = value.new_empty((count, *value.shape[1:]))
-        full[rows], full[deleted] = value, removed
-        restored[name] = full
-    return restored
-
-
 class Module(BaseModule):
     """Old GS learn motion; newborn GS fit quantized geometry and appearance."""
 
@@ -444,21 +296,14 @@ class Module(BaseModule):
         validate_initial_opacity_threshold(cfg.initial_opacity_threshold)
         cfg.birth.validate(cfg.rigid_tree.motion_steps)
         cfg.opacity_update.validate()
-        if cfg.birth.warmup_steps >= cfg.rigid_tree.birth_steps - cfg.birth.refit_steps:
-            raise ValueError('Birth warmup must leave candidate-selection steps')
+        if cfg.birth.method == 'recongs' and cfg.opacity_update.joint_with_birth:
+            raise ValueError('ReCon-GS birth keeps old opacity frozen during newborn fitting')
         if cfg.birth.refit_steps:
             if (cfg.birth.refit_steps >= cfg.rigid_tree.birth_steps or
-                    cfg.birth.replacement_policy not in CURRENT_BIRTH_POLICIES or
                     not cfg.rigid_tree.amplitude_refit_steps):
-                raise ValueError('Birth refitting requires current-birth retirement, fixed motion support, and selection steps')
+                raise ValueError('Birth refitting requires fixed motion support and fitting steps')
         if cfg.opacity_update.amplitude_refit_steps >= cfg.rigid_tree.motion_steps:
             raise ValueError('Opacity amplitude refitting must leave selection steps')
-        if cfg.opacity_update.enabled and cfg.birth.replace_low_opacity:
-            raise ValueError('Current-frame alpha pruning requires birth.replace_low_opacity=false')
-        if cfg.birth.strategy == 'multiview_residual' and cfg.opacity_update.joint_with_birth:
-            raise ValueError('Multi-view birth validation requires frozen old opacity')
-        if cfg.birth.strategy == 'multiview_residual' and cfg.sh_degree != 1:
-            raise ValueError('Multi-view appearance initialization currently requires SH degree 1')
         if not isinstance(cfg.effective_motion_observations, bool):
             raise ValueError('effective_motion_observations must be boolean')
         if not isinstance(cfg.motion_coarse_to_fine, bool):
@@ -473,7 +318,7 @@ class Module(BaseModule):
         self.gaussians.create_from_pcd(self.datamodule.scene.point_cloud,
                                        self.datamodule.cameras_extent)
         self.gaussians.training_setup(cfg.gaussian)
-        self.births = BirthGaussianModel(cfg.sh_degree)
+        self.births = self._new_birth_model()
         renderer_type = ContributionRenderer if cfg.effective_motion_observations else Renderer
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = SpatialGatedMotion(cfg.rigid_tree)
@@ -487,7 +332,7 @@ class Module(BaseModule):
         self.birth_control = {}
         self.retired_reference = None
         self.stage_image_metrics = []
-        self._birth_views_cache = None
+        self._birth_diagnostic_views = {}
         self._freeze_base()
 
     @property
@@ -503,62 +348,49 @@ class Module(BaseModule):
         return self.motion_steps + self.config.rigid_tree.birth_steps
 
     @property
-    def birth_selection_end_step(self):
+    def birth_commit_step(self):
         return self.total_steps - self.config.birth.refit_steps
-
-    @property
-    def birth_warmup_end_step(self):
-        return self.motion_steps + self.config.birth.warmup_steps
 
     @property
     def birth_refit_active(self):
         return self.birth_control.get('refit_active', False) and not self.frame_finalized
 
     @property
+    def birth_opacity_active(self):
+        return (self.motion_committed and not self.frame_finalized and
+                getattr(self, 'opacity_update', None) is not None and
+                self.config.opacity_update.joint_with_birth and
+                not self.birth_control.get('replacement_committed', False))
+
+    @property
     def birth_allocation(self):
-        return ('multiview_residual_v1' if self.config.birth.strategy == 'multiview_residual'
-                else BIRTH_ALLOCATION)
+        if self.config.birth.method == 'recongs':
+            return 'recongs_native_spawn_next_frame_merge_v1'
+        if self.config.birth.residual_proposal_views:
+            return (f'multiview_residual_proposal_v28_'
+                    f'{self.config.birth.residual_proposal_views}_views')
+        return BIRTH_ALLOCATION
 
     def _freeze_base(self):
         for attr in RAW_ATTRIBUTES:
             getattr(self.gaussians, attr).requires_grad_(False)
 
-    def _birth_warmup_active(self, step):
-        return self.config.birth.warmup_steps > 0 and step <= (
-            self.motion_steps + self.config.birth.warmup_steps)
-
-    def _birth_joint_opacity_active(self, step):
-        return (getattr(self, 'opacity_update', None) is not None and
-                self.motion_committed and not self.frame_finalized and
-                self.config.opacity_update.joint_with_birth and
-                not self.birth_control.get('replacement_committed', False) and
-                step > self.motion_steps + self.config.birth.warmup_steps and
-                step <= getattr(self, 'birth_selection_end_step', self.total_steps))
-
     def _configure_birth_phase(self, step):
         """Derive trainability from the step so boundary checkpoints resume safely."""
-        warmup = self._birth_warmup_active(step)
         if self.births.optimizer is not None:
-            for name in ('_opacity', '_scaling'):
-                parameter = getattr(self.births, name)
-                parameter.requires_grad_(not warmup)
-                if warmup:
-                    parameter.grad = None
+            for name in ('_xyz', '_features_dc', '_features_rest', '_opacity', '_scaling'):
+                getattr(self.births, name).requires_grad_(True)
             self.births._rotation.requires_grad_(self.config.birth.rotation_updates)
-            phase_step = max(0, step-self.motion_steps-1)
-            ratio = self.config.birth.lr_final_ratio ** (phase_step / max(1, self.total_steps-self.motion_steps-1))
+            if self.config.birth.method == 'recongs':
+                # Upstream restores base group settings and only schedules xyz.
+                self.births.update_learning_rate(max(0, step - self.motion_steps))
+                return
             for group in self.births.optimizer.param_groups:
-                # Restored optimizer rates may already have decayed.
                 rates = self.config.gaussian_stage2
                 base = dict(xyz=rates.position_lr_init*self.births.spatial_lr_scale,
                     f_dc=rates.feature_lr, f_rest=rates.feature_lr/20,
                     opacity=rates.opacity_lr, scaling=rates.scaling_lr, rotation=rates.rotation_lr)
-                group['lr'] = base[group['name']] * ratio
-        if self.opacity_update is not None:
-            active = self._birth_joint_opacity_active(step)
-            self.opacity_update.delta.requires_grad_(active)
-            if not active:
-                self.opacity_update.delta.grad = None
+                group['lr'] = base[group['name']]
 
     @torch.no_grad()
     def _record_birth_learning(self, step, gradients=None):
@@ -571,16 +403,15 @@ class Module(BaseModule):
                   alpha.median() if count else alpha.new_zeros(()),
                   alpha.lt(self.config.birth.opacity_threshold).sum().float()]
         values.extend(gradients.get(name, alpha.new_zeros(())) for name in
-                      ('xyz_grad_norm', 'color_grad_norm', 'old_opacity_grad_norm'))
+                      ('xyz_grad_norm', 'color_grad_norm'))
         values = torch.stack(values).tolist()
         row = dict(step=step, new_count=count, alpha_mean=values[0], alpha_median=values[1],
             below_opacity_threshold=int(values[2]), xyz_grad_norm=values[3],
-            color_grad_norm=values[4], old_opacity_grad_norm=values[5],
-            warmup=self._birth_warmup_active(step),
+            color_grad_norm=values[4],
             new_opacity_trainable=self.births._opacity.requires_grad,
             new_scale_trainable=self.births._scaling.requires_grad,
-            old_opacity_trainable=(self.opacity_update.delta.requires_grad
-                                  if self.opacity_update is not None else False))
+            birth_lr_scale_mean=(float(self._birth_learning_rate_scale(step).mean())
+                                 if count else 0.0))
         self.birth_control.setdefault('learning_trace', []).append(row)
 
     def on_save_checkpoint(self, ckpt):
@@ -605,6 +436,8 @@ class Module(BaseModule):
                           not self.frame_finalized and self.births.optimizer is not None else None)
         ckpt['birth_source_rows'] = (self.births.source_rows.detach().cpu()
                                      if self.births.source_rows is not None else None)
+        ckpt['birth_created_steps'] = (self.births.created_steps.detach().cpu()
+                                       if self.births.created_steps is not None else None)
 
     def on_load_checkpoint(self, ckpt):
         self.gaussians.restore(ckpt['gaussians'], self.config.gaussian)
@@ -619,7 +452,7 @@ class Module(BaseModule):
             self._freeze_base()
             return
         if (ckpt.get('current_frame', 0) >= 1 and
-                ckpt.get('birth_allocation', 'clone_small_v1') != getattr(self, 'birth_allocation', BIRTH_ALLOCATION)):
+                ckpt.get('birth_allocation', 'clone_small_v1') != self.birth_allocation):
             raise ValueError('Earlier newborn allocation checkpoints are replay-only')
         if self.config.motion_coarse_to_fine and not motion_image_schedule_compatible(
                 ckpt.get('motion_image_schedule'), True, self.motion_steps,
@@ -688,6 +521,10 @@ class Module(BaseModule):
             if source is None or len(source) != len(self.births._xyz):
                 raise ValueError('Birth checkpoint lost source lineage')
             self.births.source_rows = source.to(self.device)
+            created = ckpt.get('birth_created_steps')
+            if created is None or len(created) != len(self.births._xyz):
+                raise ValueError('Birth checkpoint lost per-point learning age')
+            self.births.created_steps = created.to(self.device)
         if getattr(self, 'birth_refit_active', False):
             self._set_birth_refit_trainable()
         if self.motion_committed and not self.frame_finalized:
@@ -702,31 +539,51 @@ class Module(BaseModule):
         retirement = dict(previous_count=len(self.gaussians._xyz), retired_count=0)
         previous_birth_sources = self.motion.pending_birth_sources
         previous_birth_count = 0 if previous_birth_sources is None else len(previous_birth_sources)
-        previous_rows = None
-        if self.config.birth.replace_low_opacity and self.current_frame > 1:
-            prior = self.motion.codec_previous_state
-            sources = self.motion.pending_birth_sources
-            if (prior is None or prior.frame_index != self.current_frame - 1 or
-                    len(prior.xyz) != len(self.gaussians._xyz) or sources is None):
-                raise ValueError('GS replacement requires the finalized previous frame and birth lineage')
-            previous_rows, self.retired_reference, retirement = replace_low_opacity_gaussians(
-                self.gaussians, len(sources))
+        opacity_reference = (self.gaussians._opacity.detach().clone()
+                             if self.config.birth.method == 'recongs' else None)
+        merge_rows = None
+        if self.config.birth.method == 'recongs':
+            merge_rows = recongs_survivor_rows(self.gaussians.get_opacity,
+                                              previous_birth_count)
+            remove = torch.ones(len(self.gaussians._xyz), dtype=torch.bool, device=self.device)
+            remove[merge_rows] = False
+            if previous_birth_count:
+                self.retired_reference = dict(rows=remove.nonzero(as_tuple=True)[0].cpu(),
+                    attributes={name: getattr(self.gaussians, attr)[remove].detach().cpu().clone()
+                                for name, attr in zip(RAW_FIELDS[2:], RAW_ATTRIBUTES[2:])})
+                self.gaussians.prune_points(remove)
+            retirement.update(retired_count=previous_birth_count,
+                timing='before_motion', policy='recongs_merge_lowest_alpha',
+                natural_retirements=int(opacity_reference.sigmoid().lt(
+                    self.config.birth.opacity_threshold).sum()))
+            if len(self.gaussians._xyz) != self.reference_count:
+                raise ValueError('ReCon-GS merge lost the fixed base capacity')
         xyz, rotation = self.gaussians._xyz.detach(), self.gaussians._rotation.detach()
-        if previous_rows is None and self.current_frame > 1:
-            previous_rows = torch.arange(len(xyz), device=xyz.device)
+        previous_rows = (merge_rows if merge_rows is not None else
+                         torch.arange(len(xyz), device=xyz.device)
+                         if self.current_frame > 1 else None)
         self.motion.setup(xyz, rotation, self.datamodule.cameras_extent,
                           frame_index=self.current_frame, previous_rows=previous_rows)
         self.frame_prepared = True
         self.frame_finalized = False
         self.motion_committed = False
         self.frame_report = None
-        self.birth_control = dict(clone_added=0, split_added=0, pruned=0,
+        self.births = self._new_birth_model()
+        self.birth_control = dict(clone_added=0, split_added=0,
+                                  proposal_added=0,
+                                  split_children=0, split_parents_replaced=0,
+                                  pruned=0,
                                   source_tracked=True, retirement=retirement,
                                   previous_birth_count=previous_birth_count)
         self.stage_image_metrics = []
+        self._birth_diagnostic_views = {}
         self._freeze_base()
         if self.opacity_update is not None:
-            self.opacity_update.setup(self.gaussians._opacity)
+            self.opacity_update.setup(opacity_reference if merge_rows is not None
+                                      else self.gaussians._opacity)
+            if merge_rows is not None:
+                # Retain the full preceding reference for exact checkpoint bootstrap.
+                self.opacity_update.rows = merge_rows.clone()
 
     def pre_training_step(self):
         self.prepare_frame()
@@ -742,12 +599,19 @@ class Module(BaseModule):
         self.frame_finalized = False
         self.motion_committed = False
         self.frame_report = None
-        self._birth_views_cache = None
 
 
-    def make_birth_view(self):
+    def _new_birth_model(self):
+        model = (ReConGSBirthGaussianModel if self.config.birth.method == 'recongs'
+                 else BirthGaussianModel)
+        return model(self.config.sh_degree)
+
+    def make_birth_view(self, *, quantized=False):
         if not len(self.births._xyz):
             return None
+        if self.config.birth.method == 'recongs' and not quantized:
+            # Native ReCon-GS trains continuous newborns; quantize only at export.
+            return self.births
         # The view immediately gathers its few source rows into owned tensors;
         # cloning every old GS attribute first only duplicates GPU traffic.
         reference = model_raw(self.gaussians, clone=False)
@@ -792,7 +656,7 @@ class Module(BaseModule):
                 xyz, rotation = self.motion(self.trainer.global_step, training=training)
                 self.gaussians.rigid_xyz = xyz
                 self.gaussians.rigid_rotation = rotation
-            elif self._birth_joint_opacity_active(self.trainer.global_step):
+            if self.birth_opacity_active:
                 if self.config.opacity_update.mode == 'alpha':
                     self.gaussians.rigid_alpha = self.opacity_update.alphas()
                 else:
@@ -818,11 +682,8 @@ class Module(BaseModule):
             enabled=self.config.motion_coarse_to_fine,
             fitting_motion=self.frame_prepared and not self.motion_committed,
             bootstrap_steps=self.config.rigid_tree.spatial_gate.start_step)
-        image_loss = (birth_image_loss(image, viewpoint.image,
-                          self.config.birth.fit_ssim_weight if self.config.birth.fit_loss == 'mse_ssim' else 0.)
-                      if self.motion_committed and self.config.birth.fit_loss in ('mse', 'mse_ssim')
-                      else motion_photometric_loss(image, viewpoint.image,
-                                                  self.config.lambda_dssim, factor))
+        image_loss = motion_photometric_loss(image, viewpoint.image,
+                                              self.config.lambda_dssim, factor)
         loss = image_loss
         # Leave scalar diagnostics on device until all views have finished.
         # Converting each one to float would synchronize CUDA before backward.
@@ -848,9 +709,13 @@ class Module(BaseModule):
             metrics['predictor_image_loss'] = prediction_loss.detach()
         if not self.motion_committed and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
+        elif self.birth_refit_active and regularization_weight:
+            refit_regularization = self.motion.fixed_support_regularization_loss(step)
+            loss = loss + regularization_weight * refit_regularization
+            metrics['motion_refit_regularization'] = (
+                refit_regularization.detach() * regularization_weight)
         if (regularization_weight and getattr(self, 'opacity_update', None) is not None and
-                (not self.motion_committed or
-                 self._birth_joint_opacity_active(step))):
+                (not self.motion_committed or self.birth_opacity_active)):
             terms = self.opacity_update.rate_terms(self._rate_byte_price(step),
                 width=self.config.rigid_tree.sparse_rate_width_bins)
             loss = loss + regularization_weight * terms['loss']
@@ -863,248 +728,216 @@ class Module(BaseModule):
 
     @torch.no_grad()
     def _commit_opacity_and_retire(self):
-        """Commit fitted alpha; defer count-coupled retirement until births fit."""
+        """Commit fitted old alpha, leaving point retirement for the birth boundary."""
         update = self.opacity_update
-        logits = update.canonical_logits(full=True).to(self.device)
-        if getattr(getattr(self.config, 'birth', None), 'replacement_policy', 'none') in CURRENT_BIRTH_POLICIES:
-            # Final surviving births determine the quota. Committing alpha at
-            # the phase boundary must not independently shrink the old pool.
-            rows = torch.arange(len(logits), device=self.device)
-            update.commit(rows)
-            self.gaussians._opacity.copy_(logits)
-            return rows
-        remove = logits.sigmoid().flatten() < self.config.opacity_update.prune_threshold
-        prevented_empty = bool(remove.all())
-        if prevented_empty:
-            remove[logits.flatten().argmax()] = False
-        rows = (~remove).nonzero(as_tuple=True)[0]
-        count, removed = len(remove), int(remove.sum())
-        previous_births = self.birth_control.get('previous_birth_count', 0)
-        self.birth_control['retirement'] = dict(
-            rule='current_quantized_alpha', threshold=self.config.opacity_update.prune_threshold,
-            previous_count=count, retired_count=removed, surviving_count=len(rows),
-            retired_older_count=int(remove[:count - previous_births].sum()),
-            retired_previous_birth_count=int(remove[count - previous_births:].sum()),
-            prevented_empty=prevented_empty)
-        if removed:
-            self.retired_reference = dict(rows=remove.nonzero(as_tuple=True)[0].cpu(),
-                attributes={name: getattr(self.gaussians, attr).detach()[remove].cpu().clone()
-                            for name, attr in zip(RAW_FIELDS[2:], RAW_ATTRIBUTES[2:])})
-            self.gaussians.prune_points(remove)
-            self.motion.retain_survivors(rows)
+        logits = update.canonical_logits().to(self.device)
+        rows = update.rows.clone()
         update.commit(rows)
-        self.gaussians._opacity.copy_(logits[rows])
+        self.gaussians._opacity.copy_(logits)
         return rows
 
-    def _birth_camera_views(self):
-        """Cache only training cameras; held-out evaluation cannot seed births."""
-        cached = getattr(self, '_birth_views_cache', None)
-        if cached is not None and cached[0] == self.current_frame:
-            return cached[1:]
-        validation = set(self.config.birth.validation_cameras)
-        dataset = self.datamodule.get_train_dataset()
-        names = {Path(item.path).name for item in dataset.items}
-        if not validation.issubset(names) or validation == names:
-            raise ValueError('Birth validation cameras must be a proper subset of training cameras')
-        fit, check = [], []
-        for index in sorted(range(len(dataset)), key=lambda i: Path(dataset.items[i].path).name):
-            view = dataset[index].to(self.device)
-            (check if Path(view.path).name in validation else fit).append(view)
-        if len(fit) < self.config.birth.multiview.min_support_views:
-            raise ValueError('Too few fitting cameras for multi-view births')
-        self._birth_views_cache = (self.current_frame, fit, check)
-        return fit, check
+    @torch.no_grad()
+    def _update_birth_opacity(self, step):
+        """Let old alpha compete with births on the existing sparse codec grid."""
+        if not self.birth_opacity_active:
+            return
+        birth_step = step - self.motion_steps
+        window = self.config.rigid_tree.motion_fit_window_steps
+        update = self.opacity_update
+        before = support = None
+        if self.config.opacity_update.birth_sources_only:
+            before = update.delta.detach().clone()
+            support = torch.zeros_like(update.delta, dtype=torch.bool)
+            if len(self.births._xyz):
+                support[update.rows[self.births.source_rows]] = True
+            if update.delta.grad is not None:
+                update.delta.grad.mul_(support)
+        self.opacity_update.optimizer_step(
+            self._rate_byte_price(step),
+            proximal=(window is None or birth_step % window == 0 or
+                      step == self.birth_commit_step),
+            lr_factor=(self.motion._motion_lr_factor(self.motion_steps)
+                       if self.config.opacity_update.decay_with_motion else 1.))
+        if before is not None:
+            # Zero gradients alone leave Adam momentum and proximal shrinkage
+            # active. Preserve every unrelated row exactly after both act.
+            update.delta.copy_(torch.where(support, update.delta, before))
+        # Newborn predictors and the final packet use these same canonical
+        # logits, while the alpha override carries image gradients above.
+        self.gaussians._opacity.copy_(self.opacity_update.canonical_logits().to(self.device))
+        self.birth_control['joint_opacity_steps'] = (
+            self.birth_control.get('joint_opacity_steps', 0) + 1)
+        self.birth_control['joint_opacity_scope'] = (
+            'birth_sources' if self.config.opacity_update.birth_sources_only else 'all_old')
+
+    def _training_views(self, frame, limit=None):
+        """Load every training camera for one frame in stable name order."""
+        previous_frame = self.datamodule.current_frame
+        try:
+            self.datamodule.current_frame = frame
+            dataset = self.datamodule.get_train_dataset()
+            indices = sorted(range(len(dataset)),
+                             key=lambda i: Path(dataset.items[i].path).name)
+            if limit is not None and len(indices) > limit:
+                stride = len(indices) / limit
+                indices = [indices[min(int(index * stride), len(indices) - 1)]
+                           for index in range(limit)]
+            return [dataset[index].to(self.device) for index in indices]
+        finally:
+            self.datamodule.current_frame = previous_frame
+
+    @torch.no_grad()
+    def _record_birth_pool_diagnostic(self, phase, step):
+        """Measure a deterministic training-view sample for diagnosis only."""
+        if not hasattr(self.datamodule, 'get_train_dataset'):
+            return None
+        views = self._birth_diagnostic_views.get(self.current_frame)
+        if views is None:
+            previous_frame = self.datamodule.current_frame
+            try:
+                self.datamodule.current_frame = self.current_frame
+                dataset = self.datamodule.get_train_dataset()
+                indices = sorted(range(len(dataset)),
+                    key=lambda i: Path(dataset.items[i].path).name)
+                indices = indices[:min(4, len(indices))]
+                views = [dataset[index].to(self.device) for index in indices]
+                self._birth_diagnostic_views[self.current_frame] = views
+            finally:
+                self.datamodule.current_frame = previous_frame
+        rows = []
+        for viewpoint in views:
+            image = self.forward(viewpoint, training=False)['render']
+            target = viewpoint.image
+            l1 = l1_loss(image, target)
+            dssim = 1 - ssim(image, target)
+            objective = ((1 - self.config.lambda_dssim) * l1 +
+                         self.config.lambda_dssim * dssim)
+            rows.append((Path(viewpoint.path).name, l1, dssim,
+                         psnr(image, target), objective))
+        if not rows:
+            return None
+        record = dict(step=int(step), phase=str(phase),
+            scope='training_views_diagnostic_only',
+            views=[row[0] for row in rows], view_count=len(rows),
+            old_count=len(self.gaussians._xyz), birth_count=len(self.births._xyz),
+            gaussian_count=len(self.gaussians._xyz) + len(self.births._xyz),
+            l1=float(torch.stack([row[1] for row in rows]).mean()),
+            dssim=float(torch.stack([row[2] for row in rows]).mean()),
+            psnr=float(torch.stack([row[3] for row in rows]).mean()),
+            objective=float(torch.stack([row[4] for row in rows]).mean()))
+        self.birth_control.setdefault('training_view_diagnostics', []).append(record)
+        logging.debug('Birth pool training-view diagnostic: %s',
+                      json.dumps(record, sort_keys=True))
+        return record
 
     def _raw_gaussian_model(self, raw):
+        """Wrap materialized attributes for ordinary contribution renders."""
         result = GaussianModel(self.config.sh_degree)
         result.active_sh_degree = self.gaussians.active_sh_degree
+        result.spatial_lr_scale = self.gaussians.spatial_lr_scale
         for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-            setattr(result, attr, torch.nn.Parameter(raw[name].detach(), requires_grad=False))
+            setattr(result, attr, torch.nn.Parameter(
+                raw[name].detach(), requires_grad=False))
         return result
 
     @torch.no_grad()
-    def _birth_layout_metrics(self, raw, rows, newborn, cameras):
-        model = self._raw_gaussian_model({name: value[rows] for name, value in raw.items()})
-        if newborn is not None:
-            model = MergedGaussianModel([model, newborn])
-        renderer = Renderer(self.config.renderer, model)
-        metrics = dict(psnr=0., ssim=0., mse=0.)
-        for camera in cameras:
-            image = renderer(camera, self.background)['render'].clamp(0, 1)
-            metrics['psnr'] += float(psnr(image, camera.image)) / len(cameras)
-            metrics['ssim'] += float(ssim(image, camera.image)) / len(cameras)
-            metrics['mse'] += float((image-camera.image).square().mean()) / len(cameras)
-        return metrics
+    def _retirement_contributions(self):
+        """Measure actual current/prior compositing for the same training cameras."""
+        current_raw = model_raw(self.gaussians, clone=False)
+        current_model = self._raw_gaussian_model(current_raw)
+        current_renderer = Renderer(self.config.renderer, current_model)
+        current = compositing_contributions(
+            current_renderer, self._training_views(self.current_frame), self.background)
 
-    @torch.no_grad()
-    def _multiview_retirement_rows(self, view):
-        count = len(self.gaussians._xyz)
-        all_rows = torch.arange(count, device=self.device)
-        births = len(self.births._xyz)
-        if not births:
-            return all_rows, all_rows[:0], dict(reason='empty_birth_pool')
-        fit, check = self._birth_camera_views()
-        raw = model_raw(self.gaussians, clone=False)
-        baseline = self._birth_layout_metrics(raw, all_rows, None, check)
-        current_renderer = Renderer(self.config.renderer, self._raw_gaussian_model(raw))
-        pools = [torch.arange(births, device=self.device)]
-        newborn_raw = None
-        utility_details = {}
-        if self.config.birth.admission_useful_fractions:
-            newborn_raw = {name: view.raw_value(name).detach() for name in RAW_FIELDS}
-            full_alpha = newborn_raw['opacity'].sigmoid()
-            half_model = self._raw_gaussian_model(newborn_raw)
-            half_model._opacity = torch.nn.Parameter(
-                torch.logit((full_alpha*.5).clamp(1e-6, 1-1e-6)))
-            utility_renderer = Renderer(self.config.renderer,
-                MergedGaussianModel([self._raw_gaussian_model(raw), half_model]))
-            baseline_errors = [float((current_renderer(camera, self.background)['render'].clamp(0, 1)
-                                      - camera.image).square().mean()) for camera in check]
-            utility = midpoint_image_utility(utility_renderer, check, self.background,
-                half_model._opacity, full_alpha, baseline_errors,
-                self.config.birth.fit_ssim_weight)
-            pools = useful_birth_subsets(utility, self.config.birth.admission_useful_fractions)
-            utility_details = dict(positive_count=int((utility > 0).sum()),
-                nonpositive_count=int((utility <= 0).sum()),
-                pool_counts=[len(pool) for pool in pools],
-                estimate='half_alpha_image_derivative', ssim_weight=self.config.birth.fit_ssim_weight)
-        current = compositing_contributions(current_renderer, fit, self.background)
-        previous = dict(raw)
+        previous_raw = dict(current_raw)
         reference = self.motion.frame_reference_state
-        previous['xyz'] = reference.xyz.to(self.device)
-        previous['rotation'] = reference.rotation.to(self.device)
+        previous_raw['xyz'] = reference.xyz.to(self.device)
+        previous_raw['rotation'] = reference.rotation.to(self.device)
         if self.opacity_update is not None:
-            previous['opacity'] = self.opacity_update.reference
-        # Color/scale are fixed, so the preceding raw state is fully available.
-        previous_frame = self.current_frame
-        previous_views = []
-        try:
-            self.datamodule.current_frame = previous_frame - 1
-            dataset = self.datamodule.get_train_dataset()
-            fit_names = {Path(camera.path).name for camera in fit}
-            for index in sorted(range(len(dataset)), key=lambda i: Path(dataset.items[i].path).name):
-                if Path(dataset.items[index].path).name in fit_names:
-                    previous_views.append(dataset[index].to(self.device))
-        finally:
-            self.datamodule.current_frame = previous_frame
-        if not previous_views:
-            raise ValueError('No preceding fitting cameras for retirement history')
-        prior_renderer = Renderer(self.config.renderer, self._raw_gaussian_model(previous))
-        prior = compositing_contributions(prior_renderer, previous_views, self.background)
-        recent = (self.birth_control.get('previous_birth_count', 0)
-                  if self.config.birth.protect_previous_births else 0)
-        trials, layouts, counts, selections, protections = [], [], [], [], []
-        for selected in pools:
-            ranked, protected = rank_retirement_candidates(current, prior,
-                self.births.source_rows[selected], previous_birth_count=recent)
-            selected_view = (view if len(selected) == births else self._raw_gaussian_model(
-                {name: value[selected] for name, value in newborn_raw.items()}))
-            for deleted in retirement_count_trials(len(selected), self.config.birth.replacement_count_tolerance):
-                if deleted > len(ranked):
-                    continue
-                keep = torch.ones(count, device=self.device, dtype=torch.bool)
-                keep[ranked[:deleted]] = False
-                rows = keep.nonzero(as_tuple=True)[0]
-                layouts.append(rows)
-                counts.append(deleted)
-                selections.append(selected)
-                protections.append(int(protected.sum()))
-                trials.append(self._birth_layout_metrics(raw, rows, selected_view, check))
-        choice = choose_validation_trial(baseline, trials,
-            self.config.birth.validation_min_gain_db, self.config.birth.validation_max_ssim_drop)
-        details = dict(contribution_rule='two_frame_compositing_max', baseline=baseline,
-            trial_retirements=counts, trial_metrics=trials, accepted=choice is not None,
-            trial_birth_counts=[len(selected) for selected in selections],
-            newborn_utility=utility_details,
-            protected_count=protections[choice if choice is not None else 0] if protections else 0,
-            protected_recent_births=recent,
-            min_gain_db=self.config.birth.validation_min_gain_db,
-            max_ssim_drop=self.config.birth.validation_max_ssim_drop,
-            validation_cameras=[Path(camera.path).name for camera in check])
-        self.birth_control['birth_admission'] = details
-        if choice is None:
-            return all_rows, all_rows[:0], details
-        details['selected_trial'] = choice
-        return layouts[choice], selections[choice], details
+            previous_raw['opacity'] = self.opacity_update.reference.to(self.device)
+        previous_model = self._raw_gaussian_model(previous_raw)
+        previous_renderer = Renderer(self.config.renderer, previous_model)
+        previous = compositing_contributions(
+            previous_renderer, self._training_views(self.current_frame - 1), self.background)
+        return current, previous
 
     @torch.no_grad()
     def commit_birth_replacement(self):
-        """Commit the final birth pool once; later steps fit this fixed row set.
-
-        This boundary is independent of the final training step. It is called
-        at finalization by default, and can precede a later fixed-set refit.
-        """
-        if self.config.birth.replacement_policy not in CURRENT_BIRTH_POLICIES:
-            return
+        """Fix the final birth set and retire the required number of old rows."""
         control = self.birth_control
         if control.get('replacement_committed', False):
             retired = control['retirement']
             if (len(self.births._xyz) != retired['birth_count'] or
                     len(self.gaussians._xyz) + len(self.births._xyz) !=
                     retired['previous_count'] + retired['birth_count'] - retired['retired_count']):
-                raise ValueError('Committed GS replacement requires a fixed birth row set')
+                raise ValueError('Committed replacement requires an unchanged final birth set')
             return
         if not self.motion_committed or self.frame_finalized:
             raise ValueError('GS replacement requires fitted motion and an unfinalized birth pool')
+
         count = len(self.gaussians._xyz)
-        view = self.make_birth_view()
-        sources = (self.births.source_rows if view is not None else
-                   torch.empty(0, device=self.device, dtype=torch.long))
-        birth_alpha = (view.get_opacity if view is not None else
-                       self.gaussians._opacity.new_empty(0))
-        retirement_details = {}
-        if self.config.birth.replacement_policy == 'multiview_gain_retirement':
-            rows, selected_births, retirement_details = self._multiview_retirement_rows(view)
-        elif self.config.birth.replacement_policy == 'birth_driven_retirement':
-            rows, retirement_details = birth_driven_retirement_rows(
-                self.gaussians._opacity.sigmoid(), sources,
-                count_tolerance=self.config.birth.replacement_count_tolerance,
-                opacity_threshold=self.config.opacity_update.prune_threshold)
-            selected_births = torch.arange(len(self.births._xyz), device=self.device)
-        else:
-            rows, selected_births = balanced_replacement_rows(
-                self.gaussians._opacity.sigmoid(), birth_alpha, sources,
-                count_tolerance=self.config.birth.replacement_count_tolerance)
         candidates = len(self.births._xyz)
-        rejected = candidates - len(selected_births)
-        if rejected:
-            discard = torch.ones(candidates, device=self.device, dtype=torch.bool)
-            discard[selected_births] = False
-            self.births.prune_points(discard)
-            control['pruned'] = control.get('pruned', 0) + rejected
-        remove = torch.ones(count, device=self.device, dtype=torch.bool)
-        remove[rows] = False
-        removed = int(remove.sum())
-        previous_births = control.get('previous_birth_count', 0)
-        control['retirement'] = dict(
-            rule=self.config.birth.replacement_policy, previous_count=count,
-            candidate_count=candidates, birth_count=len(selected_births),
-            rejected_birth_count=rejected, retired_count=removed,
+        expected_candidates = (control.get('clone_added', 0) +
+                               control.get('proposal_added', 0) +
+                               control.get('split_added', 0) -
+                               control.get('pruned', 0))
+        if expected_candidates != candidates:
+            raise ValueError('Birth topology counters disagree with the final candidate pool')
+        if self.config.birth.method == 'recongs':
+            # Upstream renders all fitted additions in this frame. Their merge
+            # and lowest-alpha eviction happen at the NEXT frame's start.
+            control['retirement'].update(birth_count=candidates,
+                candidate_count=candidates, surviving_count=count, rejected_birth_count=0)
+            control['replacement_committed'] = True
+            if self.opacity_update is not None:
+                self.opacity_update.finish()
+            return
+        sources = (self.births.source_rows if candidates else
+                   torch.empty(0, dtype=torch.long, device=self.device))
+        if candidates:
+            current, previous = self._retirement_contributions()
+        else:
+            current = previous = self.gaussians._xyz.new_zeros(count)
+        rows, details = birth_retirement_rows(
+            self.gaussians.get_opacity.flatten(), sources, current, previous,
+            previous_birth_count=control.get('previous_birth_count', 0),
             count_tolerance=self.config.birth.replacement_count_tolerance,
-            count_difference=len(selected_births) - removed,
-            allowed_count_difference=math.floor(
-                self.config.birth.replacement_count_tolerance * len(selected_births) + 1e-9),
-            retired_older_count=int(remove[:count - previous_births].sum()),
-            retired_previous_birth_count=int(remove[count - previous_births:].sum()),
-            surviving_count=len(rows),
-            protected_source_count=int(self.births.source_rows.unique().numel()) if removed else 0,
-            **retirement_details)
-        if removed:
-            self.retired_reference = dict(rows=remove.nonzero(as_tuple=True)[0].cpu(),
+            opacity_threshold=self.config.birth.opacity_threshold,
+            protect_previous_births=self.config.birth.protect_previous_births)
+        diagnose_retirement = (self.trainer.global_step == self.birth_commit_step)
+        if diagnose_retirement:
+            self._record_birth_pool_diagnostic('before_old_retirement',
+                                               self.trainer.global_step)
+        remove = torch.ones(count, dtype=torch.bool, device=self.device)
+        remove[rows] = False
+        retired = int(remove.sum())
+        details.update(previous_count=count, candidate_count=candidates,
+                       surviving_count=len(rows), rejected_birth_count=0,
+                       retired_older_count=int(remove[:count - control.get('previous_birth_count', 0)].sum()),
+                       retired_previous_birth_count=int(remove[count - control.get('previous_birth_count', 0):].sum()))
+
+        if retired:
+            self.retired_reference = dict(
+                rows=remove.nonzero(as_tuple=True)[0].detach().cpu(),
                 attributes={name: getattr(self.gaussians, attr).detach()[remove].cpu().clone()
                             for name, attr in zip(RAW_FIELDS[2:], RAW_ATTRIBUTES[2:])})
             remap = torch.full((count,), -1, dtype=torch.long, device=self.device)
             remap[rows] = torch.arange(len(rows), device=self.device)
-            self.births.source_rows = remap[self.births.source_rows]
-            if bool(self.births.source_rows.lt(0).any()):
-                raise AssertionError('GS replacement retired a required birth predictor')
+            if candidates:
+                self.births.source_rows = remap[self.births.source_rows]
+                if bool(self.births.source_rows.lt(0).any()):
+                    raise AssertionError('Retirement removed a required birth predictor')
             self.gaussians.prune_points(remove)
             self.motion.retain_survivors(rows)
             if self.opacity_update is not None:
                 self.opacity_update.commit(self.opacity_update.rows[rows])
+        control['retirement'] = details
         control['replacement_committed'] = True
         if self.opacity_update is not None:
             self.opacity_update.finish()
+        if diagnose_retirement:
+            self._record_birth_pool_diagnostic('after_old_retirement',
+                                               self.trainer.global_step)
 
     def _set_birth_refit_trainable(self):
         if not self.motion.amplitude_refit_active or not self.motion._hard_gate_frozen:
@@ -1118,16 +951,148 @@ class Module(BaseModule):
     def _begin_birth_refit(self):
         if not self.birth_control.get('replacement_committed', False):
             raise ValueError('Birth refitting requires a committed fixed GS pool')
-        if not self.config.birth.refit_motion:
-            self.birth_control['fixed_pool_refit'] = True
-            self.birth_control['refit_active'] = False
-            return
         self._set_birth_refit_trainable()
         # The new point set changes compositing. Discard the stage-one Adam
         # history once; a resumed refit instead restores its own saved moments.
         for name in ('region_translation', 'region_rotation', 'gs_translation', 'gs_rotation'):
             self.motion.optimizer.state.pop(getattr(self.motion, name), None)
         self.birth_control['refit_active'] = True
+
+    def _birth_learning_rate_scale(self, step):
+        """Cosine-decay each point from its own creation step through frame end."""
+        if self.births.created_steps is None or not len(self.births.created_steps):
+            return self.gaussians._xyz.new_empty(0)
+        horizon = max(1, self.total_steps - self.motion_steps)
+        age = (int(step) - self.births.created_steps).clamp(min=0)
+        progress = (age.to(self.births._xyz) / horizon).clamp(max=1)
+        final = self.config.birth.lr_final_ratio
+        return final + (1 - final) * (1 + torch.cos(math.pi * progress)) / 2
+
+    @torch.no_grad()
+    def _birth_optimizer_step(self, step):
+        if self.births.optimizer is None:
+            return
+        self._configure_birth_phase(step)
+        cap = self.config.birth.position_step_sigma_cap
+        if self.config.birth.lr_final_ratio == 1.0 and cap is None:
+            self.births.optimizer.step()
+            self.births.optimizer.zero_grad(set_to_none=True)
+            return
+        row_scale = self._birth_learning_rate_scale(step)
+        parameters = [(group['name'], group['params'][0], group['params'][0].detach().clone())
+                      for group in self.births.optimizer.param_groups]
+        self.births.optimizer.step()
+        if self.config.birth.lr_final_ratio != 1.0:
+            for _, parameter, before in parameters:
+                scale = row_scale.reshape((len(row_scale),) + (1,) * (parameter.ndim - 1))
+                parameter.copy_(before + (parameter - before) * scale)
+        if cap is not None:
+            before = {name: value for name, _, value in parameters}
+            self.births.constrain_position_step(
+                before['xyz'], before['scaling'], before['rotation'], cap,
+                self.config.birth.new_xyz_step_extent * self.datamodule.cameras_extent)
+        self.births.optimizer.zero_grad(set_to_none=True)
+
+    @torch.no_grad()
+    def _reset_densification_stats(self):
+        self.gaussians.xyz_gradient_accum.zero_()
+        self.gaussians.denom.zero_()
+        if len(self.births._xyz):
+            self.births.xyz_gradient_accum.zero_()
+            self.births.denom.zero_()
+
+    def _old_birth_sources(self):
+        """Build a broad pool from observed, high-gradient small Gaussians."""
+        denominator = self.gaussians.denom.flatten()
+        grads = self.gaussians.xyz_gradient_accum / denominator.clamp_min(1)[:, None]
+        score = torch.linalg.vector_norm(grads, dim=-1)
+        observed = denominator.gt(0)
+        high_gradient = score.ge(self.config.birth.densify_grad_threshold)
+        large_scale = self.gaussians.get_scaling.max(dim=1).values
+        small = large_scale.le(self.config.gaussian_stage2.percent_dense *
+                               self.datamodule.cameras_extent)
+        gradient_eligible = observed & high_gradient
+        small_eligible = gradient_eligible & small
+        active_source = torch.zeros_like(observed)
+        if (getattr(self, 'births', None) is not None and
+                getattr(self.births, 'source_rows', None) is not None and
+                len(self.births.source_rows)):
+            active_rows = self.births.source_rows.to(device=active_source.device,
+                                                      dtype=torch.long)
+            active_source[active_rows] = True
+        # A large source produces a 1/1.6-scale refinement child. Do not spend
+        # the budget on children already beyond the existing world-size limit.
+        child_scale = torch.where(small, large_scale, large_scale / 1.6)
+        valid_size = child_scale.le(0.1 * self.datamodule.cameras_extent)
+        duplicate = gradient_eligible & active_source
+        # Keep the established small-GS densification rule. Let birth fitting
+        # and opacity pruning decide which candidates are useful instead of
+        # truncating the pool with a noisy per-frame residual score.
+        eligible = small_eligible & valid_size & ~active_source
+        selected = select_budget_mask(
+            eligible, score, self.config.birth.max_new_gaussians)
+        self._old_birth_source_diagnostics = dict(
+            observed=int(observed.sum()),
+            high_gradient_observed=int(gradient_eligible.sum()),
+            small_high_gradient=int(small_eligible.sum()),
+            large_high_gradient=int((gradient_eligible & ~small).sum()),
+            duplicate_active_source=int(duplicate.sum()),
+            oversized_child_sources=int((gradient_eligible & ~valid_size).sum()),
+            budget_blocked=int(eligible.sum() - selected.sum()),
+            selected=int(selected.sum()), selected_small=int((selected & small).sum()),
+            selected_large=int((selected & ~small).sum()),
+            selected_gradient_mean=(float(score[selected].mean())
+                                    if bool(selected.any()) else 0.))
+        return selected.nonzero(as_tuple=True)[0]
+
+    def _rescore_old_birth_sources_after_motion(self):
+        """Measure old-GS screen gradients after final motion has been frozen."""
+        view_limit = self.config.birth.source_gradient_rescore_views
+        if view_limit == 0:
+            return
+        views = self._training_views(self.current_frame, limit=view_limit)
+        if not views:
+            raise ValueError('Post-motion source scoring requires training views')
+        self.gaussians.xyz_gradient_accum.zero_()
+        self.gaussians.denom.zero_()
+        self.gaussians.max_radii2D.zero_()
+        if self.gaussians.optimizer is not None:
+            self.gaussians.optimizer.zero_grad(set_to_none=True)
+        if self.motion.optimizer is not None:
+            self.motion.optimizer.zero_grad(set_to_none=True)
+        view_names = []
+        with torch.enable_grad():
+            for viewpoint in views:
+                package = self.forward(viewpoint, training=True, old_only=True)
+                loss = motion_photometric_loss(package['render'], viewpoint.image,
+                    self.config.lambda_dssim)
+                loss.backward()
+                visible = package['visibility_filter']
+                viewspace = package['viewspace_points']
+                if viewspace.grad is None:
+                    raise RuntimeError('Post-motion source scoring produced no screen gradient')
+                self.gaussians.add_densification_stats(viewspace, visible)
+                radii = package['radii']
+                self.gaussians.max_radii2D[visible] = torch.maximum(
+                    self.gaussians.max_radii2D[visible], radii[visible])
+                view_names.append(Path(viewpoint.path).name)
+        if self.gaussians.optimizer is not None:
+            self.gaussians.optimizer.zero_grad(set_to_none=True)
+        if self.motion.optimizer is not None:
+            self.motion.optimizer.zero_grad(set_to_none=True)
+        diagnostic = dict(step=int(self.motion_steps), requested_views=int(view_limit),
+                          used_views=len(view_names), views=view_names,
+                          old_gs=int(len(self.gaussians._xyz)))
+        self.birth_control['source_gradient_rescore'] = diagnostic
+        logging.debug('Post-motion source gradient rescore: %s',
+                      json.dumps(diagnostic, sort_keys=True))
+
+    def _record_old_birth_source_filter(self, step):
+        diagnostic = dict(step=int(step), **getattr(
+            self, '_old_birth_source_diagnostics', {}))
+        self.birth_control.setdefault('old_source_filter_events', []).append(diagnostic)
+        logging.debug('Old-source birth filter: %s', json.dumps(diagnostic, sort_keys=True))
+        return diagnostic
 
     @torch.no_grad()
     def _begin_births(self):
@@ -1137,75 +1102,145 @@ class Module(BaseModule):
         for parameter in self.motion.parameters():
             parameter.requires_grad_(False)
         self.motion.optimizer.zero_grad(set_to_none=True)
-        if self.config.birth.strategy == 'multiview_residual':
-            fit, _ = self._birth_camera_views()
-            raw, sources, report = propose_multiview_births(
-                self.renderer, fit, model_raw(self.gaussians, clone=False), self.background,
-                self.datamodule.cameras_extent, self.config.birth.multiview)
-            self.births = BirthGaussianModel(self.config.sh_degree)
-            self.births.active_sh_degree = self.gaussians.active_sh_degree
-            self.births.spatial_lr_scale = self.gaussians.spatial_lr_scale
-            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-                setattr(self.births, attr, torch.nn.Parameter(raw[name]))
-            self.births.source_rows = sources
-            self.births.max_radii2D = raw['xyz'].new_zeros(len(sources))
-            self.births.initialize_incremental_optimizer(self.config.gaussian_stage2)
-            self.birth_control['multiview_added'] = len(sources)
-            self.birth_control['multiview_proposal'] = report
-            self._freeze_base()
-            self._configure_birth_phase(self.motion_steps + 1)
-            return
-        count = len(self.gaussians._xyz)
-        clone, source_rows = self.gaussians.adaptive_densify_and_clone(
-            self.config.birth.densify_grad_threshold,
-            self.datamodule.cameras_extent,
-            sigma_scale=self.config.birth.clone_sigma_scale,
-            max_new_gaussians=self.config.birth.max_new_gaussians,
-            source_covariance_init=self.config.birth.source_covariance_init,
-            return_source_rows=True)
-        if clone['added'] != len(source_rows):
-            raise AssertionError('Initial birth source rows disagree with clones')
-        self.birth_control['clone_added'] = clone['added']
-        if clone['added']:
-            self.births.restore(self.gaussians.capture(),
-                                self.config.gaussian_stage2)
-            new_mask = torch.arange(len(self.gaussians._xyz),
-                                    device=self.device) >= count
-            self.gaussians.prune_points(new_mask)
-            self.births.prune_points(~new_mask)
-            self.births.source_rows = source_rows
-            if self.config.birth.initial_opacity is not None:
-                alpha = self.config.birth.initial_opacity
-                self.births._opacity.fill_(math.log(alpha / (1 - alpha)))
-            self.births.initialize_incremental_optimizer(
-                self.config.gaussian_stage2)
+        self.births = self._new_birth_model()
+        self.births.active_sh_degree = self.gaussians.active_sh_degree
+        self.births.spatial_lr_scale = self.gaussians.spatial_lr_scale
         self._freeze_base()
+        self._record_birth_pool_diagnostic('before_initial_births', self.motion_steps)
+        if self.config.birth.method == 'recongs':
+            self.births.initialize_recongs_sources(self.gaussians, self.motion_steps,
+                self.config.gaussian_stage2, self.config.birth.densify_grad_threshold,
+                self.datamodule.cameras_extent)
+        elif self.config.birth.residual_proposal_views:
+            views = self._training_views(
+                self.current_frame, limit=self.config.birth.residual_proposal_views)
+            raw = model_raw(self.gaussians, clone=False)
+            proposal = propose_multiview_births(
+                self.renderer, views, raw, self.background,
+                self.datamodule.cameras_extent,
+                MultiViewBirthConfig(candidate_min_alpha=(
+                    self.config.birth.residual_candidate_min_alpha)),
+                source_xyz=raw['xyz'], existing_xyz=raw['xyz'])
+            born, sources, report = proposal
+            self.births.initialize_from_sources(
+                self.gaussians, None, self.motion_steps,
+                self.config.gaussian_stage2, proposal=(born, sources))
+            self.birth_control['proposal_added'] = len(sources)
+            self.birth_control['multiview_proposal'] = report
+            self.birth_control['first_birth_sources'] = len(sources)
+        else:
+            self._rescore_old_birth_sources_after_motion()
+            sources = self._old_birth_sources()
+            self._record_old_birth_source_filter(self.motion_steps)
+            self.births.initialize_covariance_sources(
+                self.gaussians, sources, self.motion_steps,
+                self.config.gaussian_stage2,
+                sigma_scale=self.config.birth.clone_sigma_scale,
+                initial_alpha=self.config.birth.initial_alpha,
+                split_scale_threshold=(self.config.gaussian_stage2.percent_dense *
+                                       self.datamodule.cameras_extent),
+                max_screen_size=self.config.birth.new_max_screen_size)
+        added = len(self.births._xyz)
+        if not self.config.birth.residual_proposal_views:
+            self.birth_control['clone_added'] = added
+            self.birth_control['first_birth_sources'] = added
         self._configure_birth_phase(self.motion_steps + 1)
-        if self.config.birth.warmup_steps:
-            self._record_birth_learning(self.motion_steps)
+        self._reset_densification_stats()
+        self._record_birth_learning(self.motion_steps)
+        self._record_birth_pool_diagnostic('after_initial_births', self.motion_steps)
 
+    @torch.no_grad()
+    def _densify_births(self, step):
+        """Split and prune the current pool; old points seed births only once."""
+        self._record_birth_pool_diagnostic(f'before_densify_{step}', step)
+        result = (self.births.densify_and_prune(
+            self.config.birth.densify_grad_threshold,
+            self.config.birth.opacity_threshold,
+            self.datamodule.cameras_extent,
+            self.config.birth.new_max_screen_size,
+            step, max_points=self.config.birth.max_new_gaussians)
+            if self.births.optimizer is not None else
+            dict(clone_added=0, split_added=0, split_children=0,
+                 split_parents_replaced=0, pruned=0, prune_reasons={}))
+        self.birth_control['clone_added'] += result['clone_added']
+        self.birth_control['split_added'] += result['split_added']
+        self.birth_control['split_children'] = (
+            self.birth_control.get('split_children', 0) + result['split_children'])
+        self.birth_control['split_parents_replaced'] = (
+            self.birth_control.get('split_parents_replaced', 0) +
+            result['split_parents_replaced'])
+        self.birth_control['pruned'] += result['pruned']
+        reasons = self.birth_control.setdefault('prune_reasons', {})
+        for name, count in result.get('prune_reasons', {}).items():
+            reasons[name] = reasons.get(name, 0) + count
+        self.birth_control.setdefault('densification_events', []).append(dict(
+            step=step,
+            newborn_clones=result['clone_added'],
+            newborn_split_children_count=result['split_children'],
+            newborn_split_parents_replaced=result['split_parents_replaced'],
+            split_net_added=result['split_added'],
+            pruned=result['pruned']))
+        self._reset_densification_stats()
+        self._configure_birth_phase(step + 1)
+        self._record_birth_pool_diagnostic(f'after_densify_{step}', step)
 
     @torch.no_grad()
     def _prune_terminal_births(self):
-        """Remove weak births without adding unfitted GS on the final step."""
+        """Keep useful, compact newborns before fixing K and retiring old rows."""
         model = self.births
         cfg = self.config.birth
-        # Admission, rendering and export must judge the same quantized alpha.
-        low_opacity = self.make_birth_view().get_opacity.flatten() < cfg.opacity_threshold
+        if not len(model._xyz):
+            return 0
+        view = self.make_birth_view()
+        low_opacity = (view.get_opacity.flatten() <
+                       cfg.terminal_opacity_threshold)
         big_screen = model.max_radii2D > cfg.new_max_screen_size
-        big_world = (model.get_scaling.max(dim=1).values >
+        big_world = (view.get_scaling.max(dim=1).values >
                      0.1 * self.datamodule.cameras_extent)
         remove = low_opacity | big_screen | big_world
+        budget_removed = torch.zeros_like(remove)
+        if cfg.terminal_max_gaussians is not None:
+            # Densification statistics were reset at step 260, so this score
+            # measures average projected-position gradient over the final
+            # 20 fitting steps. Alpha/size filters run first; the point cap
+            # then keeps the candidates that still affect the rendered loss.
+            denominator = model.denom.flatten()
+            gradient_score = (model.xyz_gradient_accum.flatten() /
+                              denominator.clamp_min(1))
+            gradient_score = torch.nan_to_num(
+                gradient_score, nan=0.0, posinf=0.0, neginf=0.0)
+            candidates = ~remove
+            selected = select_budget_mask(
+                candidates, gradient_score, cfg.terminal_max_gaussians)
+            budget_removed = candidates & ~selected
+            remove |= budget_removed
+            candidate_scores = gradient_score[candidates]
+            kept_scores = gradient_score[selected]
+            self.birth_control.setdefault('terminal_selection_events', []).append({
+                'step': int(self.trainer.global_step),
+                'cap': cfg.terminal_max_gaussians,
+                'candidate_count': int(candidates.sum()),
+                'kept_count': int(selected.sum()),
+                'removed_by_gradient_budget': int(budget_removed.sum()),
+                'observed_candidates': int((candidates & denominator.gt(0)).sum()),
+                'candidate_gradient_mean': (float(candidate_scores.mean())
+                                            if candidate_scores.numel() else 0.0),
+                'kept_gradient_mean': (float(kept_scores.mean())
+                                       if kept_scores.numel() else 0.0),
+            })
         reasons = self.birth_control.setdefault('prune_reasons', {})
         for name, mask in (('low_opacity', low_opacity), ('screen_size', big_screen),
                            ('world_size', big_world),
-                           ('multiple', (low_opacity.int() + big_screen.int() + big_world.int()) > 1)):
+                           ('multiple', (low_opacity.int() + big_screen.int() +
+                                         big_world.int()) > 1)):
             reasons[name] = reasons.get(name, 0) + int(mask.sum())
+        if budget_removed.any():
+            reasons['terminal_gradient_budget'] = (
+                reasons.get('terminal_gradient_budget', 0) + int(budget_removed.sum()))
         removed = int(remove.sum())
         if removed:
             model.prune_points(remove)
         return removed
-
 
     @torch.no_grad()
     def post_training_step(self, package):
@@ -1237,12 +1272,17 @@ class Module(BaseModule):
             if edits:
                 self.birth_control['tree_edit_count'] = (
                     self.birth_control.get('tree_edit_count', 0) + len(edits))
-            start = self.motion_steps - self.config.birth.densification_stats_steps + 1
+            start = (1 if getattr(self.config.birth, 'method', 'covariance') == 'recongs' else
+                     self.motion_steps - self.config.birth.densification_stats_steps + 1)
             if step == start:
                 self.gaussians.xyz_gradient_accum.zero_()
                 self.gaussians.denom.zero_()
+                self.gaussians.max_radii2D.zero_()
             if step >= start:
                 for item in packages:
+                    visible = item['visibility_filter']
+                    self.gaussians.max_radii2D[visible] = torch.maximum(
+                        self.gaussians.max_radii2D[visible], item['radii'][visible])
                     if len(packages) > 1:
                         # Average optimizer gradients; preserve per-view birth
                         # score units and the existing densification threshold.
@@ -1261,71 +1301,56 @@ class Module(BaseModule):
                 self._begin_births()
         else:
             birth_step = step - self.motion_steps
-            selection_end = getattr(self, 'birth_selection_end_step', self.total_steps)
-            selection_terminal = step == selection_end
-            fixed_births = self.birth_control.get('replacement_committed', False)
-            warmup = Module._birth_warmup_active(self, step)
-            trace = (self.config.birth.warmup_steps > 0 and birth_step in
-                     {5, 10, self.config.birth.warmup_steps,
-                      self.config.birth.warmup_steps + 1,
-                      self.config.birth.densify_interval,
-                      selection_end - self.motion_steps, self.total_steps - self.motion_steps})
+            commit_step = self.birth_commit_step
+            trace = (step == commit_step or step == self.total_steps or
+                     birth_step % self.config.birth.densify_interval == 0)
             gradients = {}
-            if trace:
-                parameters = dict(xyz_grad_norm=self.births._xyz,
-                                  color_grad_norm=self.births._features_dc)
-                if getattr(self, 'opacity_update', None) is not None:
-                    parameters['old_opacity_grad_norm'] = self.opacity_update.delta
-                gradients = {name: parameter.grad.detach().norm()
-                             for name, parameter in parameters.items() if parameter.grad is not None}
-            if len(self.births._xyz):
-                old_count = len(self.gaussians._xyz)
-                for item in packages:
-                    visible = item['visibility_filter'][old_count:]
-                    radii = item['radii'][old_count:]
-                    self.births.max_radii2D[visible] = torch.maximum(
-                        self.births.max_radii2D[visible], radii[visible])
-                    if self.config.birth.strategy == 'gradient_clone':
-                        if len(packages) > 1:
-                            item['viewspace_points'].grad.mul_(len(packages))
+            if trace and len(self.births._xyz):
+                gradients = {
+                    name: parameter.grad.detach().norm()
+                    for name, parameter in (
+                        ('xyz_grad_norm', self.births._xyz),
+                        ('color_grad_norm', self.births._features_dc))
+                    if parameter.grad is not None}
+
+            old_count = len(self.gaussians._xyz)
+            for item in packages:
+                visible = item['visibility_filter']
+                radii = item['radii']
+                if len(self.births._xyz):
+                    birth_visible = visible[old_count:]
+                    birth_radii = radii[old_count:]
+                    self.births.max_radii2D[birth_visible] = torch.maximum(
+                        self.births.max_radii2D[birth_visible], birth_radii[birth_visible])
+                if step <= commit_step:
+                    if len(packages) > 1:
+                        item['viewspace_points'].grad.mul_(len(packages))
+                    if len(self.births._xyz):
                         self.births.add_densification_stats(
-                            item['viewspace_points'], visible, align='right')
-                terminal = step == self.total_steps
-                if (self.config.birth.strategy == 'gradient_clone' and
-                        not terminal and not selection_terminal and not fixed_births and not warmup and
-                        birth_step % self.config.birth.densify_interval == 0):
-                    result = self.births.adaptive_densify_and_prune(
-                        self.config.birth.densify_grad_threshold,
-                        self.config.birth.opacity_threshold,
-                        self.datamodule.cameras_extent,
-                        self.config.birth.new_max_screen_size,
-                        max_points=self.config.birth.max_new_gaussians)
-                    self.birth_control['split_added'] += result['added']
-                    self.birth_control['pruned'] += result['pruned']
-                    reasons = self.birth_control.setdefault('prune_reasons', {})
-                    for name, count in result.get('prune_reasons', {}).items():
-                        reasons[name] = reasons.get(name, 0) + count
-                self.births.optimizer.step()
-                self.births.optimizer.zero_grad(set_to_none=True)
-            if getattr(self, 'birth_refit_active', False):
+                            item['viewspace_points'], visible[old_count:], align='right')
+
+            native_densify = (self.config.birth.method == 'recongs' and
+                birth_step > 0 and birth_step % self.config.birth.densify_interval == 0)
+            if native_densify:
+                self._densify_births(step)
+            self._birth_optimizer_step(step)
+            self._update_birth_opacity(step)
+            if self.birth_refit_active:
                 self.motion.optimizer_step()
                 xyz, rotation = self.motion(step, training=False)
                 self.gaussians.apply_selected_motion(xyz, rotation)
-            if Module._birth_joint_opacity_active(self, step):
-                window = self.config.rigid_tree.motion_fit_window_steps
-                self.opacity_update.optimizer_step(self._rate_byte_price(step),
-                    proximal=(window is None or birth_step % window == 0 or selection_terminal),
-                    lr_factor=(self.motion._motion_lr_factor(self.motion_steps)
-                        if self.config.opacity_update.decay_with_motion else 1.))
-                # Keep source predictors, export and rendering on the same
-                # canonical alpha grid while newborn attributes keep fitting.
-                self.gaussians._opacity.copy_(self.opacity_update.canonical_logits().to(self.device))
-            if selection_terminal and not fixed_births and len(self.births._xyz):
-                # Judge admission after BOTH optimizers have updated: changing
-                # old source alpha also changes the newborn prediction grid.
-                self.birth_control['pruned'] += self._prune_terminal_births()
-            if (step == getattr(self, 'birth_selection_end_step', self.total_steps) and
-                    self.config.birth.replacement_policy in CURRENT_BIRTH_POLICIES):
+
+            # Create the old-source pool once, split/prune at configured
+            # intervals, and fit the final gradient before fixing K and retiring.
+            if (self.config.birth.method != 'recongs' and
+                    step < commit_step and birth_step > 0 and
+                    birth_step % self.config.birth.densify_interval == 0):
+                self._densify_births(step)
+            if step == commit_step:
+                if self.config.birth.method != 'recongs':
+                    self._record_birth_pool_diagnostic('before_terminal_birth_prune', step)
+                    self.birth_control['pruned'] += self._prune_terminal_births()
+                    self._record_birth_pool_diagnostic('after_terminal_birth_prune', step)
                 self.commit_birth_replacement()
                 if self.config.birth.refit_steps:
                     self._begin_birth_refit()
@@ -1349,7 +1374,8 @@ class Module(BaseModule):
             directory.mkdir(parents=True, exist_ok=True)
             (directory / f'frame_{self.current_frame:03d}.json').write_text(
                 json.dumps(self.motion.flat_region_diagnostics, indent=2))
-        view = self.make_birth_view()
+        view = (self.make_birth_view(quantized=True) if self.config.birth.method == 'recongs'
+                else self.make_birth_view())
         raw, sources = materialize_quantized_gaussians(
             model_raw(self.gaussians, clone=False), view)
         stream_dir = self.output_dir / 'frame_storage' / 'rigid_tree'
@@ -1401,14 +1427,25 @@ class Module(BaseModule):
                 predictor={name: view.predictor[name] for name in
                            ('logscale', 'opacity', 'sh_dc', 'sh_rest')},
                 source_rows=sources)
-        for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-            setattr(self.gaussians, attr,
-                    torch.nn.Parameter(raw[name].detach().clone()))
-        self.gaussians.training_setup(self.config.gaussian)
+        if self.config.birth.method == 'recongs':
+            if len(sources):
+                # ReCon-GS merges via densification_postfix: retain old Adam
+                # steps/settings and append zero moments for the fitted births.
+                self.gaussians.densification_postfix(
+                    raw['xyz'][-len(sources):], raw['sh_dc'][-len(sources):],
+                    raw['sh_rest'][-len(sources):], raw['opacity'][-len(sources):],
+                    raw['logscale'][-len(sources):], raw['rotation'][-len(sources):])
+            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
+                getattr(self.gaussians, attr).copy_(raw[name])
+        else:
+            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
+                setattr(self.gaussians, attr,
+                        torch.nn.Parameter(raw[name].detach().clone()))
+            self.gaussians.training_setup(self.config.gaussian)
         self.gaussians.max_radii2D = self.gaussians._xyz.new_zeros(len(raw['xyz']))
         self._freeze_base()
         self.renderer.gaussians = self.gaussians
-        self.births = BirthGaussianModel(self.config.sh_degree)
+        self.births = self._new_birth_model()
         self.frame_finalized = True
         self.retired_reference = None
         manifest = dict(version=1, frame=self.current_frame,
@@ -1430,10 +1467,18 @@ class Module(BaseModule):
         self.frame_report = dict(frame=self.current_frame,
             initial_reference=self.initial_reference,
             schedule=dict(motion_steps=self.motion_steps,
-                birth_warmup_steps=self.config.birth.warmup_steps,
-                birth_selection_steps=self.birth_selection_end_step - self.motion_steps,
+                densification_stats_start_step=(self.motion_steps -
+                    self.config.birth.densification_stats_steps + 1),
+                initial_birth_step=self.motion_steps,
+                densify_steps=[step for step in range(
+                    self.motion_steps + self.config.birth.densify_interval,
+                    self.birth_commit_step, self.config.birth.densify_interval)],
+                final_pool_step=self.birth_commit_step,
                 refit_steps=self.config.birth.refit_steps,
-                birth_selection_end_step=self.birth_selection_end_step),
+                refit_start_step=(self.birth_commit_step + 1
+                                  if self.config.birth.refit_steps else None),
+                birth_allocation=self.birth_allocation,
+                total_steps=self.total_steps),
             region_count=int(self.motion.owner.unique().numel()),
             candidate_region_count=len(self.motion.parents),
             initialization=dict(spatial=True, initial_regions=8,

@@ -21,25 +21,48 @@ MODULE = importlib.import_module('pipeline.module')
 
 
 class MotionViewUpdates(unittest.TestCase):
+    def test_reference_birth_recipe_has_100_steps_and_two_split_windows(self):
+        config = MODULE.ModuleConfig()
+        config.rigid_tree.birth_steps = 100
+        module = SimpleNamespace(config=config, motion_steps=180,
+                                 birth_commit_step=280, total_steps=280)
+        self.assertEqual(TRAINER.stage_image_steps(module), (151, 180, 220, 260, 280))
+        self.assertEqual(config.birth.refit_steps, 0)
+        self.assertEqual(config.birth.lr_final_ratio, 1.)
+        self.assertFalse(config.birth.rotation_updates)
+        self.assertEqual(TRAINER.TrainerConfig().birth_views_per_step, 1)
+        self.assertEqual((config.gaussian_stage2.position_lr_init,
+                          config.gaussian_stage2.opacity_lr,
+                          config.gaussian_stage2.scaling_lr), (.0024, .05, .075))
+
     def trainer(self, views=4):
         cfg = SimpleNamespace(birth_steps=100,
             spatial_gate=SimpleNamespace(gate_start_step=60, freeze_step=90))
-        trainer = SimpleNamespace(config=SimpleNamespace(motion_views_per_step=views),
+        trainer = SimpleNamespace(config=SimpleNamespace(motion_views_per_step=views,
+                                   birth_views_per_step=4),
             module=SimpleNamespace(config=SimpleNamespace(rigid_tree=cfg),
                                    motion_steps=100, total_steps=200))
         trainer._views_per_step = lambda step: TRAINER.Trainer._views_per_step(trainer, step)
         return trainer
 
-    def test_replacement_and_refit_have_distinct_boundaries_and_legacy_schedule_is_unchanged(self):
-        module = SimpleNamespace(motion_steps=180, birth_selection_end_step=260, total_steps=300)
-        for step, expected in ((1, 'motion'), (180, 'motion'), (181, 'birth'),
-                               (260, 'birth'), (261, 'refit'), (300, 'refit')):
+    def test_iterative_birth_boundaries_and_fixed_set_refit(self):
+        module = SimpleNamespace(motion_steps=180, birth_commit_step=270, total_steps=300)
+        for step, expected in ((1, 'motion'), (150, 'motion'), (180, 'motion'),
+                               (181, 'birth'), (210, 'birth'), (240, 'birth'),
+                               (270, 'birth'), (271, 'refit'), (300, 'refit')):
             with self.subTest(step=step):
                 self.assertEqual(TRAINER.frame_training_phase(module, step), expected)
-        self.assertEqual(TRAINER.stage_image_steps(module), (180, 260, 300))
-        del module.birth_selection_end_step
-        self.assertEqual(TRAINER.frame_training_phase(module, 261), 'birth')
-        self.assertEqual(TRAINER.stage_image_steps(module), (180, 300))
+        self.assertEqual(TRAINER.stage_image_steps(module),
+                         (150, 180, 210, 240, 270, 300))
+
+    def test_motion_uses_two_views_then_birth_and_refit_use_four(self):
+        trainer = self.trainer(views=2)
+        trainer.module.motion_steps = 180
+        trainer.module.total_steps = 300
+        trainer.module.birth_commit_step = 270
+        self.assertEqual([TRAINER.Trainer._views_per_step(trainer, step)
+                          for step in (150, 180, 181, 210, 240, 270, 271, 300)],
+                         [2, 2, 4, 4, 4, 4, 4, 4])
 
     def test_progress_counts_points_after_replacement_instead_of_the_candidate_pool(self):
         trainer = self.trainer(views=1)
@@ -63,7 +86,7 @@ class MotionViewUpdates(unittest.TestCase):
             calls.append(old_only)
             torch.rand(1)
             return {'render': torch.full_like(view.image, .5)}
-        module = SimpleNamespace(motion_steps=180, birth_selection_end_step=260,
+        module = SimpleNamespace(motion_steps=180, birth_commit_step=270,
             total_steps=300, forward=render, stage_image_metrics=[],
             gaussians=SimpleNamespace(_xyz=torch.zeros(5, 3)),
             births=SimpleNamespace(_xyz=torch.zeros(2, 3)))
@@ -72,7 +95,7 @@ class MotionViewUpdates(unittest.TestCase):
         trainer._restore_rng = TRAINER.Trainer._restore_rng
         before = torch.get_rng_state().clone()
         with patch('torch.cuda.is_available', return_value=False):
-            for step in (180, 260, 260, 300):
+            for step in (180, 270, 270, 300):
                 if step == 300:
                     module.gaussians._xyz = torch.zeros(7, 3)
                     module.births._xyz = torch.zeros(0, 3)
@@ -80,10 +103,9 @@ class MotionViewUpdates(unittest.TestCase):
                 self.assertIs(result, view)
         self.assertTrue(torch.equal(before, torch.get_rng_state()))
         self.assertEqual(calls, [True, False, False, False])
-        self.assertEqual([row['step'] for row in module.stage_image_metrics], [180, 260, 300])
+        self.assertEqual([row['step'] for row in module.stage_image_metrics], [180, 270, 300])
         self.assertEqual([row['gaussian_count'] for row in module.stage_image_metrics], [5, 7, 7])
-        self.assertEqual(module.stage_image_metrics[1]['phase'],
-                         'after_balanced_replacement_before_refit')
+        self.assertEqual(module.stage_image_metrics[1]['phase'], 'final_birth_pool_fixed')
         self.assertFalse(any(row['participates_in_training_or_selection']
                              for row in module.stage_image_metrics))
 
@@ -183,7 +205,7 @@ class MotionViewUpdates(unittest.TestCase):
                         dict(image_loss=torch.tensor(step / 11),
                              psnr=torch.tensor(step / 13), gs=7))
             module = SimpleNamespace(pre_training_step=Mock(), motion_steps=20,
-                total_steps=23, frame_report={}, stage_image_metrics=[])
+                birth_commit_step=21, total_steps=23, frame_report={}, stage_image_metrics=[])
             trainer = SimpleNamespace(current_frame=1, global_step=4, num_steps=23,
                 config=SimpleNamespace(stage_image_camera=None), module=module,
                 output_dir=Path(directory), _make_fetcher=Mock(return_value=fetcher),
@@ -222,15 +244,15 @@ class MotionViewUpdates(unittest.TestCase):
                 dict(image_loss=float(torch.tensor(23 / 11)),
                      psnr=float(torch.tensor(23 / 13)), gs=7))
             self.assertEqual(progress[0].postfix[-1],
-                dict(phase='birth', image=f'{image_ema:.5f}', psnr=f'{psnr_ema:.2f}', gs=7))
+                dict(phase='refit', image=f'{image_ema:.5f}', psnr=f'{psnr_ema:.2f}', gs=7))
             self.assertEqual(json.loads((Path(directory) / 'frame_summary/frame_001.json').read_text()), report)
 
     def test_schedule_and_resume_replay_exact_view_consumption(self):
         trainer = self.trainer()
         for step, wanted in [(1,4),(60,4),(61,4),(90,4),(91,4),(100,4),
-                             (101,1),(200,1)]:
+                             (101,4),(200,4)]:
             self.assertEqual(trainer._views_per_step(step), wanted)
-        self.assertEqual(sum(trainer._views_per_step(s) for s in range(1,201)), 500)
+        self.assertEqual(sum(trainer._views_per_step(s) for s in range(1,201)), 800)
         trainer.global_step = 95
         trainer._resume_rng = {'marker': True}
         trainer._restore_rng = Mock()
@@ -240,73 +262,16 @@ class MotionViewUpdates(unittest.TestCase):
         trainer._restore_rng.assert_called_once_with({'marker': True})
         self.assertIsNone(trainer._resume_rng)
         old = self.trainer(views=1)
-        self.assertEqual(sum(old._views_per_step(s) for s in range(1,201)), 200)
-
-    def test_multiview_birth_validation_cameras_are_excluded_and_resume_replays_them(self):
-        trainer = self.trainer(views=2)
-        trainer.config.birth_views_per_step = 4
-        trainer.module.config.birth = SimpleNamespace(
-            strategy='multiview_residual', validation_cameras=['cam04.png', 'cam08.png'])
-        names = ['cam04.png', 'cam01.png', 'cam08.png', 'cam02.png', 'cam03.png']
-
-        def fetcher():
-            import itertools
-            stream = itertools.cycle(SimpleNamespace(path=Path(name)) for name in names)
-            return SimpleNamespace(next=Mock(side_effect=stream))
-
-        original = fetcher()
-        for step in range(1, 104):
-            for _ in range(trainer._views_per_step(step)):
-                view = TRAINER.Trainer._next_training_view(trainer, original, step)
-                if step > trainer.module.motion_steps:
-                    self.assertNotIn(view.path.name, trainer.module.config.birth.validation_cameras)
-        trainer.global_step = 103
-        trainer._resume_rng = {'saved': True}
-        trainer._restore_rng = Mock()
-        resumed = fetcher()
-        TRAINER.Trainer._resume_fetcher(trainer, resumed)
-        self.assertEqual(original.next.call_count, resumed.next.call_count)
-        trainer._restore_rng.assert_called_once_with({'saved': True})
-        for step in range(104, 109):
-            for _ in range(trainer._views_per_step(step)):
-                left = TRAINER.Trainer._next_training_view(trainer, original, step)
-                right = TRAINER.Trainer._next_training_view(trainer, resumed, step)
-                self.assertEqual(left.path.name, right.path.name)
-
-        # Motion fitting still uses all training cameras.
-        self.assertEqual(TRAINER.Trainer._next_training_view(trainer, fetcher(), 100).path.name,
-                         'cam04.png')
-
-    def test_selected_birth_refit_can_use_all_training_views_and_resume_exactly(self):
-        import itertools
-        trainer = self.trainer(views=2)
-        trainer.module.birth_selection_end_step = 160
-        trainer.module.config.birth = SimpleNamespace(strategy='multiview_residual',
-            validation_cameras=['cam04.png'], refit_all_training_views=True)
-        trainer.config.birth_views_per_step = 4
-        def stream():
-            names = itertools.cycle(['cam04.png', 'cam01.png', 'cam02.png'])
-            return SimpleNamespace(next=lambda: SimpleNamespace(path=Path(next(names))))
-        self.assertEqual(TRAINER.Trainer._next_training_view(trainer, stream(), 160).path.name, 'cam01.png')
-        self.assertEqual(TRAINER.Trainer._next_training_view(trainer, stream(), 161).path.name, 'cam04.png')
-        first, resumed = stream(), stream()
-        for step in range(1, 172):
-            for _ in range(trainer._views_per_step(step)):
-                TRAINER.Trainer._next_training_view(trainer, first, step)
-        trainer.global_step, trainer._resume_rng = 171, None
-        trainer._restore_rng = Mock()
-        TRAINER.Trainer._resume_fetcher(trainer, resumed)
-        for _ in range(16):
-            left = TRAINER.Trainer._next_training_view(trainer, first, 172)
-            right = TRAINER.Trainer._next_training_view(trainer, resumed, 172)
-            self.assertEqual(left.path.name, right.path.name)
+        self.assertEqual(sum(old._views_per_step(s) for s in range(1,201)), 500)
 
     def test_all_camera_evidence_and_unscaled_birth_scores_reach_one_update(self):
         captured = []
         model = SimpleNamespace(add_densification_stats=lambda point, mask:
-                                captured.append(point.grad.clone()))
+                                captured.append(point.grad.clone()),
+                                max_radii2D=torch.full((2,),999.),
+                                xyz_gradient_accum=torch.ones(2,1),denom=torch.ones(2,1))
         motion = SimpleNamespace(mark_observed=Mock(), optimizer_step=Mock(return_value=[]))
-        module = SimpleNamespace(trainer=SimpleNamespace(global_step=99),
+        module = SimpleNamespace(trainer=SimpleNamespace(global_step=71),
             motion_committed=False, motion_steps=100,
             config=SimpleNamespace(effective_motion_observations=True,
                 birth=SimpleNamespace(densification_stats_steps=30)),
@@ -317,6 +282,7 @@ class MotionViewUpdates(unittest.TestCase):
             points.grad = torch.full_like(points, .25)
             packages.append(dict(viewspace_points=points,
                 visibility_filter=torch.tensor([True,True]),
+                radii=torch.tensor([i+1.,i+2.]),
                 motion_contribution_filter=torch.tensor([i%2==0,i%2==1])))
         MODULE.Module.post_training_step(module, packages)
         self.assertEqual(motion.mark_observed.call_count, 4)
@@ -324,6 +290,9 @@ class MotionViewUpdates(unittest.TestCase):
         self.assertEqual(module.birth_control['motion_observed_samples'], 4)
         self.assertEqual(module.birth_control['motion_frustum_samples'], 8)
         self.assertEqual(len(captured), 4)
+        torch.testing.assert_close(model.max_radii2D,torch.tensor([4.,5.]))
+        self.assertEqual(float(model.xyz_gradient_accum.sum()),0.)
+        self.assertEqual(float(model.denom.sum()),0.)
         for value in captured:
             torch.testing.assert_close(value, torch.ones_like(value))
 

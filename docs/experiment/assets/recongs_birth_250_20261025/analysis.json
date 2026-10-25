@@ -1,0 +1,263 @@
+{
+  "run": "output/n3dv/flame_steak_1025/recongs_birth/20261025T180552_c105b3",
+  "scope": "0..250 (251 frames), interrupted 300-frame plan; no resumed trajectory mixed in",
+  "summary": {
+    "schema": 1,
+    "run": "output/n3dv/flame_steak_1025/recongs_birth/20261025T180552_c105b3",
+    "expected_frames": 300,
+    "recorded_frames": 251,
+    "sequence_complete": false,
+    "dynamic_frames": 250,
+    "quality": {
+      "test": {
+        "metrics": {
+          "psnr": 33.894338341823136,
+          "ssim": 0.9658032166530411,
+          "lpips": 0.12390784738192046
+        },
+        "metric_frame_counts": {
+          "psnr": 251,
+          "ssim": 251,
+          "lpips": 251
+        }
+      }
+    },
+    "storage": {
+      "measured_dynamic_frames": 250,
+      "payload_kb_mean": 89.46432,
+      "complete_update_kb_mean": 90.039584,
+      "reference_mb": 11.081043,
+      "total_mb": null,
+      "reference_amortized_kb_per_frame": null
+    },
+    "initial_gaussians": 128963,
+    "final_gaussians": 130534,
+    "model_training_seconds_mean": 15.17750523403799,
+    "frame_wall_seconds_mean": 27.763180961287873,
+    "model_training_measured_frames": 250,
+    "fit_elapsed_seconds": null,
+    "pure_render_fps": 381.9844337684624,
+    "fps_notice": "FPS仅供参考",
+    "render_measured_frames": 251,
+    "render_seconds": 32.854741949005984,
+    "timed_renders": 12550,
+    "render_scope": "Validation-time synchronized forward+clamp; excludes decode, upload, loading, warmups and quality metrics; GPU exclusivity is not audited.",
+    "storage_units": "KB=1000 bytes; MB=1000000 bytes"
+  },
+  "blocks": [
+    {
+      "first": 0,
+      "last": 29,
+      "psnr": 34.00056012471517,
+      "kb": 69.52575862068966,
+      "births": 887.1034482758621,
+      "birth_gain": 0.010477394893251616,
+      "deleted_original": 467.17241379310343,
+      "original_remaining": 115415
+    },
+    {
+      "first": 30,
+      "last": 59,
+      "psnr": 34.112065124511716,
+      "kb": 76.0508,
+      "births": 1020.9,
+      "birth_gain": 0.011851882934570313,
+      "deleted_original": 263.1666666666667,
+      "original_remaining": 107520
+    },
+    {
+      "first": 60,
+      "last": 89,
+      "psnr": 34.03364473978679,
+      "kb": 89.4919,
+      "births": 1271.1666666666667,
+      "birth_gain": 0.01044921875,
+      "deleted_original": 200.36666666666667,
+      "original_remaining": 101509
+    },
+    {
+      "first": 90,
+      "last": 119,
+      "psnr": 34.37970479329427,
+      "kb": 88.28663333333333,
+      "births": 1262.2666666666667,
+      "birth_gain": 0.0028353373209635416,
+      "deleted_original": 152.3,
+      "original_remaining": 96940
+    },
+    {
+      "first": 120,
+      "last": 149,
+      "psnr": 34.31352157592774,
+      "kb": 90.39316666666667,
+      "births": 1372.6333333333334,
+      "birth_gain": 0.017248789469401043,
+      "deleted_original": 123.06666666666666,
+      "original_remaining": 93248
+    },
+    {
+      "first": 150,
+      "last": 179,
+      "psnr": 33.46911341349284,
+      "kb": 99.36176666666667,
+      "births": 1510.4333333333334,
+      "birth_gain": 0.018944295247395833,
+      "deleted_original": 113.9,
+      "original_remaining": 89831
+    },
+    {
+      "first": 180,
+      "last": 209,
+      "psnr": 33.25472742716472,
+      "kb": 104.00116666666666,
+      "births": 1568.2,
+      "birth_gain": 0.03328997294108073,
+      "deleted_original": 102.56666666666666,
+      "original_remaining": 86754
+    },
+    {
+      "first": 210,
+      "last": 239,
+      "psnr": 33.7487190246582,
+      "kb": 100.9184,
+      "births": 1536.6,
+      "birth_gain": 0.005667750040690104,
+      "deleted_original": 83.76666666666667,
+      "original_remaining": 84241
+    },
+    {
+      "first": 240,
+      "last": 250,
+      "psnr": 33.46520337191495,
+      "kb": 94.41218181818182,
+      "births": 1504.909090909091,
+      "birth_gain": 0.05330068414861506,
+      "deleted_original": 63,
+      "original_remaining": 83548
+    }
+  ],
+  "components_kb": {
+    "motion_kb": 64.052784,
+    "birth_attribute_kb": 22.224684,
+    "opacity_kb": 3.186852,
+    "manifest_kb": 0.575264
+  },
+  "birth_motion_raw_kb_mean": 40.7165,
+  "note_birth_motion_bytes": "Raw xyz/quaternion/source section before packet compression; not additive to compressed components.",
+  "birth": {
+    "mean_candidates": 1421.644,
+    "mean_final": 1314.184,
+    "mean_pruned": 111.664,
+    "mean_gain": 0.015595077514648437,
+    "median_gain": 0.0042552947998046875,
+    "improved_over_001": 166,
+    "worsened_below_minus001": 51,
+    "mean_prebirth_psnr": 33.88144918823242,
+    "phase_gains": {
+      "step220_gain": 0.009853408813476563,
+      "step260_gain": 0.0008825531005859375,
+      "terminal_gain": 0.0048591156005859375
+    },
+    "mean_birth_s": 2.5379309347811505,
+    "mean_motion_s": 12.639574299256841
+  },
+  "lifecycle": {
+    "original_initial": 128963,
+    "original_remaining": 83548,
+    "deleted_original": 45415,
+    "previous_births_evaluated": 326975,
+    "previous_births_deleted": 229403,
+    "previous_birth_next_frame_survival_fraction": 0.2984081351785305,
+    "deleted_alpha_ge_001": 321410,
+    "total_deleted": 326975,
+    "deleted_alpha_mean": 0.05228420201276856,
+    "retired_birth_lifetime_median": 1.0
+  },
+  "storage": {
+    "median_kb": 91.477,
+    "p95_kb": 106.71885,
+    "within_50kb": 0,
+    "actual_prefix_total_mb": 33.59093900000001,
+    "prefix_reference_amortized_kb": 133.82844223107574
+  },
+  "wall_median_s": 19.202099091497075,
+  "lowest_frames": [
+    {
+      "frame": 170,
+      "psnr": 31.803762435913086
+    },
+    {
+      "frame": 169,
+      "psnr": 31.91835594177246
+    },
+    {
+      "frame": 172,
+      "psnr": 32.205047607421875
+    },
+    {
+      "frame": 171,
+      "psnr": 32.398826599121094
+    },
+    {
+      "frame": 167,
+      "psnr": 32.503013610839844
+    },
+    {
+      "frame": 168,
+      "psnr": 32.50984573364258
+    },
+    {
+      "frame": 166,
+      "psnr": 32.58604431152344
+    },
+    {
+      "frame": 195,
+      "psnr": 32.9208869934082
+    },
+    {
+      "frame": 192,
+      "psnr": 32.9331169128418
+    },
+    {
+      "frame": 173,
+      "psnr": 32.975929260253906
+    }
+  ],
+  "required_remaining49_psnr_mean": 35.76573624902842,
+  "sequential_replay_verified_frames": 250,
+  "saved_png_roi_diagnostic": [
+    {
+      "frame": 120,
+      "box_xyxy": [
+        575,
+        805,
+        805,
+        975
+      ],
+      "pixel_fraction": 0.02883991266890895,
+      "mse_fraction": 0.07926849010268318
+    },
+    {
+      "frame": 170,
+      "box_xyxy": [
+        575,
+        805,
+        805,
+        975
+      ],
+      "pixel_fraction": 0.02883991266890895,
+      "mse_fraction": 0.3704091189506444
+    },
+    {
+      "frame": 250,
+      "box_xyxy": [
+        575,
+        805,
+        805,
+        975
+      ],
+      "pixel_fraction": 0.02883991266890895,
+      "mse_fraction": 0.2247596385940289
+    }
+  ]
+}

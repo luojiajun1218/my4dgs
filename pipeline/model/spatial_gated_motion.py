@@ -903,6 +903,31 @@ class SpatialGatedMotion(MotionBase):
         terms = self.loss_terms(step, diagnostics=False)
         return terms['rate_loss'] + terms['relative_motion_loss'] + terms.get('candidate_motion_loss', 0.)
 
+    def fixed_support_regularization_terms(self, step):
+        """Return rate and relative costs with gradients on the fixed support."""
+        zero = self.base_xyz.new_zeros(())
+        if not self.amplitude_refit_active or not self._hard_gate_frozen:
+            return dict(rate_loss=zero, relative_motion_loss=zero)
+        # Stage-one coding deliberately detaches these terms in shared-image
+        # recoding/proximal mode. During post-birth refit the gate and support
+        # are fixed, so allow the same costs to differentiate their amplitudes.
+        proximal = self.config.proximal_gs_regularization
+        shared_recode = self.config.spatial_gate.shared_image_recode
+        try:
+            self.config.proximal_gs_regularization = False
+            self.config.spatial_gate.shared_image_recode = False
+            terms = self.loss_terms(step, diagnostics=False)
+        finally:
+            self.config.proximal_gs_regularization = proximal
+            self.config.spatial_gate.shared_image_recode = shared_recode
+        return dict(rate_loss=terms['rate_loss'],
+                    relative_motion_loss=terms['relative_motion_loss'])
+
+    def fixed_support_regularization_loss(self, step):
+        """Price only the committed motion support during post-birth refitting."""
+        terms = self.fixed_support_regularization_terms(step)
+        return terms['rate_loss'] + terms['relative_motion_loss']
+
     @torch.no_grad()
     def _measure_codec_rate(self, step, force=False):
         """Encode the current old-point update, without unknown future births."""

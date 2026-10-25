@@ -43,6 +43,7 @@ class OpacityUpdateConfig:
     decay_with_motion: bool = False
     amplitude_refit_steps: int = 0
     joint_with_birth: bool = False
+    birth_sources_only: bool = False
 
     def validate(self):
         if not isinstance(self.enabled, bool):
@@ -55,6 +56,10 @@ class OpacityUpdateConfig:
             raise ValueError('opacity_update.joint_with_birth must be boolean')
         if self.joint_with_birth and not self.enabled:
             raise ValueError('Birth opacity fitting requires opacity updates')
+        if not isinstance(self.birth_sources_only, bool):
+            raise ValueError('opacity_update.birth_sources_only must be boolean')
+        if self.birth_sources_only and not self.joint_with_birth:
+            raise ValueError('Birth-source opacity fitting requires joint_with_birth')
         if (isinstance(self.amplitude_refit_steps, bool) or
                 not isinstance(self.amplitude_refit_steps, int) or self.amplitude_refit_steps < 0):
             raise ValueError('opacity_update.amplitude_refit_steps must be a nonnegative integer')
@@ -144,7 +149,7 @@ def encode_opacity_delta(reference, symbols, *, frame_index, step, mode='logit')
 
 
 class QuantizedOpacityUpdate(nn.Module):
-    """Fit old logits relative to the preceding decoded frame; freeze at birth."""
+    """Fit sparse old alpha changes against the preceding decoded frame."""
     def __init__(self, config):
         super().__init__()
         config.validate()
@@ -281,7 +286,11 @@ class QuantizedOpacityUpdate(nn.Module):
         path = Path(path)
         path.write_bytes(packet)
         return dict(path=str(path), archive_bytes=len(packet), rows=len(decoded.rows),
-                    step=self.step, mode=self.config.mode, timing='before_births',
+                    step=self.step, mode=self.config.mode,
+                    timing=('joint_motion_birth' if self.config.joint_with_birth
+                            else 'before_births'),
+                    birth_scope=(('birth_sources' if self.config.birth_sources_only
+                                  else 'all_old') if self.config.joint_with_birth else None),
                     format=packet[:4].decode('ascii'),
                     raw_body_bytes=sum(len(_varint(int(gap))) + 2 for gap in
                         torch.diff(torch.cat((decoded.rows.new_tensor([-1]), decoded.rows))).tolist()))

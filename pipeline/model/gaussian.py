@@ -8,6 +8,7 @@ from torch import Tensor
 
 from libgs.model.gaussian import GaussianModel as BaseGaussianModel
 from libgs.utils.general import build_rotation
+from .birth_quantization import RAW_ATTRIBUTES, RAW_FIELDS
 
 
 def select_budget_mask(mask: Tensor, scores: Tensor, limit: Optional[int]) -> Tensor:
@@ -153,13 +154,11 @@ class GaussianModel(BaseGaussianModel):
         self,
         grad_threshold: float,
         scene_extent: float,
-        sigma_scale: float = 2.0,
         *,
         max_new_gaussians: Optional[int] = None,
-        source_covariance_init: bool = False,
         return_source_rows: bool = False,
     ):
-        """Clone selected sources, optionally returning their exact row indices."""
+        """Append exact source copies for small, observed high-gradient points."""
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -180,26 +179,12 @@ class GaussianModel(BaseGaussianModel):
         source_rows = (selected_pts_mask.nonzero(as_tuple=True)[0]
                        if return_source_rows else None)
 
-        means = self._xyz[selected_pts_mask]
-        stds = scaling[selected_pts_mask]
-        source_rotation = self._rotation[selected_pts_mask]
-        if source_covariance_init:
-            from .rigid_residual_tree import quaternion_rotate
-            samples = torch.normal(torch.zeros_like(means), stds * sigma_scale)
-            q = torch.nn.functional.normalize(source_rotation, dim=-1)
-            new_xyz = means + quaternion_rotate(q, samples)
-        else:
-            new_xyz = torch.normal(means, stds * sigma_scale)
+        new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
-        # Preserve ReCon-GS's raw opacity-logit initialization.
-        new_opacities = torch.zeros_like(self._opacity[selected_pts_mask]) + 0.1
+        new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
-        if source_covariance_init:
-            new_rotation = source_rotation.clone()
-        else:
-            new_rotation = torch.zeros_like(source_rotation)
-            new_rotation[:, 0] = 1
+        new_rotation = self._rotation[selected_pts_mask]
 
         self.densification_postfix(
             new_xyz,
@@ -296,9 +281,240 @@ class GaussianModel(BaseGaussianModel):
 
 
 class BirthGaussianModel(GaussianModel):
-    """Track the exact source row through newborn splits and pruning."""
+    """Keep predictor lineage and learning age aligned with candidate topology."""
 
     source_rows: Optional[Tensor] = None
+    created_steps: Optional[Tensor] = None
+
+    @torch.no_grad()
+    def constrain_position_step(self, previous_xyz, previous_logscale,
+                                previous_rotation, sigma_cap, minimum_step):
+        """Limit Adam's move along each Gaussian axis, down to the codec grid."""
+        from .rigid_residual_tree import quaternion_rotate
+        rotation = torch.nn.functional.normalize(previous_rotation, dim=-1)
+        inverse = rotation.clone()
+        inverse[:, 1:] *= -1
+        local = quaternion_rotate(inverse, self._xyz - previous_xyz)
+        bound = (previous_logscale.exp() * sigma_cap).clamp_min(minimum_step)
+        local = torch.minimum(torch.maximum(local, -bound), bound)
+        self._xyz.copy_(previous_xyz + quaternion_rotate(rotation, local))
+
+    @torch.no_grad()
+    def initialize_covariance_sources(self, source_model, source_rows, created_step,
+                                      training_args, sigma_scale=0.5,
+                                      initial_alpha=0.1, split_scale_threshold=None,
+                                      max_screen_size=None):
+        """Seed nearby, low-alpha points without copying the whole scene.
+
+        Source rows are attribute-codec predictors, not spatial region IDs.
+        The configured opacity is a true alpha; store its logit so its
+        quantized render starts with the same intended weak coverage.
+        """
+        from .rigid_residual_tree import quaternion_rotate
+        rows = torch.as_tensor(source_rows, device=source_model._xyz.device,
+                               dtype=torch.long).flatten()
+        born = {name: getattr(source_model, attr)[rows].detach().clone()
+                for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)}
+        scaling = born['logscale'].exp()
+        factor = torch.ones_like(scaling[:, :1])
+        if split_scale_threshold is not None:
+            large = scaling.amax(dim=-1) > split_scale_threshold
+            factor[large] = 1 / 1.6
+        if max_screen_size is not None:
+            # Use only the training views already observed during motion.
+            # Leave room for fitting before the unchanged screen-size prune.
+            radius = source_model.max_radii2D[rows, None].clamp_min(1)
+            factor = torch.minimum(factor, (0.5 * max_screen_size / radius).clamp_max(1))
+        scaling = scaling * factor
+        born['logscale'] += factor.log()
+        samples = torch.normal(torch.zeros_like(born['xyz']), scaling * sigma_scale)
+        rotation = torch.nn.functional.normalize(born['rotation'], dim=-1)
+        born['xyz'] += quaternion_rotate(rotation, samples)
+        born['opacity'] = torch.logit(torch.full_like(born['opacity'], initial_alpha))
+        self.initialize_from_sources(source_model, None, created_step,
+                                     training_args, proposal=(born, rows))
+
+    @staticmethod
+    def _cap_source_opacity(raw, max_alpha):
+        """Cap old-source clone alpha in alpha space, preserving logit semantics."""
+        if max_alpha is None:
+            return raw
+        if not 0 < float(max_alpha) < 1:
+            raise ValueError('Old-source clone alpha cap must be in (0, 1)')
+        alpha = raw['_opacity'].sigmoid().clamp(max=float(max_alpha))
+        alpha = alpha.clamp_min(torch.finfo(alpha.dtype).eps)
+        raw['_opacity'] = torch.logit(alpha)
+        return raw
+
+    @torch.no_grad()
+    def initialize_from_sources(self, source_model, source_rows, created_step,
+                                training_args, opacity_alpha_cap=None, proposal=None):
+        """Create the first candidate pool from a residual proposal or source rows."""
+        if proposal is not None:
+            born, inherited = proposal
+            raw = {attr: born[name].detach().clone()
+                   for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)}
+            inherited = torch.as_tensor(inherited, dtype=torch.long).flatten()
+            if source_model is not None:
+                self.active_sh_degree = source_model.active_sh_degree
+                self.spatial_lr_scale = source_model.spatial_lr_scale
+        else:
+            source_rows = torch.as_tensor(source_rows, device=source_model._xyz.device,
+                                          dtype=torch.long).flatten()
+            self.active_sh_degree = source_model.active_sh_degree
+            self.spatial_lr_scale = source_model.spatial_lr_scale
+            inherited = (source_model.source_rows[source_rows]
+                         if isinstance(source_model, BirthGaussianModel) else source_rows)
+            raw = {attr: getattr(source_model, attr)[source_rows].detach().clone()
+                   for attr in RAW_ATTRIBUTES}
+            self._cap_source_opacity(raw, opacity_alpha_cap)
+        for attr in RAW_ATTRIBUTES:
+            value = raw[attr]
+            setattr(self, attr, torch.nn.Parameter(value))
+        count = len(inherited)
+        device = self._xyz.device
+        self.source_rows = inherited.detach().clone().long()
+        self.created_steps = torch.full((count,), int(created_step),
+                                        device=device, dtype=torch.long)
+        self.max_radii2D = self._xyz.new_zeros(count)
+        self.xyz_gradient_accum = self._xyz.new_zeros((count, 1))
+        self.denom = self._xyz.new_zeros((count, 1))
+        self.optimizer = None
+        if count:
+            self.training_setup(training_args)
+            self.max_radii2D = self._xyz.new_zeros(count)
+
+    @torch.no_grad()
+    def append_clones_from(self, source_model, source_rows, created_step,
+                           training_args=None, opacity_alpha_cap=None):
+        """Append exact copies and map each child to its old reference source."""
+        source_rows = torch.as_tensor(source_rows, device=source_model._xyz.device,
+                                      dtype=torch.long).flatten()
+        if not len(source_rows):
+            return 0
+        inherited = (source_model.source_rows[source_rows]
+                     if isinstance(source_model, BirthGaussianModel) else source_rows)
+        raw = {attr: getattr(source_model, attr)[source_rows].detach().clone()
+               for attr in RAW_ATTRIBUTES}
+        self._cap_source_opacity(raw, opacity_alpha_cap)
+        if self.optimizer is None:
+            if training_args is None:
+                raise ValueError('A birth optimizer configuration is required for first clones')
+            self.initialize_from_sources(source_model, source_rows, created_step,
+                                          training_args, opacity_alpha_cap)
+            return len(source_rows)
+        previous_radii = self.max_radii2D.detach().clone()
+        self.densification_postfix(
+            raw['_xyz'], raw['_features_dc'], raw['_features_rest'],
+            raw['_opacity'], raw['_scaling'], raw['_rotation'])
+        # libgs resets all densification buffers in densification_postfix.
+        # Keep the already observed screen-size evidence for existing rows;
+        # newly appended clones have no radius evidence until rendered.
+        self.max_radii2D = torch.cat((previous_radii,
+            previous_radii.new_zeros(len(source_rows))))
+        self.source_rows = torch.cat((self.source_rows, inherited.detach().clone().long()))
+        self.created_steps = torch.cat((self.created_steps,
+            self.created_steps.new_full((len(source_rows),), int(created_step))))
+        return len(source_rows)
+
+    @torch.no_grad()
+    def append_proposal(self, proposal, created_step, training_args=None):
+        """Append residual-proposal points with image-fitted positions and appearance."""
+        born, inherited = proposal
+        inherited = torch.as_tensor(inherited, dtype=torch.long).flatten()
+        if not len(inherited):
+            return 0
+        if self.optimizer is None:
+            if training_args is None:
+                raise ValueError('A birth optimizer configuration is required for first proposals')
+            self.initialize_from_sources(None, None, created_step, training_args,
+                                          proposal=proposal)
+            return len(inherited)
+        previous_radii = self.max_radii2D.detach().clone()
+        self.densification_postfix(
+            born['xyz'], born['sh_dc'], born['sh_rest'],
+            born['opacity'], born['logscale'], born['rotation'])
+        self.max_radii2D = torch.cat((previous_radii,
+            previous_radii.new_zeros(len(inherited))))
+        self.source_rows = torch.cat((self.source_rows,
+            inherited.to(self.source_rows.device)))
+        self.created_steps = torch.cat((self.created_steps,
+            self.created_steps.new_full((len(inherited),), int(created_step))))
+        return len(inherited)
+
+    @torch.no_grad()
+    def split_rows(self, source_rows, created_step, N=2):
+        """Replace large newborns with covariance-sampled children."""
+        source_rows = torch.as_tensor(source_rows, device=self._xyz.device,
+                                      dtype=torch.long).flatten()
+        if not len(source_rows):
+            return 0
+        if (N < 2 or self.optimizer is None or self.source_rows is None or
+                self.created_steps is None):
+            raise ValueError('Birth splitting requires an initialized pool and N >= 2')
+        inherited = self.source_rows[source_rows].repeat(N).clone()
+        n_selected = len(source_rows)
+        stds = self.get_scaling[source_rows].repeat(N, 1)
+        samples = torch.normal(torch.zeros_like(stds), stds)
+        rotations = build_rotation(self._rotation[source_rows]).repeat(N, 1, 1)
+        xyz = torch.bmm(rotations, samples.unsqueeze(-1)).squeeze(-1)
+        xyz = xyz + self._xyz[source_rows].repeat(N, 1)
+        scaling = self.scaling_inverse_activation(stds / (0.8 * N))
+        rotation = self._rotation[source_rows].repeat(N, 1)
+        dc = self._features_dc[source_rows].repeat(N, 1, 1)
+        rest = self._features_rest[source_rows].repeat(N, 1, 1)
+        opacity = self._opacity[source_rows].repeat(N, 1)
+        previous_radii = self.max_radii2D.detach().clone()
+        self.densification_postfix(xyz, dc, rest, opacity, scaling, rotation)
+        # Retain observed radii for unsplit rows. Split children start without
+        # a screen-size observation and their parents are pruned immediately.
+        self.max_radii2D = torch.cat((previous_radii,
+            previous_radii.new_zeros(N * n_selected)))
+        self.source_rows = torch.cat((self.source_rows, inherited))
+        self.created_steps = torch.cat((self.created_steps,
+            self.created_steps.new_full((N * n_selected,), int(created_step))))
+        remove = torch.zeros(len(self._xyz), dtype=torch.bool, device=self._xyz.device)
+        remove[source_rows] = True
+        self.prune_points(remove)
+        return N * n_selected
+
+    @torch.no_grad()
+    def densify_and_prune(self, grad_threshold, min_opacity, scene_extent,
+                          max_screen_size, created_step, max_points=None):
+        """Split observed large newborns and prune, following 0902bc1."""
+        if not len(self._xyz):
+            return dict(clone_added=0, split_added=0, pruned=0,
+                        split_children=0, split_parents_replaced=0,
+                        prune_reasons={})
+        grads = self.xyz_gradient_accum / self.denom.clamp_min(1)
+        scores = torch.linalg.vector_norm(grads, dim=-1)
+        selected = self.denom.flatten().gt(0) & scores.ge(grad_threshold)
+        scaling = self.get_scaling
+        large = selected & scaling.max(dim=1).values.gt(self.percent_dense * scene_extent)
+        # Each two-child split replaces its parent, adding one net row.
+        if max_points is not None:
+            large = select_budget_mask(large, scores, max(0, max_points - len(self._xyz)))
+        split_rows = large.nonzero(as_tuple=True)[0]
+        splits = self.split_rows(split_rows, created_step, N=2)
+
+        before_prune = len(self._xyz)
+        low_opacity = self.get_opacity.flatten().lt(min_opacity)
+        big_screen = self.max_radii2D.gt(max_screen_size)
+        big_world = self.get_scaling.max(dim=1).values.gt(0.1 * scene_extent)
+        remove = low_opacity | big_screen | big_world
+        reasons = dict(low_opacity=int(low_opacity.sum()),
+                       screen_size=int(big_screen.sum()),
+                       world_size=int(big_world.sum()),
+                       multiple=int(((low_opacity.int() + big_screen.int() +
+                                      big_world.int()) > 1).sum()))
+        if bool(remove.any()):
+            self.prune_points(remove)
+        return dict(clone_added=0,
+                    split_added=splits - len(split_rows),
+                    split_children=splits,
+                    split_parents_replaced=len(split_rows),
+                    pruned=before_prune - len(self._xyz),
+                    prune_reasons=reasons, eligible=int(selected.sum()))
 
     def prune_points(self, mask_or_indices: Tensor):
         if mask_or_indices.dtype is torch.bool:
@@ -311,22 +527,8 @@ class BirthGaussianModel(GaussianModel):
             if len(self.source_rows) != len(mask):
                 raise ValueError('Birth source rows disagree with candidate count')
             self.source_rows = self.source_rows[~mask]
+        if self.created_steps is not None:
+            if len(self.created_steps) != len(mask):
+                raise ValueError('Birth ages disagree with candidate count')
+            self.created_steps = self.created_steps[~mask]
         return super().prune_points(mask)
-
-    def adaptive_densify_and_split(self, grads, grad_threshold, scene_extent,
-                                   N=2, *, max_points=None):
-        if self.source_rows is None:
-            raise ValueError('Birth lineage must be set before candidate splitting')
-        try:
-            return super().adaptive_densify_and_split(
-                grads, grad_threshold, scene_extent, N, max_points=max_points)
-        except Exception:
-            # The caller must abandon this candidate model on a failed split.
-            self.source_rows = None
-            raise
-
-    def _split_selected_points(self, selected_pts_mask, N, selected):
-        # Append N children in exactly the order used by the geometry below.
-        self.source_rows = torch.cat((self.source_rows,
-                                      self.source_rows[selected_pts_mask].repeat(N)))
-        super()._split_selected_points(selected_pts_mask, N, selected)

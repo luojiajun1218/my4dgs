@@ -24,12 +24,14 @@ class MultiViewBirthConfig:
     depth_span_extent: float = .04
     min_support_views: int = 3
     min_support_fraction: float = .3
+    candidate_min_alpha: float = .5
     error_quantile: float = .9
     min_error: float = 1e-5
     color_sigma: float = .2
     occlusion_tolerance_extent: float = .002
     initial_sigma_pixels: float = 2.
-    initial_alpha: float = .1
+    alpha_min: float = .2
+    alpha_max: float = .85
     dedup_extent: float = .00075
 
     def validate(self):
@@ -44,8 +46,12 @@ class MultiViewBirthConfig:
                 raise ValueError(f'{name} must be finite and positive')
         if not 0 < self.min_support_fraction <= 1:
             raise ValueError('min_support_fraction must be in (0, 1]')
-        if not 0 < self.error_quantile < 1 or not 0 < self.initial_alpha < 1:
-            raise ValueError('error_quantile and initial_alpha must be in (0, 1)')
+        if not 0 < self.candidate_min_alpha <= 1:
+            raise ValueError('candidate_min_alpha must be in (0, 1]')
+        if not 0 < self.error_quantile < 1:
+            raise ValueError('error_quantile must be in (0, 1)')
+        if not 0 < self.alpha_min < self.alpha_max < 1:
+            raise ValueError('alpha_min and alpha_max must satisfy 0 < min < max < 1')
 
 
 @dataclass
@@ -85,7 +91,32 @@ def sample_map(value, grid):
 
 
 @torch.no_grad()
-def collect_view_evidence(renderer, cameras, raw, background, config):
+def temporal_change_scores(xyz, camera_pairs):
+    """Mean RGB change at projected centers in matched fixed training cameras.
+
+    This ranks existing sources; it does not triangulate or create proposals.
+    Out-of-frame projections do not dilute the average of the other cameras.
+    """
+    total=xyz.new_zeros(len(xyz));seen=xyz.new_zeros(len(xyz))
+    count=0
+    for current,previous in camera_pairs:
+        if (current.image.shape!=previous.image.shape or
+                not torch.allclose(current.full_proj_transform,
+                                   previous.full_proj_transform,rtol=0,atol=1e-6)):
+            raise ValueError('Temporal birth ranking requires matched fixed training cameras')
+        grid,_,inside=project_points(xyz,current)
+        change=(current.image-previous.image).abs().mean(dim=0)
+        value=sample_map(change,grid).flatten()
+        total+=value*inside
+        seen+=inside
+        count+=1
+    if count==0:
+        raise ValueError('Temporal birth ranking requires training camera pairs')
+    return total/seen.clamp_min(1)
+
+
+@torch.no_grad()
+def collect_view_evidence(renderer, cameras, raw, background, config, min_alpha=.5):
     config.validate()
     evidence = []
     homogeneous = torch.cat((raw['xyz'], torch.ones_like(raw['xyz'][:, :1])), dim=1)
@@ -99,7 +130,7 @@ def collect_view_evidence(renderer, cameras, raw, background, config):
         depth = accumulated[0] / alpha.clamp_min(1e-8)
         error = (prediction - camera.image).square().mean(dim=0)
         error = F.avg_pool2d(error[None, None], 5, 1, 2)[0, 0]
-        valid = (alpha > .5) & (depth > 0)
+        valid = (alpha > min_alpha) & (depth > 0)
         threshold = (torch.quantile(error[valid], config.error_quantile)
                      if valid.any() else error.new_tensor(config.min_error))
         evidence.append(ViewEvidence(camera, camera.image, depth, alpha, error,
@@ -108,21 +139,21 @@ def collect_view_evidence(renderer, cameras, raw, background, config):
 
 
 @torch.no_grad()
-def score_depth_candidates(xyz, seed_rgb, evidence, extent, config):
+def score_depth_candidates(xyz, seed_rgb, evidence, extent, config, min_alpha=.5):
     """Return geometric/color support, including visibility and contradiction."""
     count = len(xyz)
     device = xyz.device
     visible_count = torch.zeros(count, device=device)
     supported_count = torch.zeros_like(visible_count)
     signal = torch.zeros_like(visible_count)
-    support_weights, colors, scales, directions = [], [], [], []
+    support_weights, colors, scales, directions, error_ratios = [], [], [], [], []
     for item in evidence:
         grid, z, inside = project_points(xyz, item.camera)
         old_depth = sample_map(item.depth, grid)[:, 0]
         old_alpha = sample_map(item.alpha, grid)[:, 0]
         error = sample_map(item.error, grid)[:, 0]
         rgb = sample_map(item.image, grid)
-        visible = inside & (old_alpha > .5) & (old_depth > 0)
+        visible = inside & (old_alpha > min_alpha) & (old_depth > 0)
         visible &= z <= old_depth + config.occlusion_tolerance_extent * extent
         difference = (rgb - seed_rgb).square().mean(dim=1)
         affinity = torch.exp(-difference / config.color_sigma ** 2)
@@ -133,6 +164,7 @@ def score_depth_candidates(xyz, seed_rgb, evidence, extent, config):
         signal += weight * (error / item.threshold).clamp_max(20)
         support_weights.append(weight)
         colors.append(rgb)
+        error_ratios.append((error / item.threshold).clamp_max(4))
         width = item.image.shape[-1]
         scales.append(z * (2 * math.tan(item.camera.fovx / 2) / width))
         directions.append(F.normalize(xyz - item.camera.camera_center, dim=1))
@@ -144,6 +176,7 @@ def score_depth_candidates(xyz, seed_rgb, evidence, extent, config):
     scores.masked_fill_(~enough, -torch.inf)
     return scores, dict(support_count=supported_count, visible_count=visible_count,
         weights=torch.stack(support_weights), colors=torch.stack(colors),
+        error_ratio=torch.stack(error_ratios),
         scales=torch.stack(scales), directions=torch.stack(directions))
 
 
@@ -168,9 +201,24 @@ def fit_initial_sh1(colors, directions, weights):
     return torch.linalg.solve(gram, rhs)
 
 
+def initial_alpha(error_ratio, weights, support_count, visible_count, config):
+    """Per-point opacity from residual strength and multi-view agreement."""
+    strength = (((error_ratio - 1).clamp_min(0) * weights).sum(0) /
+                weights.sum(0).clamp_min(1e-8))
+    strength = 1 - torch.exp(-strength)
+    confidence = (support_count / visible_count.clamp_min(1)).clamp(0, 1)
+    return (config.alpha_min + (config.alpha_max - config.alpha_min) *
+            confidence * strength).clamp(config.alpha_min, config.alpha_max)
+
+
 @torch.no_grad()
-def propose_multiview_births(renderer, cameras, raw, background, extent, config):
-    """Choose a depth per residual ray, deduplicate, and initialize appearance."""
+def propose_multiview_births(renderer, cameras, raw, background, extent, config,
+                             source_xyz=None, existing_xyz=None):
+    """Choose a depth per residual ray, deduplicate, and initialize appearance.
+
+    ``source_xyz`` supplies the lineage rows the codec predicts from, while
+    ``existing_xyz`` suppresses points that would duplicate the current set.
+    """
     config.validate()
     if len(cameras) < config.min_support_views:
         raise ValueError('Too few fitting cameras for multi-view birth support')
@@ -178,7 +226,7 @@ def propose_multiview_births(renderer, cameras, raw, background, extent, config)
     proposals, seed_colors, offsets = [], [], []
     for item in evidence:
         height, width = item.image.shape[-2:]
-        valid = (item.alpha > .5) & (item.depth > 0)
+        valid = (item.alpha > config.candidate_min_alpha) & (item.depth > 0)
         error = item.error.masked_fill(~valid, 0)
         values, pixels = F.max_pool2d(error[None, None], 16, 16, return_indices=True)
         top = torch.topk(values.flatten(), min(config.candidates_per_view, values.numel())).indices
@@ -197,7 +245,9 @@ def propose_multiview_births(renderer, cameras, raw, background, extent, config)
         offsets.append(offset.expand(len(pixel), -1).reshape(-1))
     empty = {name: value[:0].clone() for name, value in raw.items()}
     if not proposals:
-        return empty, torch.empty(0, device=raw['xyz'].device, dtype=torch.long), dict(proposed_rays=0, accepted=0)
+        return empty, torch.empty(0, device=raw['xyz'].device, dtype=torch.long), dict(
+            proposed_rays=0, tested_depths=0, supported_rays=0, accepted=0,
+            dropped_existing=0)
     xyz, rgb = torch.cat(proposals), torch.cat(seed_colors)
     score, details = score_depth_candidates(xyz, rgb, evidence, extent, config)
     score -= .01 * torch.cat(offsets).abs()
@@ -216,12 +266,22 @@ def propose_multiview_births(renderer, cameras, raw, background, extent, config)
             keep.append(index)
     rows = rows[torch.as_tensor(keep, device=rows.device, dtype=torch.long)]
     report = dict(proposed_rays=len(ray_scores), tested_depths=len(xyz),
-                  supported_rays=int(torch.isfinite(best_score).sum()), accepted=len(rows))
+                  supported_rays=int(torch.isfinite(best_score).sum()),
+                  dropped_existing=0)
+    selected = xyz[rows]
+    if existing_xyz is not None and len(existing_xyz) and len(rows):
+        from scipy.spatial import cKDTree
+        distance, _ = cKDTree(existing_xyz.cpu().numpy()).query(selected.cpu().numpy())
+        close = torch.as_tensor(distance <= config.dedup_extent * extent,
+                                device=rows.device, dtype=torch.bool)
+        report['dropped_existing'] = int(close.sum())
+        rows, selected = rows[~close], selected[~close]
+    report['accepted'] = len(rows)
     if not len(rows):
         return empty, torch.empty(0, device=xyz.device, dtype=torch.long), report
-    selected = xyz[rows]
     from scipy.spatial import cKDTree
-    _, nearest = cKDTree(raw['xyz'].cpu().numpy()).query(selected.cpu().numpy())
+    seeds = raw['xyz'] if source_xyz is None else source_xyz
+    _, nearest = cKDTree(seeds.cpu().numpy()).query(selected.cpu().numpy())
     sources = torch.as_tensor(nearest, device=xyz.device, dtype=torch.long)
     born = {name: value[sources].clone() for name, value in raw.items()}
     born['xyz'] = selected
@@ -231,16 +291,15 @@ def propose_multiview_births(renderer, cameras, raw, background, extent, config)
     sigma = (details['scales'][:, rows] * weights).sum(0) / weights.sum(0).clamp_min(1e-8)
     sigma = (sigma * config.initial_sigma_pixels).clamp(5e-5 * extent, .005 * extent)
     born['logscale'] = sigma[:, None].expand(-1, 3).log().contiguous()
-    born['opacity'].fill_(math.log(config.initial_alpha / (1 - config.initial_alpha)))
+    # Initial opacity is the per-point evidence strength: how far the local
+    # residual exceeds each view's own error threshold, weighted by multi-view
+    # color agreement and limited by the fraction of views that support it.
+    alpha = initial_alpha(details['error_ratio'][:, rows], weights,
+                          details['support_count'][rows],
+                          details['visible_count'][rows], config)
+    born['opacity'] = torch.logit(alpha).reshape(-1, 1)
     report.update(mean_support=float(details['support_count'][rows].mean()),
                   mean_visible=float(details['visible_count'][rows].mean()),
+                  mean_alpha=float(alpha.mean()),
                   mean_depth_offset_extent=float(torch.cat(offsets)[rows].abs().mean()) * config.depth_span_extent)
     return born, sources, report
-
-
-def validation_edit_gain(before, after, *, min_gain_db=0., max_ssim_drop=1e-4):
-    """PSNR-aligned admission, using fitting-set validation cameras only."""
-    gain = after['psnr'] - before['psnr']
-    ssim_ok = ('ssim' not in before or 'ssim' not in after or
-               after['ssim'] >= before['ssim'] - max_ssim_drop)
-    return bool(math.isfinite(gain) and gain > min_gain_db and ssim_ok), gain

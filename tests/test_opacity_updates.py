@@ -12,10 +12,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pipeline.module import Module
+from pipeline.module import Module, ModuleConfig
 from pipeline.trainer import Trainer
-from pipeline.model.birth_quantization import RAW_FIELDS, model_raw
-from pipeline.model.gaussian import GaussianModel
+from pipeline.model.birth_quantization import RAW_ATTRIBUTES, RAW_FIELDS, model_raw
+from pipeline.model.gaussian import BirthGaussianModel, GaussianModel
 from pipeline.model.legacy_opacity_codec import decode_opacity_delta
 from pipeline.model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate, encode_opacity_delta
 from pipeline.model.spatial_gated_motion import SpatialGatedMotion
@@ -204,6 +204,85 @@ class OpacityUpdateTests(unittest.TestCase):
             decoded = decode_opacity_delta(Path(info['path']).read_bytes(), reference[two.rows], frame_index=2)
             torch.testing.assert_close(decoded.logits, two.canonical_logits(), atol=0, rtol=0)
 
+    def test_module_birth_render_and_optimizer_honor_joint_opacity_flag(self):
+        class AlphaRenderer:
+            def __init__(self, model):
+                self.gaussians = model
+
+            def __call__(self, viewpoint, background):
+                return {'render': self.gaussians.get_opacity}
+
+        for joint, sources_only in ((False, False), (True, False), (True, True)):
+            with self.subTest(joint=joint, sources_only=sources_only):
+                cfg = ModuleConfig(opacity_update=OpacityUpdateConfig(
+                    enabled=True, mode='alpha', step=.01,
+                    learning_rate=.03, joint_with_birth=joint,
+                    birth_sources_only=sources_only, proximal_regularization=True,
+                    l1_weight=.05))
+                module = Module(cfg, SimpleNamespace(current_frame=1, cameras_extent=2.))
+                module.trainer = SimpleNamespace(device=torch.device('cpu'), global_step=181)
+                raw = reference_raw()
+                module.gaussians = GaussianModel(1)
+                module.births = BirthGaussianModel(1)
+                for field, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
+                    setattr(module.gaussians, attr, torch.nn.Parameter(
+                        raw[field].clone(), requires_grad=False))
+                    setattr(module.births, attr, torch.nn.Parameter(raw[field][[1]].clone()))
+                module.gaussians.active_sh_degree = module.births.active_sh_degree = 1
+                module.gaussians.spatial_lr_scale = module.births.spatial_lr_scale = 1.
+                module.births.source_rows = torch.tensor([1])
+                module.renderer = AlphaRenderer(module.gaussians)
+                module.background = torch.zeros(3)
+                module.motion = SimpleNamespace(rate_normalization_bytes=50000.)
+                module.frame_prepared = module.motion_committed = True
+                module.frame_finalized = False
+                module.birth_control = {}
+                module.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update)
+                module.opacity_update.setup(raw['opacity'])
+                if sources_only:
+                    # Seed motion-stage momentum and nonzero unrelated deltas.
+                    # Both Adam and the proximal penalty would move these rows.
+                    with torch.no_grad():
+                        module.opacity_update.delta.fill_(.1)
+                    module.opacity_update.alphas().sum().backward()
+                    module.opacity_update.optimizer_step(0.)
+                    with torch.no_grad():
+                        module.gaussians._opacity.copy_(module.opacity_update.canonical_logits())
+                module.opacity_update.commit(torch.arange(len(raw['xyz'])))
+                reference = module.opacity_update.reference.clone()
+                before = module.opacity_update.delta.detach().clone()
+
+                image = module.forward(None, training=True)['render']
+                (image - .4).square().sum().backward()
+                self.assertIsNotNone(module.births._opacity.grad)
+                self.assertIsNone(module.gaussians._opacity.grad)
+                self.assertEqual(module.opacity_update.delta.grad is not None, joint)
+                module._update_birth_opacity(module.motion_steps + 1)
+                if sources_only:
+                    unrelated = torch.arange(len(raw['xyz'])).ne(1)
+                    torch.testing.assert_close(module.opacity_update.delta[unrelated],
+                                               before[unrelated], rtol=0, atol=0)
+                    self.assertNotEqual(float(module.opacity_update.delta[1]), float(before[1]))
+                torch.testing.assert_close(module.opacity_update.reference, reference, rtol=0, atol=0)
+                torch.testing.assert_close(module.gaussians._opacity,
+                    module.opacity_update.canonical_logits(), rtol=0, atol=0)
+                if joint:
+                    self.assertTrue(bool(module.opacity_update.symbols().ne(0).any()))
+                    self.assertEqual(module.birth_control['joint_opacity_steps'], 1)
+                    with tempfile.TemporaryDirectory() as directory:
+                        info = module.opacity_update.export(Path(directory)/'opacity_001.bin', 1)
+                        decoded = decode_opacity_delta(Path(info['path']).read_bytes(), reference)
+                        torch.testing.assert_close(decoded.logits, module.gaussians._opacity,
+                                                   rtol=0, atol=0)
+                        self.assertEqual(info['timing'], 'joint_motion_birth')
+                        self.assertEqual(info['birth_scope'],
+                                         'birth_sources' if sources_only else 'all_old')
+                else:
+                    self.assertFalse(bool(module.opacity_update.symbols().ne(0).any()))
+                module.birth_control['replacement_committed'] = True
+                module.opacity_update.finish()
+                self.assertFalse(module.birth_opacity_active)
+
     def test_alpha_mode_has_unsaturated_image_gradient_and_zero_bits(self):
         cfg=OpacityUpdateConfig(enabled=True,mode='alpha',step=.01,learning_rate=.01)
         update=QuantizedOpacityUpdate(cfg)
@@ -292,7 +371,7 @@ class OpacityUpdateTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 encode_opacity_delta(reference, invalid, frame_index=2, step=.05)
 
-    def test_current_opacity_retires_previously_opaque_point_and_replays_births(self):
+    def test_current_opacity_is_committed_without_prebirth_retirement_and_replays_births(self):
         raw = reference_raw()
         raw['opacity'][0] = torch.logit(torch.tensor(.99))
         motion = motion_model(raw)
@@ -308,14 +387,14 @@ class OpacityUpdateTests(unittest.TestCase):
         torch.testing.assert_close(restored(), update(), rtol=0, atol=0)
         holder = SimpleNamespace(opacity_update=restored, gaussians=Rows(raw), motion=motion,
             config=SimpleNamespace(opacity_update=opacity_cfg), device=torch.device('cpu'),
-            birth_control=dict(previous_birth_count=3), retired_reference=None)
+            birth_control=dict(previous_birth_count=0), retired_reference=None)
         Module._commit_opacity_and_retire(holder)
-        self.assertEqual(holder.birth_control['retirement']['retired_count'], 1)
-        self.assertEqual(len(holder.gaussians._xyz), 7)
-        torch.testing.assert_close(motion.previous_rows, torch.arange(1, 8))
+        self.assertNotIn('retirement', holder.birth_control)
+        self.assertEqual(len(holder.gaussians._xyz), 8)
+        torch.testing.assert_close(motion.previous_rows, torch.arange(8))
         loaded_motion = SpatialGatedMotion(copy.deepcopy(motion.config))
         loaded_motion.restore(copy.deepcopy(motion.capture()))
-        self.assertEqual(len(loaded_motion.gs_translation), 7)
+        self.assertEqual(len(loaded_motion.gs_translation), 8)
         holder.frame_finalized = False
         holder.initial_reference = dict(original_count=8, retained_count=8,
                                         removed_count=0, threshold=0.)
@@ -330,11 +409,11 @@ class OpacityUpdateTests(unittest.TestCase):
             current_raw = model_raw(holder.gaussians)
             expected = export_frame(directory, loaded_motion, current_raw, torch.tensor([0]))
             info = restored.export(directory/'opacity_001.bin', 1)
-            self.assertEqual(info['rows'], 1)  # Deleted point's large alpha delta is not transmitted.
+            self.assertEqual(info['rows'], 2)  # Old alpha updates survive until step-270 retirement.
             manifest = dict(opacity_update='opacity_001.bin', opacity_update_timing='before_births')
             (directory/'frame_001.json').write_text(json.dumps(manifest))
             decoded, replayed = decode_frame(directory, 1, initial, raw)
-            self.assertEqual(len(decoded.xyz), 8)
+            self.assertEqual(len(decoded.xyz), 9)
             for name in RAW_FIELDS:
                 torch.testing.assert_close(replayed[name], expected[name], rtol=0, atol=0)
             manifest['opacity_update_timing'] = 'after_births'

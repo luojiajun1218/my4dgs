@@ -1,7 +1,0 @@
-{
-  "previous_run": "/tmp/my4dgs_frame009_amdd4mjt/output/restore_frame009/20261023T232410_e675b7",
-  "previous_checkpoint": "/tmp/my4dgs_frame009_amdd4mjt/output/restore_frame009/20261023T232410_e675b7/rigid-ckpt-8-300.pth",
-  "config": "/home/gamer-02/Documents/DeepLearning/my4dgs/config/n3dv/flame_steak_1020_full300_multiview.yaml",
-  "run_dir": "/tmp/my4dgs_multiview_formal9_gauvauq3/output/frame009_multiview_formal/20261024T000412_74857f",
-  "scope": "Real 180+80+40 frame009 pipeline, branched explicitly at finalized frame008. No full sequence run."
-}

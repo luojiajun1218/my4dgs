@@ -1,0 +1,54 @@
+{
+  "old_commit": "0902bc1",
+  "current_run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/n3dv/flame_steak_1025/recongs_birth/20261025T180552_c105b3",
+  "scope": "Both byte/count comparisons use dynamic frames 1..250; datasets/reference density differ.",
+  "current_motion_means": {
+    "motion_bytes": 64052.784,
+    "without_birth_bytes": 29824.56,
+    "marginal_birth_bytes": 34228.224,
+    "inherited_birth_rotation_bytes": 46168.976,
+    "marginal_explicit_quaternion_bytes": 17883.808,
+    "legacy_codec_same_symbols_bytes": 64105.232,
+    "raw_bytes": 144816.532,
+    "births": 1314.184,
+    "old_count": 128963,
+    "deleted": 1307.9,
+    "deletion_raw_bytes": 1520.3,
+    "gates_raw_bytes": 198.84,
+    "regional_raw_bytes": 2685.98,
+    "private_raw_bytes": 99593.42,
+    "regional_translation_blocks": 334.732,
+    "private_translation_blocks": 12440.04,
+    "private_rotation_blocks": 0,
+    "birth_raw_bytes": 40716.5
+  },
+  "baseline_prefix_means": {
+    "motion_bytes": 41328.592,
+    "birth_bytes": 3351.08,
+    "opacity_bytes": 5104.156,
+    "feature_bytes": 269.916,
+    "manifest_bytes": 658.736,
+    "complete_update_bytes": 50712.48,
+    "new_gaussians": 157.476,
+    "retired_gaussians": 100.636,
+    "old_gaussians": 208450.332,
+    "gs_translation_blocks": 13481.44,
+    "regions": 123.484,
+    "open_gates": 48.14
+  },
+  "current_prefix_means": {
+    "regions": 291.844,
+    "gates": 103.96
+  },
+  "rate_prices": {
+    "old_per_byte": 4.040658724347878e-10,
+    "current_per_byte": 6e-10,
+    "ratio_current_to_old": 1.4849063999999998
+  },
+  "cautions": [
+    "Removing birth fields re-encodes the same old symbols and deletion map; it is a packet-size audit, not a no-birth training experiment.",
+    "Dropping newborn quaternions changes their orientations. This is not a lossless coding improvement or a quality-preserving recommendation.",
+    "Compressed marginal section costs depend on context and must not be added as independent compressed components.",
+    "Legacy compressor uses exact source files from 0902bc1, after restoring its full gate bitmap; all current full packets recompress byte-identically."
+  ]
+}
