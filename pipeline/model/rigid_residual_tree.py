@@ -29,6 +29,7 @@ class RigidTreeConfig:
     gs_rotation_lr: float = 1e-3
     rotation_updates: bool = True
     amplitude_refit_steps: int = 0
+    counterfactual_residual_support: bool = False
     motion_lr_final_ratio: float = 1.0
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
@@ -56,6 +57,8 @@ class RigidTreeConfig:
 
     def validate(self):
         self.spatial_gate.validate(self.motion_steps)
+        if not isinstance(self.counterfactual_residual_support, bool):
+            raise ValueError('counterfactual_residual_support must be boolean')
         if not isinstance(self.rotation_updates, bool):
             raise ValueError('rotation_updates must be boolean')
         if (isinstance(self.amplitude_refit_steps, bool) or
@@ -124,6 +127,14 @@ class RigidTreeConfig:
         if window is not None and (isinstance(window, bool) or
                 not isinstance(window, int) or not 1 <= window <= self.motion_steps):
             raise ValueError('Motion fit window must be a positive integer within the motion phase')
+        if self.counterfactual_residual_support:
+            window = window or 20
+            if (self.rotation_updates or not self.spatial_gate.shared_discovery or
+                    self.spatial_gate.training_schedule != 'joint' or
+                    self.spatial_gate.private_full_motion or self.spatial_gate.hierarchical_private or
+                    self.amplitude_refit_steps < 2 * window or
+                    self.motion_steps - 2 * window < self.spatial_gate.freeze_step):
+                raise ValueError('Conditional support requires translation-only shared discovery and an amplitude-fit evidence window')
         if self.rate_normalization not in ('frame', 'reference'):
             raise ValueError('rate_normalization must be frame or reference')
         if self.relative_motion_units != 'extent_radians':

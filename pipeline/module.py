@@ -1075,9 +1075,6 @@ class Module(EarlyReplacementController,BaseModule):
                 self.renderer.collect_contributions = previous_collection
 
     def training_step(self, viewpoint, step, regularization_weight=1.):
-        package = self.forward(viewpoint, training=True)
-        adaptive_rate_view=package.pop('_adaptive_birth_rate_view',None)
-        image = package['render']
         factor = motion_image_factor(step, self.motion_steps,
             enabled=self.config.motion_coarse_to_fine,
             fitting_motion=self.frame_prepared and not self.motion_committed,
@@ -1085,6 +1082,14 @@ class Module(EarlyReplacementController,BaseModule):
         metric = getattr(self.config, 'photometric_loss', 'l1')
         if (self.motion_committed or (uses_early_replacement(self.config) and self.early_initialized)) and self.config.birth.photometric_loss is not None:
             metric = self.config.birth.photometric_loss
+        if self.config.rigid_tree.counterfactual_residual_support and not self.motion_committed:
+            from .model.motion_evidence import probe_motion_evidence
+            probe_motion_evidence(self, viewpoint, step,
+                lambda image: motion_photometric_loss(image, viewpoint.image,
+                    self.config.lambda_dssim, factor, metric=metric))
+        package = self.forward(viewpoint, training=True)
+        adaptive_rate_view=package.pop('_adaptive_birth_rate_view',None)
+        image = package['render']
         image_loss = motion_photometric_loss(image, viewpoint.image,
                                              self.config.lambda_dssim, factor, metric=metric)
         loss = image_loss

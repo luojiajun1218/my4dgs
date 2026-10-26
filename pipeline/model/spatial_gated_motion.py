@@ -258,6 +258,9 @@ class SpatialGatedMotion(MotionBase):
         quantize = _integer if hard else _quantized
         values = (quantize(self.gs_translation, self.gs_steps[:3]),
                   quantize(self.gs_rotation, self.gs_steps[3:]))
+        scale = getattr(self, '_counterfactual_probe_scale', None)
+        if scale is not None and not hard:
+            values = tuple(value * scale for value in values)
         if not self.hierarchical_private:
             return values
         mask = self._private_support()[:, None]
@@ -539,6 +542,10 @@ class SpatialGatedMotion(MotionBase):
         self._coding_initialized = False
         self._hard_gate_frozen = False
         self._amplitude_refit_support = None
+        self._counterfactual_probe_scale = None
+        from .motion_evidence import MotionEvidence
+        self._motion_evidence = (MotionEvidence(self.gs_translation)
+            if self.config.counterfactual_residual_support else None)
         self._predictor_fit_state = None
         self.flat_region_diagnostics = {'method': 'learned_spatial_gate', 'frame': frame_index}
         self.owner = spatial_owner(self.spatial_paths, self.opened)
@@ -788,6 +795,8 @@ class SpatialGatedMotion(MotionBase):
         if training:
             self.last_step = int(step)
             self._prepare_amplitude_refit(step)
+            from .motion_evidence import finalize_motion_evidence
+            finalize_motion_evidence(self, step)
         if training and self.shared_discovery_active:
             translation, rotation_vector = self._stochastic_image_motion()
             xyz = self.base_xyz + translation
@@ -871,6 +880,8 @@ class SpatialGatedMotion(MotionBase):
         if getattr(self, '_predictor_fit_state', None) is not None:
             self._predictor_fit_state = {name: value[rows].clone()
                                         for name, value in self._predictor_fit_state.items()}
+        if getattr(self, '_motion_evidence', None) is not None:
+            self._motion_evidence.retain(rows)
         self.node_counts = torch.bincount(self.spatial_paths.flatten(), minlength=len(self.parents))
         self._gs_id_lengths = _id_lengths(len(rows), self.base_xyz)
         self._survivor_mapping_bytes = self._count_survivor_mapping_bytes()
@@ -1917,6 +1928,8 @@ class SpatialGatedMotion(MotionBase):
             packet['amplitude_refit_support'] = getattr(self, '_amplitude_refit_support', None)
             packet['codec_rate'] = (None if getattr(self, '_codec_rate', None) is None
                                     else self._codec_rate.capture())
+            if self.config.counterfactual_residual_support:
+                packet['conditional_motion_evidence'] = self._motion_evidence.capture()
             if self.config.spatial_gate.predictor_objective == 'proximal_rd':
                 packet['predictor_fit_state'] = self._predictor_fit_state
         return packet
@@ -1976,6 +1989,12 @@ class SpatialGatedMotion(MotionBase):
                 raise ValueError('Checkpoint private coordinates disagree with its gate stage')
             self._frame_private_full_motion = active
         self._amplitude_refit_support = None if packet is None else packet.get('amplitude_refit_support')
+        self._counterfactual_probe_scale = None
+        self._motion_evidence = None
+        if packet is not None and self.config.counterfactual_residual_support:
+            from .motion_evidence import MotionEvidence
+            self._motion_evidence = MotionEvidence.restore(
+                packet.get('conditional_motion_evidence'), self.gs_translation)
         self._predictor_fit_state = None if packet is None else packet.get('predictor_fit_state')
         if self._predictor_fit_state is not None:
             if (set(self._predictor_fit_state) != {'target', 'metric'} or any(
