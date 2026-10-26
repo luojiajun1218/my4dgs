@@ -12,6 +12,7 @@
 #ifndef CUDA_RASTERIZER_H_INCLUDED
 #define CUDA_RASTERIZER_H_INCLUDED
 
+#include "covariance_gradient.h"
 #include <vector>
 #include <functional>
 
@@ -74,11 +75,11 @@ namespace ObservedCudaRasterizer
 			char* image_buffer,
 			const float* dL_dpix,
 			float* dL_dmean2D,
-			float* dL_dconic,
+			CovarianceGradientScalar* dL_dconic,
 			float* dL_dopacity,
 			float* dL_dcolor,
 			float* dL_dmean3D,
-			float* dL_dcov3D,
+			CovarianceGradientScalar* dL_dcov3D,
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,

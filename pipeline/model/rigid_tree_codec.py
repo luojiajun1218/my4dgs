@@ -185,13 +185,13 @@ def compress_motion_packet(raw_packet, mode='auto'):
     return min(candidates, key=len)
 
 
-def uncompressed_motion_packet(packet):
+def uncompressed_motion_packet(packet, *, sparse_sections=None):
     """Return verified raw packet bytes from current or legacy storage."""
     packet = bytes(packet)
     if packet[:4] in MOTION_MAGICS:
         layout, raw_length = unpack_layout(packet, MOTION_MAGICS,
                                            max_raw_bytes=MAX_RAW_PACKET_BYTES)
-        raw = decode_motion_layout(layout, raw_length)
+        raw = decode_motion_layout(layout, raw_length, sparse_sections=sparse_sections)
         _verify_raw_checksum(raw)
         return raw
     if packet[:4] in RAW_MAGICS:
@@ -315,9 +315,19 @@ def _sparse_write(result, t, r):
             result.extend(struct.pack('<3h', *rotation))
 
 
-def _sparse_read(reader, count, *, delta_rows=False):
-    t = torch.zeros(count, 3, dtype=torch.int16)
-    r = torch.zeros(count, 3, dtype=torch.int16)
+def _sparse_read(reader, count, *, delta_rows=False, sparse_sections=None):
+    if sparse_sections is not None and reader.cursor in sparse_sections:
+        span, expected_count, t_rows, t_values, r_rows, r_values = sparse_sections.pop(reader.cursor)
+        if not delta_rows or count != expected_count:
+            raise ValueError('Planar motion section differs from raw decoder dimensions')
+        reader.take(span)
+        t = np.zeros((count, 3), dtype='<i2')
+        r = np.zeros((count, 3), dtype='<i2')
+        t[t_rows] = t_values
+        r[r_rows] = r_values
+        return torch.from_numpy(t), torch.from_numpy(r)
+    t = np.zeros((count, 3), dtype='<i2')
+    r = np.zeros((count, 3), dtype='<i2')
     blocks = reader.integer()
     if blocks > count:
         raise ValueError('More motion blocks than IDs')
@@ -335,13 +345,13 @@ def _sparse_read(reader, count, *, delta_rows=False):
             values = struct.unpack('<3h', reader.take(6))
             if not any(values):
                 raise ValueError('Redundant zero translation block')
-            t[row] = torch.tensor(values, dtype=torch.int16)
+            t[row] = values
         if flags & 2:
             values = struct.unpack('<3h', reader.take(6))
             if not any(values):
                 raise ValueError('Redundant zero rotation block')
-            r[row] = torch.tensor(values, dtype=torch.int16)
-    return t, r
+            r[row] = values
+    return torch.from_numpy(t), torch.from_numpy(r)
 
 
 def _validate_state(state):
@@ -654,7 +664,8 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
 def decode_motion(payload, prior_state):
     """Replay one frame and return its complete state for the next packet."""
     _validate_state(prior_state)
-    payload = uncompressed_motion_packet(payload)
+    sparse_sections = {}
+    payload = uncompressed_motion_packet(payload, sparse_sections=sparse_sections)
     if len(payload) < 4 + 32 + CHECKSUM_BYTES:
         raise ValueError('Truncated rigid motion stream')
     if hashlib.sha256(payload[:-CHECKSUM_BYTES]).digest()[:CHECKSUM_BYTES] != payload[-CHECKSUM_BYTES:]:
@@ -712,7 +723,7 @@ def decode_motion(payload, prior_state):
     parents = prior_state.parents.detach().cpu().long().clone()
     # Pivots are based on prior topology and prior decoded points, so edits
     # never silently alter the origin about which this frame's motion rotates.
-    pivots = region_pivots(base_xyz, prior_owner, parents)
+    pivots = None if spatial else region_pivots(base_xyz, prior_owner, parents)
     if dynamic:
         layout_mode = reader.take(1)[0]
         if layout_mode == 0:
@@ -773,10 +784,12 @@ def decode_motion(payload, prior_state):
             raise ValueError('Invalid owner edit')
         owner[row] = new_owner
         last = row
-    rt, rr = _sparse_read(reader, regions - 1, delta_rows=delta_rows)
+    rt, rr = _sparse_read(reader, regions - 1, delta_rows=delta_rows,
+                          sparse_sections=sparse_sections)
     rt = torch.cat((torch.zeros(1, 3, dtype=torch.int16), rt))
     rr = torch.cat((torch.zeros(1, 3, dtype=torch.int16), rr))
-    gt, gr = _sparse_read(reader, count, delta_rows=delta_rows)
+    gt, gr = _sparse_read(reader, count, delta_rows=delta_rows,
+                          sparse_sections=sparse_sections)
     if inherit_birth_rotation and (bool(rr.ne(0).any()) or bool(gr.ne(0).any())):
         raise ValueError('Translation-only stream contains rotation updates')
     offset_pose=stream_magic in OFFSET_SPATIAL_MAGICS
