@@ -67,7 +67,11 @@ class AdaptiveBirthController:
         # Deterministic local offsets avoid coincident-depth ties and RNG drift.
         index=torch.arange(len(rows),device=self.device,dtype=seed['xyz'].dtype)
         direction=torch.stack((torch.sin(index*2.399),torch.cos(index*2.399),torch.sin(index*1.37)),1)
-        seed['xyz']+=direction*seed['logscale'].exp()*.25
+        # Scales live on the parent's local covariance axes. Rotate the local
+        # displacement before adding it to a world-space center; otherwise a
+        # flat rotated source can seed a child far outside its thin support.
+        from .model.early_replacement_model import _rotate
+        seed['xyz']+=_rotate(seed['rotation'],direction*seed['logscale'].exp()*.25)
         seed['logscale']+=torch.tensor(.7,device=self.device).log()
         initial=alpha[rows].clamp(.03,.1)
         seed['opacity']=torch.logit(initial)
@@ -80,7 +84,6 @@ class AdaptiveBirthController:
         learner.active_sh_degree=self.gaussians.active_sh_degree
         learner.bind_source_pose(raw['xyz'],raw['rotation'],detach=True)
         # install defines local zero at seed; bind changes anchor to parent.
-        from .model.early_replacement_model import _rotate
         q=raw['rotation'][rows].clone();q[:,1:]*=-1
         learner.local_xyz.copy_(_rotate(q,seed['xyz']-raw['xyz'][rows]))
         learner.attach_optimizer(self.motion.optimizer,self.config.gaussian_stage2)
