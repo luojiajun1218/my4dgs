@@ -237,11 +237,12 @@ def _quality(module, view, expected, tolerance):
     import torch
     from libgs.metric import psnr, ssim
 
-    if (view.image.shape != (3, 1199, 1600) or
+    shape = tuple(view.image.shape)
+    if (len(shape) != 3 or shape[0] != 3 or min(shape[1:]) < 1 or
             not bool(torch.isfinite(view.image).all()) or
             bool((view.image < -1e-6).any()) or
             bool((view.image > 1 + 1e-6).any())):
-        raise ValueError('cam00 input must be finite RGB in [0,1] at 1600x1199')
+        raise ValueError('cam00 input must be nonempty finite RGB in [0,1]')
     image = _render_checked(module, view)
     measured = dict(psnr=float(psnr(image, view.image)),
                     ssim=float(ssim(image, view.image)),
@@ -560,6 +561,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
     stream = args.stream_dir or run / 'frame_storage' / 'rigid_tree'
     reference = (args.reference or stream / 'reference_frame0.npz').resolve()
     module, datamodule = _make_module(config, device)
+    expected_shape = (3, int(config.data.expected_image_size[1]),
+                      int(config.data.expected_image_size[0]))
     num_frames = datamodule.num_frames
     if num_frames < 2:
         raise ValueError('Complete sequence needs frame0 and dynamic frames')
@@ -594,6 +597,10 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         torch.cuda.synchronize()
         upload_seconds = time.perf_counter() - upload_started
         view, test_views = _cam00(datamodule, frame, device)
+        image_shape = list(view.image.shape)
+        if tuple(image_shape) != expected_shape:
+            raise ValueError(f'Frame {frame} cam00 loaded at unexpected shape '
+                             f'{tuple(image_shape)}')
         if test_views != 1:
             raise ValueError('Complete-sequence cam00 PSNR needs one test view per frame')
         expected = None
@@ -637,7 +644,7 @@ def _run_sequence(args, config, run, device, first_gpu_check):
     result = dict(schema='rigid_residual_tree_complete_sequence_benchmark_v1',
         run=str(run), stream_dir=str(stream.resolve()), reference=str(reference),
         expected_frames=num_frames, measured_frames=len(rows),
-        image_shape=[3, 1199, 1600], cache_enabled=cache_enabled,
+        image_shape=image_shape, cache_enabled=cache_enabled,
         gpu_name=torch.cuda.get_device_name(device),
         storage=_summarize_sequence_storage(rows, reference_bytes),
         timing_protocol=dict(warmups_per_frame=args.sequence_warmups,
@@ -713,15 +720,22 @@ def main():
     first_gpu_check = check_gpu_exclusivity()
     run = args.run.resolve()
     config = _load_config(run)
-    if config.data.resolution != -1 or config.data.expected_image_size != [1600, 1199]:
-        raise ValueError('Benchmark requires full-resolution 1600x1199 configuration')
+    expected = config.data.expected_image_size
+    if expected is None or len(expected) != 2 or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in expected):
+        raise ValueError('Benchmark requires config.data.expected_image_size '
+                         'as a positive integer [width, height] pair')
+    expected_shape = (3, int(expected[1]), int(expected[0]))
     if args.sequence:
         _run_sequence(args, config, run, device, first_gpu_check)
         return
     total_steps = config.module.rigid_tree.total_steps_for_frame(args.frame)
-    checkpoint = args.checkpoint or run / f'rigid-ckpt-{args.frame}-{total_steps}.pth'
     stream = args.stream_dir or run / 'frame_storage' / 'rigid_tree'
     manifest_path = stream / f'frame_{args.frame:03d}.json'
+    if manifest_path.is_file():
+        total_steps = int(json.loads(manifest_path.read_text()).get('optimization_steps', total_steps))
+    checkpoint = args.checkpoint or run / f'rigid-ckpt-{args.frame}-{total_steps}.pth'
     has_checkpoint = checkpoint.is_file()
     has_stream = manifest_path.is_file()
     mode = (('both' if has_checkpoint and has_stream else
@@ -735,7 +749,7 @@ def main():
         raise ValueError('--checkpoint is unused in stream mode')
     module, datamodule = _make_module(config, device)
     view, test_views = _cam00(datamodule, args.frame, device)
-    if tuple(view.image.shape) != (3, 1199, 1600):
+    if tuple(view.image.shape) != expected_shape:
         raise ValueError(f'cam00 loaded at unexpected shape {tuple(view.image.shape)}')
 
     expected = None

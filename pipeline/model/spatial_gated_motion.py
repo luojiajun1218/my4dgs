@@ -1824,7 +1824,19 @@ class SpatialGatedMotion(MotionBase):
             gates=[dict(node=node, probability=gate_probabilities[node],
                         opened=bool(opened[node])) for node in gate_nodes])
 
-    def export_motion(self, path, inherit_birth_rotation=False):
+    @torch.no_grad()
+    def decoded_survivor_pose(self):
+        """CPU decoder-exact old pose without encoding or advancing state."""
+        from .rigid_tree_codec import compose_decoded_survivors
+        rt, rr, gt, gr = self._values(hard=True)
+        return compose_decoded_survivors(self.frame_reference_state,self.extent,
+            self.previous_rows,self.owner,self.parents,rt,rr,gt,gr,
+            self.config.motion_xyz_step_extent,self.config.motion_rotation_step_rad,
+            gs_translation_step_extent=self.config.gs_xyz_step_extent,
+            gs_rotation_step_rad=self.config.gs_rotation_step_rad,
+            spatial_open=self.opened,spatial_relative=self.relative_regions)
+
+    def export_motion(self, path, inherit_birth_rotation=False, birth_pose_steps=None):
         from .rigid_tree_codec import encode_motion, decode_motion, motion_packet_info
         if not self.committed:
             raise ValueError('Materialize spatial motion before exporting')
@@ -1837,7 +1849,7 @@ class SpatialGatedMotion(MotionBase):
             compression='auto', gs_translation_step_extent=self.config.gs_xyz_step_extent,
             gs_rotation_step_rad=self.config.gs_rotation_step_rad, spatial_open=self.opened.cpu(),
             spatial_relative=self.relative_regions,
-            inherit_birth_rotation=inherit_birth_rotation)
+            inherit_birth_rotation=inherit_birth_rotation,birth_pose_steps=birth_pose_steps)
         decoded = decode_motion(packet, self.frame_reference_state)
         if not torch.allclose(decoded.xyz, self.materialized_xyz.cpu(), atol=1e-6, rtol=1e-5):
             raise ValueError('Spatial stream differs from the quantized training pose')

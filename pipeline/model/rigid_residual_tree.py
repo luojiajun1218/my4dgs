@@ -113,8 +113,8 @@ class RigidTreeConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f'{name} must be a nonnegative integer')
-        if self.region_count != 9 or self.total_steps_for_frame(1) > 300:
-            raise ValueError('Use eight initial regions and at most 300 steps per frame')
+        if self.region_count != 9:
+            raise ValueError('Use eight initial regions')
         if self.rate_warmup_steps >= self.motion_steps:
             raise ValueError('Rate warmup must fit the motion phase')
         if (self.spatial_gate.training_schedule == 'staged' and self.rate_loss_weight and

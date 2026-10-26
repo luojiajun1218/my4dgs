@@ -159,6 +159,8 @@ class GaussianModel(BaseGaussianModel):
         max_new_gaussians: Optional[int] = None,
         source_covariance_init: bool = False,
         return_source_rows: bool = False,
+        appearance_scores: Optional[Tensor] = None,
+        max_appearance_gaussians: int = 0,
     ):
         """Clone selected sources, optionally returning their exact row indices."""
         grads = self.xyz_gradient_accum / self.denom
@@ -167,16 +169,46 @@ class GaussianModel(BaseGaussianModel):
         # Extract points that satisfy the gradient condition
         scores = torch.norm(grads, dim=-1)
         scaling = self.get_scaling
-        selected_pts_mask = scores >= grad_threshold
-        selected_pts_mask = torch.logical_and(
-            selected_pts_mask,
+        appearance_enabled = (
+            appearance_scores is not None and max_appearance_gaussians > 0)
+        if appearance_enabled:
+            if (isinstance(max_appearance_gaussians, bool)
+                    or not isinstance(max_appearance_gaussians, int)
+                    or max_appearance_gaussians < 0):
+                raise ValueError(
+                    'Appearance clone budget requires a nonnegative int')
+            if appearance_scores.shape != (self.get_xyz.shape[0],):
+                raise ValueError('appearance_scores must have shape (n,)')
+            if not bool(torch.isfinite(appearance_scores).all().item()):
+                raise ValueError('appearance_scores must be finite')
+        positional_mask = scores >= grad_threshold
+        positional_mask = torch.logical_and(
+            positional_mask,
             torch.max(scaling, dim=1).values
             <= self.percent_dense * scene_extent,
         )
-        eligible = int(selected_pts_mask.sum().item())
-        if max_new_gaussians is not None:
-            selected_pts_mask = select_budget_mask(
-                selected_pts_mask, scores, max_new_gaussians)
+        if appearance_enabled:
+            appearance_candidate_mask = appearance_scores > 0
+            appearance_limit = max_appearance_gaussians
+            if max_new_gaussians is not None:
+                appearance_limit = min(appearance_limit, max_new_gaussians)
+            appearance_mask = select_budget_mask(
+                appearance_candidate_mask, appearance_scores, appearance_limit)
+            appearance_count = int(appearance_mask.sum().item())
+            positional_mask = torch.logical_and(positional_mask, ~appearance_mask)
+            eligible = int(torch.logical_or(
+                positional_mask, appearance_candidate_mask).sum().item())
+            if max_new_gaussians is not None:
+                positional_mask = select_budget_mask(
+                    positional_mask, scores,
+                    max(0, max_new_gaussians - appearance_count))
+            selected_pts_mask = torch.logical_or(positional_mask, appearance_mask)
+        else:
+            selected_pts_mask = positional_mask
+            eligible = int(selected_pts_mask.sum().item())
+            if max_new_gaussians is not None:
+                selected_pts_mask = select_budget_mask(
+                    selected_pts_mask, scores, max_new_gaussians)
         added = int(selected_pts_mask.sum().item())
         source_rows = (selected_pts_mask.nonzero(as_tuple=True)[0]
                        if return_source_rows else None)
@@ -191,6 +223,9 @@ class GaussianModel(BaseGaussianModel):
             new_xyz = means + quaternion_rotate(q, samples)
         else:
             new_xyz = torch.normal(means, stds * sigma_scale)
+        if appearance_enabled:
+            new_xyz = torch.where(
+                appearance_mask[selected_pts_mask].unsqueeze(-1), means, new_xyz)
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         # Preserve ReCon-GS's raw opacity-logit initialization.
@@ -211,6 +246,8 @@ class GaussianModel(BaseGaussianModel):
             new_rotation,
         )
         report = dict(eligible=eligible, added=added, blocked=eligible - added)
+        if appearance_enabled:
+            report["appearance_added"] = int(appearance_mask.sum().item())
         return (report, source_rows) if return_source_rows else report
 
     def adaptive_densify_and_split(

@@ -216,12 +216,12 @@ class QuantizedOpacityUpdate(nn.Module):
                     active_rows=nonzero)
 
     @torch.no_grad()
-    def optimizer_step(self, byte_price, proximal=False, lr_factor=1.):
+    def optimizer_step(self, byte_price, proximal=False, lr_factor=1.,perform_step=True,external_state=None):
         learning_rate = self.config.learning_rate * lr_factor
         self.optimizer.param_groups[0]['lr'] = learning_rate
         if self.refit_support is not None and self.delta.grad is not None:
             self.delta.grad.mul_(self.refit_support)
-        self.optimizer.step()
+        if perform_step:self.optimizer.step()
         self.delta.clamp_(min=-32767 * self.step, max=32767 * self.step)
         if self.config.mode=='alpha':
             self.delta.copy_(torch.minimum(torch.maximum(self.delta,-self.alpha_reference),1-self.alpha_reference))
@@ -229,7 +229,7 @@ class QuantizedOpacityUpdate(nn.Module):
             self.delta.masked_fill_(~self.refit_support, 0)
         elif ((proximal and byte_price > 0) or
                 (self.config.proximal_regularization and self.config.l1_weight > 0)):
-            state = self.optimizer.state.get(self.delta, {})
+            state = external_state if external_state is not None else self.optimizer.state.get(self.delta, {})
             if 'exp_avg_sq' in state:
                 t = int(state['step'])
                 metric = (state['exp_avg_sq'] / (1 - .999 ** t)).sqrt().add(1e-8)
@@ -243,7 +243,7 @@ class QuantizedOpacityUpdate(nn.Module):
                     if not self.config.proximal_regularization:
                         prune &= active
                     self.delta[prune] = 0
-        self.optimizer.zero_grad(set_to_none=True)
+        if perform_step:self.optimizer.zero_grad(set_to_none=True)
 
     def symbols(self):
         return torch.round(self.delta.detach() / self.step)

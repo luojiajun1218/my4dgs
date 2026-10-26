@@ -156,6 +156,112 @@ def validate_sequence_extension(checkpoint, current_data_config,
     terminal_step += config.get('post_birth_motion_steps', 0)
     if config.get('online_flat_clustering'):
         terminal_step += config.get('post_partition_steps', 0)
+    allocation = checkpoint.get('birth_allocation')
+    population_allocations = ('selected_population_refit_v5', 'selected_population_refit_v5_1',
+                              'inherited_intrinsic_radiance_v6', 'bounded_intrinsic_radiance_v6_1',
+                              'conservative_detail_family_v7', 'surface_patch_takeover_v8',
+                              'support_reincarnation_crossfit_v9','dual_predictive_support_v10','source_residual_support_v11',
+                              'quick_source_residual_300_v12','shadow_source_residual_300_v13',
+                              'persistent_anchored_bank_300_v14','early_source_replacement_300_v15','adaptive_residual_birth_300_v16')
+    if allocation in ('residual_surface_cohorts_v4', *population_allocations):
+        method = checkpoint.get('rigid_tree_module_config') or {}
+        birth = method.get('birth') or {}
+        max_cohorts = (birth.get('residual') or {}).get('max_cohorts', 2)
+        schedule = checkpoint.get('birth_cohort_state') or {}
+        terminal_step = schedule.get('end_step')
+        index = schedule.get('index')
+        start = schedule.get('start_step')
+        motion_steps, birth_steps = config.get('motion_steps'), config.get('birth_steps')
+        quick_allocation=allocation in ('quick_source_residual_300_v12','shadow_source_residual_300_v13')
+        shadow=allocation=='shadow_source_residual_300_v13'
+        persistent=allocation=='persistent_anchored_bank_300_v14'
+        early=allocation in ('early_source_replacement_300_v15','adaptive_residual_birth_300_v16')
+        if quick_allocation and (
+                motion_steps!=200 or birth_steps!=100 or index!=0 or start!=200 or
+                terminal_step not in ((200,300) if shadow else (300,)) or
+                birth.get('radiance_mode')!=('shadow_source_residual' if shadow else 'quick_source_residual')):
+            raise ValueError('Quick completed prefix must be exactly one motion200 + birth100 frame')
+        if persistent and (motion_steps!=200 or birth_steps!=100 or index!=0 or start!=200 or
+                terminal_step not in (200,300) or birth.get('radiance_mode')!='persistent_anchored_newborn'):
+            raise ValueError('Persistent bank prefix must complete one bounded motion200 + birth0/100 stage')
+        if early and (motion_steps!=200 or birth_steps!=100 or index!=0 or start!=70 or
+                terminal_step not in (200,300) or birth.get('radiance_mode')!=('adaptive_residual_birth' if allocation=='adaptive_residual_birth_300_v16' else 'early_source_replacement')):
+            raise ValueError('Early support transfer prefix must match gate70 / motion200 / global<=300')
+        values = (motion_steps, birth_steps, max_cohorts, terminal_step, index, start)
+        if (any(isinstance(value, bool) or not isinstance(value, int) for value in values) or
+                min(motion_steps, birth_steps, max_cohorts, terminal_step) < 1 or index < 0 or
+                birth.get('mechanism') != 'residual_transaction'):
+            raise ValueError('Dynamic birth checkpoint has invalid cohort completion metadata')
+        extra = int(allocation in population_allocations)
+        if not early and (index >= max_cohorts+extra or start != motion_steps+birth_steps*index or
+                (terminal_step != start+birth_steps and not ((shadow or persistent) and terminal_step==200))):
+            raise ValueError('Dynamic birth completion exceeds its configured cohort schedule')
+        relative = f'frame_storage/rigid_tree/frame_{resume:03d}.json'
+        _directory_guard(source, relative)
+        manifest = _read_json(source / relative)
+        if quick_allocation:
+            ledger = manifest.get('training_step_accounting') or {}
+            quick = checkpoint.get('quick_birth_state') or {}
+            updates = ledger.get('birth_optimizer_updates')
+            control=((checkpoint.get('rigid_tree_frame') or {}).get('birth_control') or {})
+            proposed = control.get('proposal_count',1)
+            expected_updates = 100 if proposed else 0
+            if shadow:
+                accepted=(control.get('shadow_initializer') or {}).get('accepted_points')
+                if (isinstance(accepted,bool) or not isinstance(accepted,int) or accepted<0 or
+                        terminal_step!=(300 if accepted else 200)):
+                    raise ValueError('Shadow prefix must match its finite-density accepted population')
+                expected_updates=terminal_step-200
+            if (any(ledger.get(key)!=value for key,value in dict(motion=200,birth=terminal_step-200,total=terminal_step,
+                    initializer_optimizer_updates=0,post_admission_optimizer_updates=0).items()) or
+                    isinstance(updates,bool) or not isinstance(updates,int) or updates!=expected_updates or
+                    quick.get('optimizer_steps')!=updates or quick.get('initialized') is not True or
+                    checkpoint.get('dual_birth_state') is not None):
+                raise ValueError('Quick prefix training ledger must match one bounded single-model birth optimizer')
+        if persistent:
+            ledger=manifest.get('training_step_accounting') or {}
+            progress=checkpoint.get('persistent_birth_state') or {}
+            population=progress.get('training_population_count')
+            expected=terminal_step-200
+            bank=checkpoint.get('persistent_newborn_bank') or {}
+            layout=bank.get('layout');specs=bank.get('specs')
+            if (isinstance(population,bool) or not isinstance(population,int) or population<0 or
+                    bool(population)!=(terminal_step==300) or progress.get('optimizer_steps')!=expected or
+                    progress.get('initialized') is not True or
+                    any(ledger.get(key)!=value for key,value in dict(motion=200,birth=expected,total=terminal_step,
+                        birth_optimizer_updates=expected,initializer_optimizer_updates=0,post_admission_optimizer_updates=0).items()) or
+                    not isinstance(layout,dict) or not isinstance(specs,dict) or set(layout)!=set(specs) or
+                    len(set(layout.values()))!=len(layout) or
+                    any(not isinstance(uid,str) or isinstance(row,bool) or not isinstance(row,int) or
+                        row<0 or row>=len(checkpoint['gaussians'][1]) for uid,row in layout.items()) or
+                    (bool(layout) and bank.get('state') is None) or
+                    checkpoint.get('dual_birth_state') is not None):
+                raise ValueError('Persistent prefix lost its single-model optimizer ledger or UID population')
+        if early:
+            ledger=manifest.get('training_step_accounting') or {}
+            state=checkpoint.get('early_replacement_state') or {}
+            control=((checkpoint.get('rigid_tree_frame') or {}).get('birth_control') or {}).get('early_replacement') or {}
+            source_count=control.get('source_count')
+            selected_count=control.get('selected_population')
+            expected_birth=(terminal_step-70 if source_count else 0)
+            expected=dict(warm_gate=70,joint=130,final_population=terminal_step-200,
+                global_iterations=terminal_step,shared_adam_steps=terminal_step,motion_participation=200,
+                birth_participation=expected_birth,joint_overlap=130 if source_count else 0,extra_SGD_steps=0,
+                topology_born_step=70,population_frozen_step=200)
+            if (isinstance(source_count,bool) or not isinstance(source_count,int) or source_count<0 or
+                    isinstance(selected_count,bool) or not isinstance(selected_count,int) or selected_count<0 or
+                    bool(selected_count)!=(terminal_step==300) or state.get('initialized') is not True or
+                    state.get('shared_steps')!=terminal_step or state.get('birth_updates')!=expected_birth or
+                    any(ledger.get(key)!=value for key,value in expected.items()) or
+                    control.get('SGD_200_codec_replay_exact') is not True or
+                    checkpoint.get('dual_birth_state') is not None):
+                raise ValueError('Early prefix lost its one-trajectory shared-Adam participation ledger')
+        actual_step = manifest.get('optimization_steps')
+        if (isinstance(actual_step, bool) or not isinstance(actual_step, int) or
+                actual_step != terminal_step or
+                (allocation in population_allocations and
+                 (checkpoint.get('birth_terminal_state') or {}).get('active', False))):
+            raise ValueError('Dynamic birth completion disagrees with its finalized prefix manifest')
     if (checkpoint.get('rigid_tree_version') != 1 or
             checkpoint.get('current_frame') != resume or
             checkpoint.get('global_step') != terminal_step or
@@ -202,8 +308,7 @@ def validate_sequence_extension(checkpoint, current_data_config,
             raise ValueError('Prefix frame references a different bootstrap or packet')
         relative_files.update((index, f'frame_storage/rigid_tree/motion_{frame:03d}.bin',
                                f'frame_summary/frame_{frame:03d}.json'))
-        for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity'),
-                            ('feature_dc_update', 'shdc')):
+        for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity')):
             name = manifest.get(field)
             if name is not None:
                 if name != f'{stem}_{frame:03d}.bin':

@@ -47,7 +47,8 @@ TRANSLATION_ONLY_SPATIAL_MAGIC = b'SPG3'
 RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC = b'SPG4'
 TRANSLATION_ONLY_MAGICS = (TRANSLATION_ONLY_SPATIAL_MAGIC,
                            RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC)
-SPATIAL_MAGICS = (SPATIAL_MAGIC, RELATIVE_SPATIAL_MAGIC, *TRANSLATION_ONLY_MAGICS)
+OFFSET_SPATIAL_MAGICS=(b'SPG5',b'SPG6')
+SPATIAL_MAGICS = (SPATIAL_MAGIC, RELATIVE_SPATIAL_MAGIC, *TRANSLATION_ONLY_MAGICS, *OFFSET_SPATIAL_MAGICS)
 CHECKSUM_BYTES = 16
 MAX_RAW_PACKET_BYTES = 512 * 1024 * 1024
 MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
@@ -55,6 +56,7 @@ MAX_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
 RAW_MAGICS = (MAGIC, DUAL_STEP_MAGIC, DELTA_MAGIC, DUAL_STEP_DELTA_MAGIC,
               DYNAMIC_MAGIC, *SPATIAL_MAGICS)
 WRAPPERS = {
+    b'SPG5': (b'SPC5',b'SPL5'), b'SPG6': (b'SPC6',b'SPL6'),
     MAGIC: (COMPRESSED_MAGIC, LZMA_COMPRESSED_MAGIC),
     DUAL_STEP_MAGIC: (DUAL_STEP_COMPRESSED_MAGIC, DUAL_STEP_LZMA_COMPRESSED_MAGIC),
     DELTA_MAGIC: (DELTA_COMPRESSED_MAGIC, DELTA_LZMA_COMPRESSED_MAGIC),
@@ -236,7 +238,7 @@ def motion_packet_info(packet):
     """Distinguish true stored bytes from the uncompressed stream size."""
     raw = uncompressed_motion_packet(packet)
     magic = bytes(packet[:4])
-    formats = {MAGIC: 'RRT1-raw', DUAL_STEP_MAGIC: 'RRT2-raw',
+    formats = {**{magic:magic.decode()+'-parent-offset' for magic in (b'SPG5',b'SPC5',b'SPL5',b'SPG6',b'SPC6',b'SPL6')},MAGIC: 'RRT1-raw', DUAL_STEP_MAGIC: 'RRT2-raw',
                COMPRESSED_MAGIC: 'RRC1-zlib',
                DUAL_STEP_COMPRESSED_MAGIC: 'RRC2-zlib',
                LZMA_COMPRESSED_MAGIC: 'RRL1-lzma',
@@ -424,14 +426,86 @@ def dynamic_layout_bytes(previous_state, previous_rows, parents, pivots, region_
     return result, mapping[prior_owner]
 
 
+def _compose_decoded_pose(base_xyz, base_rotation, owner, parents, pivots,
+                          rt, rr, gt, gr, extent, step_extent, step_rotation,
+                          gs_step_extent, gs_step_rotation, *, spatial,
+                          spatial_relative=False, inherit_birth_rotation=False):
+    """Shared arithmetic for in-memory composition and actual packet replay."""
+    # Header scalars are binary64, and symbols/decoded reference are evaluated
+    # as CPU float32 exactly as in the wire decoder. In particular, do not
+    # compute tensor steps in float64 then cast the final pose.
+    extent, step_extent, step_rotation, gs_step_extent, gs_step_rotation = map(
+        float, (extent, step_extent, step_rotation, gs_step_extent, gs_step_rotation))
+    if spatial_relative:
+        rt = spatial_accumulate(rt.to(torch.int32), parents)
+        rr = spatial_accumulate(rr.to(torch.int32), parents)
+    values = (rt.float() * (extent * step_extent), rr.float() * step_rotation,
+              gt.float() * (extent * gs_step_extent), gr.float() * gs_step_rotation)
+    if spatial:
+        xyz, rotation = compose_spatial_pose(base_xyz, base_rotation, owner, *values)
+        if inherit_birth_rotation:
+            rotation = base_rotation.clone()
+        return xyz, rotation
+    return compose_pose(base_xyz, base_rotation, owner, parents, pivots, *values)
+
+
+@torch.no_grad()
+def compose_decoded_survivors(previous_state, extent, previous_rows, owner, parents,
+                              rt, rr, gt, gr, translation_step_extent,
+                              rotation_step_rad, *, gs_translation_step_extent=None,
+                              gs_rotation_step_rad=None, spatial_open=None,
+                              spatial_relative=False, inherit_birth_rotation=False,
+                              region_map=None, pivots=None):
+    """Return CPU float32 survivor poses identical to encode/decode, without I/O.
+
+    Inputs are the same quantized motion symbols and survivor layout passed to
+    encode_motion. This does not encode, compress, hash, or mutate codec state.
+    The returned quaternion is the raw decoder quaternion: no extra normalize.
+    """
+    rows = _cpu(previous_rows, torch.long)
+    count = len(rows)
+    base_xyz = previous_state.xyz[rows].detach().cpu().float()
+    base_rotation = previous_state.rotation[rows].detach().cpu().float()
+    prior_owner = previous_state.owner[rows].detach().cpu().long()
+    prior_parents = previous_state.parents.detach().cpu().long()
+    parents = _cpu(parents, torch.long)
+    owner = _cpu(owner, torch.long, (count,))
+    regions = len(parents)
+    rt, rr = (_cpu(v, torch.int16, (regions, 3)) for v in (rt, rr))
+    gt, gr = (_cpu(v, torch.int16, (count, 3)) for v in (gt, gr))
+    if spatial_open is not None:
+        opened = _cpu(spatial_open, torch.bool, (regions,))
+        paths = previous_state.spatial_paths[rows]
+        if previous_state.spatial_centers is not None:
+            paths = spatial_state_route(base_xyz, previous_state)
+        decoded_owner = spatial_owner(paths, opened)
+        if not torch.equal(owner, decoded_owner) or not torch.equal(parents, prior_parents):
+            raise ValueError('Survivor composition needs the encoded spatial owner/tree')
+        decoded_pivots = None
+    elif region_map is not None:
+        # Dynamic pivots are serialized as raw float32; copy that exact dtype.
+        decoded_pivots = _cpu(pivots, torch.float32, (regions, 3))
+    else:
+        # Parent edits change this frame topology, never its prior-frame pivot.
+        decoded_pivots = region_pivots(base_xyz, prior_owner, prior_parents)
+    return _compose_decoded_pose(base_xyz, base_rotation, owner, parents, decoded_pivots,
+        rt, rr, gt, gr, extent, translation_step_extent, rotation_step_rad,
+        translation_step_extent if gs_translation_step_extent is None else gs_translation_step_extent,
+        rotation_step_rad if gs_rotation_step_rad is None else gs_rotation_step_rad,
+        spatial=spatial_open is not None, spatial_relative=spatial_relative,
+        inherit_birth_rotation=inherit_birth_rotation)
+
+
 def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
                   parents, region_t_i16, region_r_i16, gs_t_i16, gs_r_i16,
                   birth_source_rows, birth_xyz, birth_rotation,
                   translation_step_extent, rotation_step_rad, compression='none',
                   gs_translation_step_extent=None, gs_rotation_step_rad=None,
                   region_map=None, pivots=None, spatial_open=None,
-                  spatial_relative=False, inherit_birth_rotation=False):
+                  spatial_relative=False, inherit_birth_rotation=False, birth_pose_steps=None):
     """Encode actual sparse translation/rotation blocks and topology deltas."""
+    if birth_pose_steps is not None and (spatial_open is None or inherit_birth_rotation):
+        raise ValueError('Parent-offset poses require independent spatial birth rotations')
     _validate_state(previous_state)
     if frame_index != previous_state.frame_index + 1:
         raise ValueError('Frame index must follow the previous decoded frame')
@@ -500,6 +574,7 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
         raise ValueError('Spatial stream requires explicit region and GS steps')
     spatial_magic = ((RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC if spatial_relative else TRANSLATION_ONLY_SPATIAL_MAGIC)
                      if inherit_birth_rotation else RELATIVE_SPATIAL_MAGIC if spatial_relative else SPATIAL_MAGIC)
+    if birth_pose_steps is not None:spatial_magic=b'SPG6' if spatial_relative else b'SPG5'
     result = bytearray(spatial_magic if spatial else DYNAMIC_MAGIC if dynamic else
                        DUAL_STEP_DELTA_MAGIC if dual_step else DELTA_MAGIC)
     result.extend(previous_state.digest())
@@ -554,9 +629,24 @@ def encode_motion(previous_state, frame_index, extent, previous_rows, owner,
     _sparse_write(result, gt, gr)
     for source in sources.tolist():
         result.extend(_uvar(source))
-    for xyz, rotation in zip(birth_xyz.tolist(), birth_rotation.tolist()):
-        result.extend(struct.pack('<3f', *xyz) if inherit_birth_rotation else
-                      struct.pack('<3f4f', *xyz, *rotation))
+    if birth_pose_steps is not None:
+        steps=tuple(float(v) for v in birth_pose_steps)
+        if len(steps)!=2 or not all(math.isfinite(v) and v>0 for v in steps):raise ValueError('Invalid birth pose steps')
+        parent_xyz,parent_rotation=compose_decoded_survivors(previous_state,extent,previous_rows,
+            owner,parents,rt,rr,gt,gr,translation_step_extent,rotation_step_rad,
+            gs_translation_step_extent=gs_translation_step_extent,
+            gs_rotation_step_rad=gs_rotation_step_rad,spatial_open=spatial_open,
+            spatial_relative=spatial_relative)
+        predictor=torch.cat((parent_xyz[sources],torch.nn.functional.normalize(parent_rotation[sources],dim=-1)),1)
+        values=torch.cat((birth_xyz,birth_rotation),1)
+        scale=values.new_tensor([steps[0]]*3+[steps[1]]*4)
+        symbols=torch.round((values-predictor)/scale).to(torch.int64)
+        if bool((symbols.abs()>2147483647).any()):raise ValueError('Birth pose symbol exceeds signed32')
+        result.extend(struct.pack('<2d',*steps))
+        for value in symbols.flatten().tolist():result.extend(_uvar(2*value if value>=0 else -2*value-1))
+    else:
+        for xyz, rotation in zip(birth_xyz.tolist(), birth_rotation.tolist()):
+            result.extend(struct.pack('<3f', *xyz) if inherit_birth_rotation else struct.pack('<3f4f', *xyz, *rotation))
     result.extend(hashlib.sha256(result).digest()[:CHECKSUM_BYTES])
     return compress_motion_packet(result, mode=compression)
 
@@ -689,32 +779,36 @@ def decode_motion(payload, prior_state):
     gt, gr = _sparse_read(reader, count, delta_rows=delta_rows)
     if inherit_birth_rotation and (bool(rr.ne(0).any()) or bool(gr.ne(0).any())):
         raise ValueError('Translation-only stream contains rotation updates')
-    pose_bytes = 12 if inherit_birth_rotation else 28
+    offset_pose=stream_magic in OFFSET_SPATIAL_MAGICS
+    pose_bytes = 7 if offset_pose else 12 if inherit_birth_rotation else 28
     if birth_count > (len(reader.payload) - reader.cursor) // (pose_bytes + 1):
         raise ValueError('Birth count exceeds remaining stream bytes')
     sources = [reader.integer() for _ in range(birth_count)]
     if any(source >= count for source in sources):
         raise ValueError('Birth source outside surviving GS rows')
-    births = [struct.unpack('<3f' if inherit_birth_rotation else '<3f4f', reader.take(pose_bytes))
-              for _ in range(birth_count)]
+    if offset_pose:
+        birth_steps=struct.unpack('<2d',reader.take(16))
+        if not all(math.isfinite(v) and v>0 for v in birth_steps):raise ValueError('Invalid birth pose steps')
+        packed=[reader.integer() for _ in range(birth_count*7)]
+        if any(value>4294967295 for value in packed):raise ValueError('Birth pose symbol exceeds signed32')
+        births=[[-(v//2)-1 if v&1 else v//2 for v in packed[i:i+7]] for i in range(0,len(packed),7)]
+    else:
+        births = [struct.unpack('<3f' if inherit_birth_rotation else '<3f4f', reader.take(pose_bytes)) for _ in range(birth_count)]
     if reader.cursor != len(reader.payload):
         raise ValueError('Trailing rigid motion bytes')
-    step_t = extent * step_extent
-    if stream_magic in (RELATIVE_SPATIAL_MAGIC, RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC):
-        rt = spatial_accumulate(rt.to(torch.int32), parents)
-        rr = spatial_accumulate(rr.to(torch.int32), parents)
-    values = (rt.float() * step_t, rr.float() * step_rotation,
-              gt.float() * (extent * gs_step_extent), gr.float() * gs_step_rotation)
-    if spatial:
-        xyz, rotation = compose_spatial_pose(base_xyz, base_rotation, owner, *values)
-        if inherit_birth_rotation:
-            rotation = base_rotation.clone()
-    else:
-        xyz, rotation = compose_pose(base_xyz, base_rotation, owner, parents, pivots, *values)
+    xyz, rotation = _compose_decoded_pose(base_xyz, base_rotation, owner, parents, pivots,
+        rt, rr, gt, gr, extent, step_extent, step_rotation, gs_step_extent, gs_step_rotation,
+        spatial=spatial,
+        spatial_relative=stream_magic in (RELATIVE_SPATIAL_MAGIC, RELATIVE_TRANSLATION_ONLY_SPATIAL_MAGIC,b'SPG6'),
+        inherit_birth_rotation=inherit_birth_rotation)
     if births:
         birth_xyz = torch.tensor([entry[:3] for entry in births], dtype=torch.float32)
         birth_rotation = (rotation[torch.tensor(sources, dtype=torch.long)].clone() if inherit_birth_rotation else
                           torch.tensor([entry[3:] for entry in births], dtype=torch.float32))
+        if offset_pose:
+            source=torch.tensor(sources,dtype=torch.long)
+            birth_xyz=xyz[source]+birth_xyz*birth_xyz.new_tensor(birth_steps[0])
+            birth_rotation=torch.nn.functional.normalize(rotation[source],dim=-1)+birth_rotation*birth_rotation.new_tensor(birth_steps[1])
         xyz = torch.cat((xyz, birth_xyz))
         rotation = torch.cat((rotation, birth_rotation))
         owner = torch.cat((owner, owner[torch.tensor(sources, dtype=torch.long)]))
