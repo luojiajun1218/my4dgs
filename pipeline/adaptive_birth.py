@@ -2,11 +2,12 @@
 from types import SimpleNamespace
 import torch
 from .model.adaptive_birth_model import AdaptiveBirthModel
-from .model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES
+from .model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES, QuantizedNewGaussianView
 from .model.residual_birth import BirthTransaction, RawView, spatial_groups
 from .model.support_reincarnation_proposal import score_support_responsibility, _native_responsibility
 from .model.adaptive_birth_storage import newborn_storage_terms, storage_ramp
 from .model.adaptive_birth_colour import conservative_colour_seed
+from .model.adaptive_birth_dc import native_colour_seed
 
 
 class AdaptiveBirthController:
@@ -86,6 +87,15 @@ class AdaptiveBirthController:
         # install defines local zero at seed; bind changes anchor to parent.
         q=raw['rotation'][rows].clone();q[:,1:]*=-1
         learner.local_xyz.copy_(_rotate(q,seed['xyz']-raw['xyz'][rows]))
+        native_colour_report=dict(enabled=False)
+        if self.config.birth.native_dc_init:
+            quantized=QuantizedNewGaussianView(learner,self.config.birth,self.motion.extent,raw,rows)
+            newborn={name:quantized.raw_value(name).detach() for name in RAW_FIELDS}
+            dc,native_colour_report=native_colour_seed(self.renderer,self.gaussians,raw,newborn,pair,
+                self.background,dc_step=self.config.birth.new_sh_step,predictor_dc=quantized.predictor['sh_dc'])
+            learner._features_dc.copy_(dc)
+            learner._seed_raw['sh_dc'].copy_(dc)
+            seed['sh_dc'].copy_(dc)
         learner.attach_optimizer(self.motion.optimizer,self.config.gaussian_stage2)
         self.births=learner;n=len(rows);names=tuple(views)
         self.birth_transaction=BirthTransaction(seed,rows.clone(),torch.full_like(rows,-1),scores[rows].clone(),
@@ -103,8 +113,10 @@ class AdaptiveBirthController:
                 source_rows=rows.cpu().tolist(),native_responsibility=responsibility,
                 learnable_fields=['xyz','rotation','scale','DC','SH','alpha'],
                 source_preserved=True,parent_colour_envelope=False,quantized_training=True,
-                proposal_render_calls=4,proposal_colour_backward_calls=6 if colour_enabled else 2,
+                proposal_render_calls=4+native_colour_report.get('additional_render_calls',0),
+                proposal_colour_backward_calls=(6 if colour_enabled else 2)+native_colour_report.get('additional_backward_calls',0),
                 residual_colour_initialization=colour_report,
+                native_colour_initialization=native_colour_report,
                 storage_loss=dict(enabled=self.config.birth.storage_loss_enabled,
                     strength=self.config.birth.storage_loss_strength,
                     warmup_steps=self.config.birth.storage_warmup_steps,

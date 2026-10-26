@@ -194,6 +194,7 @@ class BirthConfig:
     residual_colour_init: bool = False
     residual_colour_gain: float = 0.5
     residual_colour_max_rgb_delta: float = 0.05
+    native_dc_init: bool = False
     appearance_candidates: int = 0
     appearance_source_max_scale_extent: Optional[float] = None
     anchor_sfm_path: Optional[str] = None
@@ -205,7 +206,7 @@ class BirthConfig:
         if self.radiance_mode not in ('free','inherited_intrinsic','conservative_detail','surface_patch','support_reincarnation','dual_predictive_reincarnation','source_residual','quick_source_residual','shadow_source_residual','persistent_anchored_newborn','early_source_replacement','adaptive_residual_birth'):
             raise ValueError('Unknown newborn radiance mode')
         self.residual.validate()
-        for name in ('storage_loss_enabled','residual_colour_init','joint_old_opacity'):
+        for name in ('storage_loss_enabled','residual_colour_init','joint_old_opacity','native_dc_init'):
             if not isinstance(getattr(self,name),bool):raise ValueError(f'birth.{name} must be boolean')
         for name in ('storage_loss_strength','residual_colour_gain','residual_colour_max_rgb_delta'):
             value=getattr(self,name)
@@ -219,6 +220,8 @@ class BirthConfig:
                 raise ValueError(f'birth.{name} must be a valid non-negative warmup / positive ramp')
         if (self.storage_loss_enabled or self.residual_colour_init) and self.radiance_mode!='adaptive_residual_birth':
             raise ValueError('Newborn storage and residual colour initialization require adaptive_residual_birth')
+        if self.native_dc_init and self.radiance_mode!='adaptive_residual_birth':
+            raise ValueError('Native DC initialization requires adaptive_residual_birth')
         if (isinstance(self.population_loss_weight,bool) or
                 not isinstance(self.population_loss_weight,(int,float)) or
                 not math.isfinite(self.population_loss_weight) or self.population_loss_weight<0):
