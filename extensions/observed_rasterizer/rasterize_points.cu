@@ -150,12 +150,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	M = sh.size(1);
   }
 
+#if defined(MY4DGS_STABLE_COVARIANCE_GRADIENTS)
+  auto covariance_options = means3D.options().dtype(torch::kFloat64);
+#else
+  auto covariance_options = means3D.options();
+#endif
   torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
-  torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());
+  torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, covariance_options);
   torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());
-  torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
+  torch::Tensor dL_dcov3D = torch::zeros({P, 6}, covariance_options);
   torch::Tensor dL_dsh = torch::zeros({P, M, 3}, means3D.options());
   torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
@@ -183,18 +188,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),
 	  dL_dout_color.contiguous().data<float>(),
 	  dL_dmeans2D.contiguous().data<float>(),
-	  dL_dconic.contiguous().data<float>(),  
+	  dL_dconic.contiguous().data<CovarianceGradientScalar>(),
 	  dL_dopacity.contiguous().data<float>(),
 	  dL_dcolors.contiguous().data<float>(),
 	  dL_dmeans3D.contiguous().data<float>(),
-	  dL_dcov3D.contiguous().data<float>(),
+	  dL_dcov3D.contiguous().data<CovarianceGradientScalar>(),
 	  dL_dsh.contiguous().data<float>(),
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
 	  debug);
   }
 
-  return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacity, dL_dmeans3D, dL_dcov3D, dL_dsh, dL_dscales, dL_drotations);
+  return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacity, dL_dmeans3D, dL_dcov3D.to(means3D.options()), dL_dsh, dL_dscales, dL_drotations);
 }
 
 torch::Tensor markObservedVisible(

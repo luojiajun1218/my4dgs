@@ -14,7 +14,7 @@ from libgs.metric import lpips, psnr, ssim
 from libgs.model.merged_gaussian import MergedGaussianModel
 from libgs.pipeline import Module as BaseModule
 from libgs.pipeline import ModuleConfig as BaseModuleConfig
-from libgs.renderer import Renderer, RendererConfig
+from libgs.renderer import Renderer
 
 from .model.gaussian import BirthGaussianModel, GaussianModel
 from .model.rigid_tree_birth_codec import export_birth_attributes
@@ -24,7 +24,7 @@ from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
 from .model.rigid_residual_tree import (RigidTreeConfig,
     quaternion_angle_error, quaternion_rotate,
     saved_config_with_default_motion_lr)
-from .model.contribution_renderer import ContributionRenderer
+from .model.contribution_renderer import ContributionRenderer, RendererConfig
 from .model.spatial_gated_motion import SpatialGatedMotion
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
 from .model.residual_birth import (ResidualBirthConfig, BirthTransaction,
@@ -509,6 +509,9 @@ class Module(EarlyReplacementController,BaseModule):
 
     def setup(self):
         cfg = self.config
+        stable = getattr(cfg.renderer, 'stable_covariance_gradients', False)
+        if not isinstance(stable, bool):
+            raise ValueError('stable_covariance_gradients must be boolean')
         validate_initial_opacity_threshold(cfg.initial_opacity_threshold)
         cfg.birth.validate(cfg.rigid_tree.motion_steps)
         cfg.opacity_update.validate()
@@ -542,7 +545,7 @@ class Module(EarlyReplacementController,BaseModule):
                                        self.datamodule.cameras_extent)
         self.gaussians.training_setup(cfg.gaussian)
         self.births = BirthGaussianModel(cfg.sh_degree)
-        renderer_type = ContributionRenderer if cfg.effective_motion_observations else Renderer
+        renderer_type = ContributionRenderer if cfg.effective_motion_observations or stable else Renderer
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = SpatialGatedMotion(cfg.rigid_tree)
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
@@ -700,6 +703,7 @@ class Module(EarlyReplacementController,BaseModule):
             saved_config = {**saved_config, 'effective_motion_observations': False}
         if isinstance(saved_config, dict):
             saved_config = dict(saved_config)
+            saved_config['renderer'] = {**asdict(RendererConfig()), **saved_config.get('renderer', {})}
             saved_config.setdefault('motion_coarse_to_fine', False)
             saved_config.setdefault('photometric_loss', 'l1')
             saved_config.setdefault('opacity_update', asdict(OpacityUpdateConfig()))
