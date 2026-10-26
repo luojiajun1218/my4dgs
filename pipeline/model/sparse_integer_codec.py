@@ -272,14 +272,12 @@ def _check_motion_tail(tail, births, count, pose_bytes=28, offset=False):
     reader = _Reader(tail)
     if births > reader.remaining // (pose_bytes + 1):
         raise ValueError('Truncated sparse birth layout')
-    for _ in range(births):
-        if reader.integer() >= count:
-            raise ValueError('Invalid sparse birth source')
+    if bool((_read_unsigned_values(reader, births) >= count).any()):
+        raise ValueError('Invalid sparse birth source')
     if offset:
         steps=struct.unpack('<2d',reader.take(16))
         if not all(np.isfinite(v) and v>0 for v in steps):raise ValueError('Invalid birth pose steps')
-        for _ in range(births*7):
-            if reader.integer()>4294967295:raise ValueError('Birth pose symbol exceeds signed32')
+        _read_unsigned_values(reader,births*7)
         reader.take(16)
     else:reader.take(births * pose_bytes + 16)
     if reader.remaining:
@@ -352,7 +350,7 @@ def encode_opacity_layout(raw):
     return header + gaps + _write_values(values, 1)
 
 
-def decode_opacity_layout(layout, raw_length):
+def decode_opacity_layout(layout, raw_length, *, parsed=None):
     reader = _Reader(layout)
     header, count, nonzero, size = _opacity_header(reader)
     gaps = reader.gaps(nonzero, count)
@@ -365,4 +363,9 @@ def decode_opacity_layout(layout, raw_length):
     result.extend(records.tobytes())
     if len(result) != raw_length or len(result) != len(header) + size:
         raise ValueError('Reconstructed opacity length mismatch')
+    if parsed is not None:
+        if bool((values == 0).any()):
+            raise ValueError('Sparse opacity packet contains a zero update')
+        parsed['rows'] = _read_unsigned_values(_Reader(gaps), nonzero).astype(np.int64).cumsum() - 1
+        parsed['symbols'] = values
     return bytes(result)
