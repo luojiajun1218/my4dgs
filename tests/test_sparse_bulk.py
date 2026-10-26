@@ -71,5 +71,57 @@ class BulkSparseDecodeTests(unittest.TestCase):
         torch.testing.assert_close(decoded.xyz,xyz,rtol=0,atol=0)
         torch.testing.assert_close(decoded.rotation,q,rtol=0,atol=0)
 
+    def test_retained_planar_arrays_match_raw_parser_and_preserve_section_cursor(self):
+        rng=np.random.default_rng(8102)
+        for count in (0,1,12003):
+            t=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
+            r=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
+            t[rng.random(count)<.6]=0;r[rng.random(count)<.9]=0
+            raw=bytearray();codec._sparse_write(raw,t,r)
+            planar=layout._encode_sparse(layout._Reader(raw),count)
+            retained=[]
+            self.assertEqual(bytes(raw),layout._decode_sparse(layout._Reader(planar),count,decoded=retained))
+            sections={0:(len(raw),count,*retained[0])}
+            reader=codec._Reader(raw+b'trailer')
+            actual=codec._sparse_read(reader,count,delta_rows=True,sparse_sections=sections)
+            self.assertFalse(sections)
+            self.assertEqual(bytes(reader.take(7)),b'trailer')
+            for value,expected in zip(actual,(t,r)):
+                torch.testing.assert_close(value,torch.from_numpy(expected),rtol=0,atol=0)
+
+    def test_retained_sections_cannot_bypass_zero_block_validation(self):
+        for flag in (1,2,3):
+            raw=b'\x01\x01'+bytes([flag])+b'\0'*(6*(bool(flag&1)+bool(flag&2)))
+            planar=layout._encode_sparse(layout._Reader(raw),1)
+            with self.assertRaisesRegex(ValueError,'Redundant zero'):
+                codec._sparse_read(codec._Reader(raw),1,delta_rows=True)
+            with self.assertRaisesRegex(ValueError,'Redundant zero'):
+                layout._decode_sparse(layout._Reader(planar),1,decoded=[])
+
+    def test_retaining_an_empty_section_does_not_allocate_untrusted_population_size(self):
+        retained=[]
+        with patch.object(layout.np,'zeros',side_effect=AssertionError('dense allocation before state check')):
+            self.assertEqual(layout._decode_sparse(layout._Reader(b'\0'),2**32-1,decoded=retained),b'\0')
+        self.assertTrue(all(value.size==0 for value in retained[0]))
+
+    def test_whole_packet_uses_retained_sections_and_checks_original_checksum(self):
+        model=fixtures.JointImageRateTests().model()
+        raw=codec.uncompressed_motion_packet(fixtures.JointImageRateTests.packet(model))
+        planar=layout.pack_layout(layout.encode_motion_layout(raw),len(raw),layout.MOTION_MAGICS)
+        expected=codec.decode_motion(raw,model.frame_reference_state)
+        original=codec._sparse_read
+        def checked(reader,count,**kwargs):
+            self.assertIn(reader.cursor,kwargs['sparse_sections'])
+            return original(reader,count,**kwargs)
+        with patch.object(codec,'_sparse_read',side_effect=checked) as read:
+            actual=codec.decode_motion(planar,model.frame_reference_state)
+        self.assertEqual(read.call_count,2)
+        self.assertEqual(actual.digest(),expected.digest())
+        damaged=raw[:-1]+bytes([raw[-1]^1])
+        packet=layout.pack_layout(layout.encode_motion_layout(damaged),len(damaged),layout.MOTION_MAGICS)
+        with patch.object(codec,'_compose_decoded_pose',side_effect=AssertionError('must validate first')), \
+                self.assertRaisesRegex(ValueError,'checksum'):
+            codec.decode_motion(packet,model.frame_reference_state)
+
 
 if __name__=='__main__':unittest.main()

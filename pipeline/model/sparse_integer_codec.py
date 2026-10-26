@@ -234,7 +234,7 @@ def _encode_sparse(reader, limit):
             + _write_values(rotations, 3))
 
 
-def _decode_sparse(reader, limit):
+def _decode_sparse(reader, limit, *, decoded=None):
     start = reader.cursor
     count = reader.integer()
     result = bytearray(reader.data[start:reader.cursor])
@@ -253,6 +253,18 @@ def _decode_sparse(reader, limit):
     rotation_starts = suffixes[active_r] + 1 + 6 * active_t[active_r]
     records[(rotation_starts[:, None] + offsets).ravel()] = np.frombuffer(r.tobytes(), dtype=np.uint8)
     result.extend(records.tobytes())
+    if decoded is not None:
+        # Reuse these already-parsed symbols after the reconstructed packet's
+        # checksum is checked. The scalar raw decoder rejects zero blocks too.
+        if bool((~t.any(-1)).any()):
+            raise ValueError('Redundant zero translation block')
+        if bool((~r.any(-1)).any()):
+            raise ValueError('Redundant zero rotation block')
+        rows = _read_unsigned_values(_Reader(gaps), count).astype(np.int64).cumsum() - 1
+        # Keep sparse arrays until the raw decoder has checked these declared
+        # dimensions against its preceding state. Untrusted headers must not
+        # allocate dense arrays before that check.
+        decoded.append((rows[active_t], t, rows[active_r], r))
     return bytes(result)
 
 
@@ -285,20 +297,29 @@ def encode_motion_layout(raw):
     return _varint(len(prefix)) + prefix + region + point + tail
 
 
-def decode_motion_layout(layout, raw_length):
+def decode_motion_layout(layout, raw_length, *, sparse_sections=None):
+    """Restore original bytes, optionally retaining symbols for the raw decoder.
+
+    Section offsets refer to the restored raw bytes. The caller must verify
+    their existing checksum before consuming any retained arrays.
+    """
     reader = _Reader(layout)
     prefix = bytes(reader.take(reader.integer()))
     prefix_reader = _Reader(prefix)
     regions, count, births = _spatial_prefix(prefix_reader)
     if prefix_reader.remaining:
         raise ValueError('Unexpected spatial prefix trailer')
-    region = _decode_sparse(reader, regions - 1)
-    point = _decode_sparse(reader, count)
+    decoded = [] if sparse_sections is not None else None
+    region = _decode_sparse(reader, regions - 1, decoded=decoded)
+    point = _decode_sparse(reader, count, decoded=decoded)
     tail = bytes(reader.take(reader.remaining))
     _check_motion_tail(tail, births, count, 12 if prefix[:4] in (b'SPG3', b'SPG4') else 7 if prefix[:4] in (b'SPG5',b'SPG6') else 28, offset=prefix[:4] in (b'SPG5',b'SPG6'))
     raw = prefix + region + point + tail
     if len(raw) != raw_length:
         raise ValueError('Reconstructed motion length mismatch')
+    if sparse_sections is not None:
+        sparse_sections[len(prefix)] = (len(region), regions - 1, *decoded[0])
+        sparse_sections[len(prefix) + len(region)] = (len(point), count, *decoded[1])
     return raw
 
 
