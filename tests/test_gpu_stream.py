@@ -16,8 +16,18 @@ from tests.test_codec import (reference_raw,motion_model,appearance_fixture,
                               opacity_fixture,wrapped)
 
 
-def make_stream(directory,births=2,rotate=False):
-    raw=reference_raw();model=motion_model(raw);prior=model.frame_reference_state
+def make_stream(directory,births=2,rotate=False,nearest=False):
+    raw=reference_raw()
+    if nearest:raw['xyz'][0,0]=0.
+    model=motion_model(raw);prior=model.frame_reference_state
+    if nearest:
+        from pipeline.model.spatial_gate import spatial_state_route,spatial_owner
+        first_leaf=sum(8**level for level in range(prior.spatial_paths.shape[1]))
+        prior.spatial_support_ball=torch.tensor([0.,0.,0.,.2],dtype=torch.float64)
+        prior.spatial_leaf_centers=torch.tensor([[-1.,0.,0.],[1.,0.,0.]],dtype=torch.float32)
+        prior.spatial_leaf_nodes=torch.tensor([first_leaf,first_leaf+1],dtype=torch.long)
+        prior.spatial_paths=spatial_state_route(prior.xyz,prior)
+        prior.owner=spatial_owner(prior.spatial_paths,prior.spatial_open)
     rows=torch.tensor([0,2,3,4,5,6,7]);n=len(rows)
     rt=torch.zeros(len(prior.parents),3,dtype=torch.int16);rr=torch.zeros_like(rt)
     gt=torch.zeros(n,3,dtype=torch.int16);gr=torch.zeros_like(gt)
@@ -118,6 +128,21 @@ class StreamPacketTests(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(),'GPU incremental stream checks')
 class GPUStreamTests(unittest.TestCase):
+    def test_cooperative_nearest_leaf_keeps_exact_ties_and_routes_newborns_again(self):
+        from pipeline.model.gpu_stream import GPUStream
+        with tempfile.TemporaryDirectory() as folder:
+            directory=Path(folder);prior,raw,expected,attributes,_=make_stream(directory,nearest=True)
+            player=GPUStream(prior,raw,capacity=32)
+            step=read_stream_step(directory,1,region_count=len(prior.parents),depth=player.depth,rest=player.rest)
+            player.advance(step)
+            actual=player.capture_raw();state=player.capture_state(actual)
+            self.assertEqual(state.digest(),expected.digest())
+            self.assertEqual(reference_digest(actual),reference_digest(attributes))
+            first_leaf=sum(8**level for level in range(player.depth))
+            self.assertEqual(int(state.spatial_paths[0,-1]),first_leaf)
+            self.assertEqual(int(state.spatial_paths[step.old_count,-1]),first_leaf+1)
+            player.verify_render_inputs(attributes)
+
     def test_real_packet_births_deletions_and_empty_birth_match_cpu_bits(self):
         from pipeline.model.gpu_stream import GPUStream
         for births in (0,2):

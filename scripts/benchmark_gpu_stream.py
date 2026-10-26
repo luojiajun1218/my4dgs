@@ -6,9 +6,11 @@ exclusive GPU access, a matching complete verification certificate, and exactly
 decoded frames are never cached.
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import sys
 import time
@@ -71,12 +73,13 @@ def verify(run):
     config,module,dm,stream,state,raw,capacity=make(run)
     before_inputs=input_hashes(stream)
     player=GPUStream(state,raw,capacity=capacity)
+    pool=ready_pool()
+    iterator=iter(ordered_steps(stream,player,capacity,pool))
     rows=[];signature=None;static=True
     for frame in range(300):
         complete=0
         if frame:
-            step=read_stream_step(stream,frame,region_count=player.regions,depth=player.depth,
-                                  rest=player.rest,max_points=capacity)
+            step=next(iterator)
             player.advance(step)
             state,raw=base._decode_frame(stream,frame,state,raw)
             complete=step.stored_bytes
@@ -116,6 +119,9 @@ def verify(run):
         if frame%30==29 or frame==299:
             print('VERIFIED_RENDER',frame+1,'of300',flush=True)
         del view,image,original
+    try:next(iterator)
+    except StopIteration:pass
+    pool.shutdown()
     if source_hashes()!=before_sources or input_hashes(stream)!=before_inputs:
         raise ValueError('Source or packets changed during verification')
     return dict(schema='gpu_stream_complete_verification_v1',run=str(run),frames=300,dynamic_frames=299,
@@ -127,16 +133,38 @@ def verify(run):
         scope='All300 frames independently CPU/GPU decoded and re-rendered at cam00. Raw/state bits, activated renderer inputs, actual RGB pixels, saved PSNR and original manifests checked. No FPS claim; verification may share a GPU.',rows=rows)
 
 
-def ordered_steps(stream,player,capacity,workers=2):
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        def submit(frame):
-            return pool.submit(read_stream_step,stream,frame,region_count=player.regions,
-                depth=player.depth,rest=player.rest,max_points=capacity)
-        futures=[submit(frame) for frame in (1,2)]
-        for frame in range(1,300):
-            current=futures.pop(0).result()
-            if frame+2<300: futures.append(submit(frame+2))
-            yield current
+def cpu_worker():
+    # Workers never materialize CUDA tensors. Spawn avoids inheriting the
+    # parent's CUDA state and gives packet parsing an independent Python GIL.
+    os.environ['CUDA_VISIBLE_DEVICES']=''
+    torch.set_num_threads(1)
+
+
+def worker_ready():
+    time.sleep(.02)
+    return os.getpid()
+
+
+def ready_pool():
+    pool=ProcessPoolExecutor(max_workers=2,mp_context=multiprocessing.get_context('spawn'),
+                             initializer=cpu_worker)
+    ready=set();deadline=time.monotonic()+60
+    while len(ready)<2:
+        ready.update(future.result() for future in [pool.submit(worker_ready) for _ in range(2)])
+        if time.monotonic()>deadline:
+            pool.shutdown();raise RuntimeError('CPU packet workers did not become ready')
+    return pool
+
+
+def ordered_steps(stream,player,capacity,pool):
+    def submit(frame):
+        return pool.submit(read_stream_step,stream,frame,region_count=player.regions,
+            depth=player.depth,rest=player.rest,max_points=capacity)
+    futures=[submit(frame) for frame in (1,2)]
+    for frame in range(1,300):
+        current=futures.pop(0).result()
+        if frame+2<300:futures.append(submit(frame+2))
+        yield current
 
 
 @torch.no_grad()
@@ -157,9 +185,10 @@ def playback(run,certificate,rounds):
         player=GPUStream(state,raw,capacity=capacity)
         module.renderer.gaussians=player.view
         for _ in range(10): module.forward(view)['render'].clamp(0.,1.)
+        pool=ready_pool()  # One-time worker startup; no packets read yet.
         torch.cuda.synchronize()
         started=time.perf_counter();host=[]
-        iterator=iter(ordered_steps(stream,player,capacity))
+        iterator=iter(ordered_steps(stream,player,capacity,pool))
         for frame in range(1,300):
             wait=time.perf_counter();step=next(iterator);ready=time.perf_counter()
             if step.frame!=frame: raise ValueError('Playback order changed')
@@ -174,6 +203,7 @@ def playback(run,certificate,rounds):
         except StopIteration: pass
         torch.cuda.synchronize()
         elapsed=time.perf_counter()-started
+        pool.shutdown()
         base.check_gpu_exclusivity()
         actual=player.capture_raw();decoded=player.capture_state(actual)
         if (decoded.digest().hex()!=certificate['rows'][-1]['state_sha'] or
@@ -189,7 +219,7 @@ def playback(run,certificate,rounds):
         all300_psnr=certificate['all300_psnr'],complete_dynamic_KB=certificate['complete_dynamic_KB'],
         source_hashes=source_hashes(),torch_version=torch.__version__,cuda_version=torch.version.cuda,
         gpu_name=torch.cuda.get_device_name(),
-        scope='Wall time includes file reads and packet checksums, two CPU sparse parsers with at most two future packets, ordered state-link and exact opacity predictor checks, host attribute prediction, asynchronous H2D uploads, GPU geometry/routing and actual Module.forward+clamp for all299 updates. CUDA is synchronized at pass boundaries. Initial reference loading, JIT/allocations, camera/GT loading and full-state SHA/preflight validation are startup costs excluded from timing. No dense future frames are cached. Final state/raw/pixels checked after each pass; GPU exclusivity required.')
+        scope='Wall time includes file reads and packet checksums, two spawned CPU parser processes with at most two future packets, interprocess transfer, ordered state-link and exact opacity predictor checks, host attribute prediction, asynchronous H2D uploads, GPU geometry/routing and actual Module.forward+clamp for all299 updates. CUDA is synchronized at pass boundaries. Initial reference loading, JIT/allocations, worker startup, camera/GT loading and full-state SHA/preflight validation are startup costs excluded from timing. No dense future frames are cached. Final state/raw/pixels checked after each pass; GPU exclusivity required.')
 
 
 def main():

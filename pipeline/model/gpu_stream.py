@@ -76,6 +76,8 @@ class GPUStream:
             array[:len(self.ids)]=raw[name].numpy()
         self.pending_q=self.ids.copy()
         self.xyz_bank=torch.empty((capacity,3),device=self.device)
+        self.far_rows=torch.empty(capacity,device=self.device,dtype=torch.long)
+        self.far_count=torch.empty(1,device=self.device,dtype=torch.int32)
         self.xyz_bank[:len(self.ids)].copy_(raw['xyz'])
         self.attribute_bank={name:torch.empty(shape,device=self.device) for name,shape in
             dict(rotation=(capacity,4),scaling=(capacity,3),opacity=(capacity,1),
@@ -212,11 +214,11 @@ class GPUStream:
         engine.advance_old(self.xyz_bank,self.slots[self.slot]['ids'][:len(self.ids)],
             self._upload(adjusted),self._upload(step.gs_rows),self._upload(step.gs_symbols),
             self._upload(regional),step.gs_step,self.planes,gates,self.ball,self.leaves,self.nodes,
-            ids,xyz,owner,paths,step.old_count)
+            ids,xyz,owner,paths,step.old_count,self.far_rows,self.far_count)
         if step.birth_count:
             engine.append_births(self.xyz_bank,ids,self._upload(step.sources),self._upload(step.pose_symbols),
                 step.pose_steps[0],self.next_uid,step.old_count,self.planes,gates,self.ball,self.leaves,
-                self.nodes,xyz,owner,paths)
+                self.nodes,xyz,owner,paths,self.far_rows,self.far_count)
         self.ids=np.concatenate((old_ids,birth_ids))
         self.next_uid+=step.birth_count
         self.pending_q=np.concatenate((self.pending_q,birth_ids))
