@@ -316,8 +316,8 @@ def _sparse_write(result, t, r):
 
 
 def _sparse_read(reader, count, *, delta_rows=False):
-    t = torch.zeros(count, 3, dtype=torch.int16)
-    r = torch.zeros(count, 3, dtype=torch.int16)
+    t = np.zeros((count, 3), dtype='<i2')
+    r = np.zeros((count, 3), dtype='<i2')
     blocks = reader.integer()
     if blocks > count:
         raise ValueError('More motion blocks than IDs')
@@ -335,13 +335,13 @@ def _sparse_read(reader, count, *, delta_rows=False):
             values = struct.unpack('<3h', reader.take(6))
             if not any(values):
                 raise ValueError('Redundant zero translation block')
-            t[row] = torch.tensor(values, dtype=torch.int16)
+            t[row] = values
         if flags & 2:
             values = struct.unpack('<3h', reader.take(6))
             if not any(values):
                 raise ValueError('Redundant zero rotation block')
-            r[row] = torch.tensor(values, dtype=torch.int16)
-    return t, r
+            r[row] = values
+    return torch.from_numpy(t), torch.from_numpy(r)
 
 
 def _validate_state(state):
@@ -712,7 +712,7 @@ def decode_motion(payload, prior_state):
     parents = prior_state.parents.detach().cpu().long().clone()
     # Pivots are based on prior topology and prior decoded points, so edits
     # never silently alter the origin about which this frame's motion rotates.
-    pivots = region_pivots(base_xyz, prior_owner, parents)
+    pivots = None if spatial else region_pivots(base_xyz, prior_owner, parents)
     if dynamic:
         layout_mode = reader.take(1)[0]
         if layout_mode == 0:

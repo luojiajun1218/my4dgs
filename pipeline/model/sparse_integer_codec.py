@@ -75,14 +75,57 @@ class _Reader:
     def gaps(self, count, limit, *, deletion=False):
         if count > self.remaining or count > limit:
             raise ValueError('Too many sparse rows')
-        start, previous = self.cursor, -1
-        for _ in range(count):
-            gap = self.integer()
-            row = previous + gap + int(deletion)
-            if (not deletion and gap == 0) or row >= limit:
-                raise ValueError('Invalid sparse row gap')
-            previous = row
+        start = self.cursor
+        values = _read_unsigned_values(self, count)
+        if ((not deletion and bool((values == 0).any())) or
+                (count and int(values.sum(dtype=np.uint64)) + count * int(deletion) > limit)):
+            raise ValueError('Invalid sparse row gap')
         return bytes(self.data[start:self.cursor])
+
+
+def _read_unsigned_values(reader, count):
+    """Read canonical uint32 varints in bulk, preserving the exact byte cursor."""
+    if count < 0 or count > reader.remaining:
+        raise ValueError('Truncated sparse integer components')
+    if not count:
+        return np.empty(0, dtype=np.uint32)
+    section = reader.data[reader.cursor:reader.cursor + min(reader.remaining, count * 5)]
+    try:
+        data = np.frombuffer(section, dtype=np.uint8)
+    except BufferError:
+        data = np.frombuffer(bytes(section), dtype=np.uint8)
+    ends = np.flatnonzero(data < 128)[:count]
+    if len(ends) != count:
+        raise ValueError('Truncated or oversized sparse integer')
+    starts = np.r_[0, ends[:-1] + 1]
+    lengths = ends - starts + 1
+    if bool((lengths > 5).any()):
+        raise ValueError('Oversized sparse integer')
+    terminal = data[ends]
+    if bool(((lengths > 1) & (terminal == 0)).any()) or bool(((lengths == 5) & (terminal > 15)).any()):
+        raise ValueError('Noncanonical sparse integer')
+    values = np.zeros(count, dtype=np.uint32)
+    for byte_index in range(int(lengths.max())):
+        used = lengths > byte_index
+        values[used] |= (data[starts[used] + byte_index].astype(np.uint32) & 127) << (7 * byte_index)
+    reader.cursor += int(ends[-1]) + 1
+    return values
+
+
+def _interleaved_rows(gaps, suffix_widths):
+    """Place validated variable-length gap bytes before each row's fixed tail."""
+    source = np.frombuffer(gaps, dtype=np.uint8)
+    ends = np.flatnonzero(source < 128)
+    lengths = np.diff(np.r_[-1, ends])
+    if len(lengths) != len(suffix_widths):
+        raise ValueError('Sparse gap count differs from row count')
+    widths = lengths + np.asarray(suffix_widths, dtype=np.int64)
+    starts = np.cumsum(widths, dtype=np.int64) - widths
+    result = np.empty(int(widths.sum()), dtype=np.uint8)
+    gap_starts = np.r_[0, ends[:-1] + 1] if len(ends) else np.empty(0, dtype=np.int64)
+    destinations = np.arange(len(source)) + np.repeat(starts - gap_starts, lengths)
+    result[destinations] = source
+    return result, starts + lengths
 
 
 def pack_layout(layout, raw_length, magics):
@@ -136,13 +179,12 @@ def _read_values(reader, count, components):
     total = count * components
     if total > reader.remaining:
         raise ValueError('Truncated sparse integer components')
-    values = []
-    for _ in range(total):
-        symbol = reader.integer()
-        if symbol > 65535:
-            raise ValueError('Sparse symbol exceeds signed int16')
-        values.append((symbol >> 1) ^ -(symbol & 1))
-    return np.array(values, dtype='<i2').reshape(components, count).T
+    symbols = _read_unsigned_values(reader, total)
+    if bool((symbols > 65535).any()):
+        raise ValueError('Sparse symbol exceeds signed int16')
+    symbols = symbols.astype(np.int32)
+    values = (symbols >> 1) ^ -(symbols & 1)
+    return values.astype('<i2').reshape(components, count).T
 
 
 def _spatial_prefix(reader):
@@ -197,24 +239,20 @@ def _decode_sparse(reader, limit):
     count = reader.integer()
     result = bytearray(reader.data[start:reader.cursor])
     gaps = reader.gaps(count, limit)
-    flags = bytes(reader.take(count))
-    if any(flag not in (1, 2, 3) for flag in flags):
+    flags = np.frombuffer(reader.take(count), dtype=np.uint8)
+    if bool(((flags < 1) | (flags > 3)).any()):
         raise ValueError('Invalid planar motion flags')
-    t = _read_values(reader, sum(bool(x & 1) for x in flags), 3)
-    r = _read_values(reader, sum(bool(x & 2) for x in flags), 3)
-    gaps_reader = _Reader(gaps)
-    ti = ri = 0
-    for flag in flags:
-        start = gaps_reader.cursor
-        gaps_reader.integer()
-        result.extend(gaps_reader.data[start:gaps_reader.cursor])
-        result.append(flag)
-        if flag & 1:
-            result.extend(t[ti].tobytes())
-            ti += 1
-        if flag & 2:
-            result.extend(r[ri].tobytes())
-            ri += 1
+    active_t, active_r = (flags & 1).astype(bool), (flags & 2).astype(bool)
+    t = _read_values(reader, int(active_t.sum()), 3)
+    r = _read_values(reader, int(active_r.sum()), 3)
+    records, suffixes = _interleaved_rows(gaps,
+        1 + 6 * (active_t.astype(np.int64) + active_r.astype(np.int64)))
+    records[suffixes] = flags
+    offsets = np.arange(6)
+    records[(suffixes[active_t, None] + 1 + offsets).ravel()] = np.frombuffer(t.tobytes(), dtype=np.uint8)
+    rotation_starts = suffixes[active_r] + 1 + 6 * active_t[active_r]
+    records[(rotation_starts[:, None] + offsets).ravel()] = np.frombuffer(r.tobytes(), dtype=np.uint8)
+    result.extend(records.tobytes())
     return bytes(result)
 
 
@@ -300,13 +338,10 @@ def decode_opacity_layout(layout, raw_length):
     values = _read_values(reader, nonzero, 1)
     if reader.remaining:
         raise ValueError('Unexpected planar opacity trailer')
+    records, suffixes = _interleaved_rows(gaps, np.full(nonzero, 2, dtype=np.int64))
+    records[(suffixes[:, None] + np.arange(2)).ravel()] = np.frombuffer(values.tobytes(), dtype=np.uint8)
     result = bytearray(header)
-    gaps_reader = _Reader(gaps)
-    for value in values:
-        start = gaps_reader.cursor
-        gaps_reader.integer()
-        result.extend(gaps_reader.data[start:gaps_reader.cursor])
-        result.extend(value.tobytes())
+    result.extend(records.tobytes())
     if len(result) != raw_length or len(result) != len(header) + size:
         raise ValueError('Reconstructed opacity length mismatch')
     return bytes(result)
