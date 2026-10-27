@@ -11,6 +11,7 @@ from .model.residual_birth import RawView
 from .model.support_reincarnation_proposal import _native_responsibility, _sample
 from .model.adaptive_birth_storage import newborn_storage_terms
 from .model.rate_budget import RateBudgetState
+from .model.residual_support_geometry import residual_support_seed,residual_support_opacity
 
 
 class FramePlanController:
@@ -219,8 +220,10 @@ class FramePlanController:
         old = RawView(raw, self.config.sh_degree, self.gaussians)
         proposal = SimpleNamespace(config=self.config, gaussians=old, renderer=self.renderer, background=self.background)
         views = {Path(str(v.path)).name: v for v in self._plan_step_views}
-        scores, observed, _, report, cache = _native_responsibility(proposal, views,
-            residual_floor=self.config.birth.residual.residual_floor, collect_colour_evidence=True)
+        support_init=getattr(self.config.birth,'residual_support_init',False)
+        evidence_args=dict(residual_floor=self.config.birth.residual.residual_floor,collect_colour_evidence=True)
+        if support_init:evidence_args['collect_support_moments']=True
+        scores, observed, _, report, cache = _native_responsibility(proposal, views,**evidence_args)
         eligible = ((scores > 0) & observed.ne(0)).nonzero(as_tuple=True)[0]
         limit = min(self.config.birth.max_new_gaussians, self.config.birth.residual.max_candidates)
         cap = min(limit-self._plan_used_quota,
@@ -230,10 +233,22 @@ class FramePlanController:
         # A parent may have contribution in only one of the four views.
         rows = eligible[scores[eligible].argsort(descending=True, stable=True)[:max(0, cap)]]
         seed = {name: value[rows].clone() for name, value in raw.items()}
-        index = torch.arange(len(rows), device=self.device, dtype=raw['xyz'].dtype)+self._plan_used_quota
-        direction = torch.stack((torch.sin(index*2.399), torch.cos(index*2.399), torch.sin(index*1.37)), 1)
-        seed['xyz'] += _rotate(seed['rotation'], direction*seed['logscale'].exp()*self.config.birth.clone_sigma_scale)
-        # Scale, quaternion and alpha are copied unchanged from the surviving parent.
+        support_report={}
+        if support_init:
+            geometry,valid_geometry,support_report=residual_support_seed(raw,rows,cache,
+                self.config.birth.new_xyz_step_extent*self.datamodule.cameras_extent)
+            seed.update(geometry)
+            seed['opacity']=residual_support_opacity(seed['opacity'],rows,cache)
+            support_report.update(alpha_semantics='minimum of parent alpha and native support-weighted residual RGB RMS prior; not measured opacity',
+                initial_alpha_mean=float(seed['opacity'].sigmoid()[valid_geometry].mean()) if bool(valid_geometry.any()) else None)
+            rows=rows[valid_geometry]
+            seed={name:value[valid_geometry] for name,value in seed.items()}
+        else:
+            index = torch.arange(len(rows), device=self.device, dtype=raw['xyz'].dtype)+self._plan_used_quota
+            direction = torch.stack((torch.sin(index*2.399), torch.cos(index*2.399), torch.sin(index*1.37)), 1)
+            seed['xyz'] += _rotate(seed['rotation'], direction*seed['logscale'].exp()*self.config.birth.clone_sigma_scale)
+        # Legacy alpha is copied; relocated support starts with a conservative
+        # image-evidence amplitude prior, then learns through the same alpha carrier.
         rgb = seed['xyz'].new_zeros(len(rows), 3)
         mass = seed['xyz'].new_zeros(len(rows))
         for item in cache:
@@ -260,7 +275,9 @@ class FramePlanController:
         self.birth_control['proposal_count'] = self._plan_used_quota
         self._plan_events[-1].update(born=len(rows), used_quota=self._plan_used_quota,
             proposal_cameras=list(views), proposal=report, image_colour_supported=len(rows),
-            error_before_birth=report['old_RGB_SSE'])
+            error_before_birth=report['raw_old_RGB_SSE'],
+            birth_jump_error_semantics='unfiltered RGB SSE before and after on identical proposal training cameras')
+        if support_init:self._plan_events[-1]['support_initialization']=support_report
         # Only these same four training views are used for the post-birth jump diagnostic.
         after = dict(reference)
         quantized = self.make_birth_view(reference=reference)

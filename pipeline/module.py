@@ -195,6 +195,7 @@ class BirthConfig:
     storage_warmup_steps: int = 20
     storage_ramp_steps: int = 70
     frame_training_plan: bool = False
+    residual_support_init: bool = False
     joint_old_opacity: bool = False
     population_loss_weight: float = 0.0
     residual_colour_init: bool = False
@@ -211,10 +212,12 @@ class BirthConfig:
         if self.radiance_mode not in ('free','inherited_intrinsic','conservative_detail','surface_patch','support_reincarnation','dual_predictive_reincarnation','source_residual','quick_source_residual','shadow_source_residual','persistent_anchored_newborn','early_source_replacement','adaptive_residual_birth'):
             raise ValueError('Unknown newborn radiance mode')
         self.residual.validate()
-        for name in ('storage_loss_enabled','survival_aware_storage','residual_colour_init','joint_old_opacity'):
+        for name in ('storage_loss_enabled','survival_aware_storage','residual_support_init','residual_colour_init','joint_old_opacity'):
             if not isinstance(getattr(self,name),bool):raise ValueError(f'birth.{name} must be boolean')
         if self.survival_aware_storage and not (self.frame_training_plan and self.storage_loss_enabled):
             raise ValueError('Survival-aware storage requires the frame plan with newborn storage enabled')
+        if self.residual_support_init and not self.frame_training_plan:
+            raise ValueError('Residual-support initialization requires the frame training plan')
         for name in ('storage_loss_strength','residual_colour_gain','residual_colour_max_rgb_delta'):
             value=getattr(self,name)
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:

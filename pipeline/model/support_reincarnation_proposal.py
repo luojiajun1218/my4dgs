@@ -26,7 +26,8 @@ def _ordered_views(views):
     return ordered
 
 
-def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidence=False):
+def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidence=False,
+                           collect_support_moments=False):
     ordered=_ordered_views(views);old=module.gaussians
     if any(getattr(old,name,None) is not None for name in
            ('rigid_xyz','rigid_rotation','rigid_alpha','rigid_opacity','rigid_sh_dc')):
@@ -38,7 +39,7 @@ def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidenc
     previous_collect=getattr(renderer,'collect_contributions',False)
     has_last=hasattr(renderer,'last_contributions')
     previous_last=getattr(renderer,'last_contributions',None)
-    cache=[];per_view=[];total_error=0.
+    cache=[];per_view=[];total_error=0.;total_raw_error=0.
     renderer.gaussians=old
     try:
         for index,(name,view) in enumerate(ordered):
@@ -51,6 +52,7 @@ def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidenc
                 observed=observed.detach().bool()
                 residual=(package['render']-view.image).detach()
                 error=residual.square()
+                raw_error_sum=float(error.sum())
                 if residual_floor:
                     mse=error.mean(0,keepdim=True)
                     error=error*((mse-float(residual_floor)**2).clamp_min(0)/mse.clamp_min(1e-30))
@@ -62,9 +64,27 @@ def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidenc
             with torch.enable_grad():
                 probe=torch.zeros_like(xyz,requires_grad=True)
                 zero_rgb=renderer(view,torch.zeros_like(module.background),override_color=probe)['render']
-                objective=(zero_rgb*error).sum()
+                support_evidence={}
+                if collect_support_moments:
+                    # Each RGB colour Jacobian is the same real T*alpha_i.
+                    # Pack three spatial moments into its colour channels;
+                    # this reuses the native forward, with one extra backward.
+                    height,width=error.shape[-2:]
+                    y=(2*(torch.arange(height,device=xyz.device,dtype=xyz.dtype)+.5)/height-1)[:,None]
+                    x=(2*(torch.arange(width,device=xyz.device,dtype=xyz.dtype)+.5)/width-1)[None,:]
+                    energy=error.sum(0)
+                    first_maps=torch.stack((energy,energy*x,energy*y))
+                    objective=(zero_rgb*first_maps).sum()
+                else:
+                    objective=(zero_rgb*error).sum()
                 gradient=torch.autograd.grad(objective,probe,only_inputs=True,
-                    retain_graph=collect_colour_evidence)[0]
+                    retain_graph=collect_colour_evidence or collect_support_moments)[0]
+                if collect_support_moments:
+                    second_maps=torch.stack((energy*x*x,energy*x*y,energy*y*y))
+                    second=torch.autograd.grad((zero_rgb*second_maps).sum(),probe,
+                        retain_graph=collect_colour_evidence,only_inputs=True)[0]
+                    support_evidence=dict(support_first_moments=gradient.detach(),
+                                          support_second_moments=second.detach())
                 colour_evidence={}
                 if collect_colour_evidence:
                     # Reuse the same native colour Jacobian: no extra render.
@@ -73,7 +93,7 @@ def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidenc
                     mass=torch.autograd.grad(zero_rgb.sum(),probe,only_inputs=True)[0].mean(-1)
                     colour_evidence=dict(native_mass=mass.detach().clamp_min(0),
                                          signed_response=signed.detach())
-            current=gradient.detach().sum(-1)
+            current=(gradient.detach()[:,0] if collect_support_moments else gradient.detach().sum(-1))
             if not bool(torch.isfinite(current).all()):
                 raise ValueError('Native residual responsibility is nonfinite')
             # The exact derivative is nonnegative; clamp only arithmetic noise.
@@ -82,17 +102,20 @@ def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidenc
             observed_bits|=observed.long()*(1<<index)
             responsibility_bits|=(current>0).long()*(1<<index)
             total_error+=error_sum
+            total_raw_error+=raw_error_sum
             per_view.append(dict(camera=name,old_RGB_SSE=error_sum,
+                raw_old_RGB_SSE=raw_error_sum,
                 native_responsibility_SSE=float(current.sum()),
                 observed_old_count=int(observed.sum()),positive_responsibility_count=int((current>0).sum())))
             cache.append(dict(view=view,name=name,residual=residual,image=view.image.detach(),
-                              observed=observed,responsibility=current,**colour_evidence))
+                              observed=observed,responsibility=current,**colour_evidence,**support_evidence))
     finally:
         renderer.gaussians=previous_model
         renderer.collect_contributions=previous_collect
         if has_last:renderer.last_contributions=previous_last
     report=dict(training_camera_names=[name for name,_ in ordered],external_test_used=False,
-        old_RGB_SSE=total_error,native_responsibility_SSE=float(scores.sum()),
+        old_RGB_SSE=total_error,raw_old_RGB_SSE=total_raw_error,
+        residual_floor=float(residual_floor),native_responsibility_SSE=float(scores.sum()),
         native_responsibility_fraction_of_total_SSE=float(scores.sum())/max(total_error,1e-30),
         observed_old_count=int(observed_bits.ne(0).sum()),
         positive_responsibility_count=int(scores.gt(0).sum()),per_view=per_view,
@@ -100,7 +123,10 @@ def _native_responsibility(module,views,residual_floor=0.,collect_colour_evidenc
         coverage_semantics='additive error-responsibility mass, not bbox area or union of covered pixels',
         source_scale_limit=None,signed_DC_gradient_used=False,mutation_before_transaction=False,
         native_render_calls=2*len(ordered),
-        native_colour_backward_calls=(3 if collect_colour_evidence else 1)*len(ordered))
+        native_colour_backward_calls=((3 if collect_colour_evidence else 1)+int(collect_support_moments))*len(ordered))
+    if collect_support_moments:
+        report.update(support_measurement='actual native Talpha * RGB SSE spatial grid moments',
+                      support_moment_backward_calls=2*len(ordered),support_extra_render_calls=0)
     return scores,observed_bits,responsibility_bits,report,cache
 
 
