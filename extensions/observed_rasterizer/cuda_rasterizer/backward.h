@@ -12,7 +12,6 @@
 #ifndef CUDA_RASTERIZER_OBSERVED_BACKWARD_H_INCLUDED
 #define CUDA_RASTERIZER_OBSERVED_BACKWARD_H_INCLUDED
 
-#include "covariance_gradient.h"
 #include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -34,7 +33,7 @@ namespace OBSERVED_BACKWARD
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
 		float3* dL_dmean2D,
-		CovarianceGradientScalar* dL_dconic2D,
+		float4* dL_dconic2D,
 		float* dL_dopacity,
 		float* dL_dcolors);
 
@@ -54,10 +53,10 @@ namespace OBSERVED_BACKWARD
 		const float tan_fovx, float tan_fovy,
 		const glm::vec3* campos,
 		const float3* dL_dmean2D,
-		const CovarianceGradientScalar* dL_dconics,
+		const float* dL_dconics,
 		glm::vec3* dL_dmeans,
 		float* dL_dcolor,
-		CovarianceGradientScalar* dL_dcov3D,
+		float* dL_dcov3D,
 		float* dL_dsh,
 		glm::vec3* dL_dscale,
 		glm::vec4* dL_drot);

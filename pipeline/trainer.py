@@ -278,6 +278,8 @@ class Trainer(BaseTrainer):
     def _resume_fetcher(self, fetcher):
         if self.global_step:
             for step in range(1, self.global_step + 1):
+                if getattr(getattr(self.module.config,'birth',None),'frame_training_plan',False):
+                    continue
                 if uses_early_replacement(self.module.config) and step>70:
                     continue
                 if uses_residual_birth(self.module.config) and step > self.module.motion_steps:
@@ -300,12 +302,16 @@ class Trainer(BaseTrainer):
         """Average image objectives before one shared-motion optimizer update."""
         count = self._views_per_step(step)
         packages, metrics, loss_value = [], {}, 0.
+        plan = getattr(getattr(self.module.config,'birth',None), 'frame_training_plan', False)
+        plan_views = self.module.frame_plan_training_views(step, count) if plan else None
         for index in range(count):
             # The regularizer does not depend on the camera. Charging it on
             # the last view with weight=count preserves the averaged objective
             # and avoids rebuilding the same graph once per camera.
             camera = None
-            if uses_residual_birth(self.module.config) and (step > self.module.motion_steps or
+            if plan:
+                viewpoint = plan_views[index]
+            elif uses_residual_birth(self.module.config) and (step > self.module.motion_steps or
                     (uses_early_replacement(self.module.config) and step>70)):
                 viewpoint, camera = self.module.transaction_training_view(step, index, count)
             else:
@@ -596,6 +602,12 @@ class Trainer(BaseTrainer):
         return report
 
     def _phase_name(self, step):
+        if getattr(getattr(self.module.config,'birth',None), 'frame_training_plan', False):
+            if step <= 100: return 'shared_gate'
+            if step <= 150: return 'fixed_gate_residual'
+            if step <= 180: return 'joint_gate_residual'
+            if step <= 200: return 'fixed_gate_motion'
+            return 'newborn_old_alpha'
         if uses_early_replacement(self.module.config) and step>70:
             return 'early_joint' if step<=200 else 'early_fixed_population'
         gate = self.module.config.rigid_tree.spatial_gate

@@ -14,29 +14,18 @@ import torch.nn as nn
 import torch
 from pathlib import Path
 import functools
-import hashlib
 
 
-@functools.lru_cache(maxsize=2)
-def _backend(stable_covariance_gradients=False):
+@functools.lru_cache(maxsize=1)
+def _backend():
     from torch.utils.cpp_extension import load
     root = (Path(__file__).resolve().parents[2] / 'extensions' / 'observed_rasterizer').resolve()
-    # Different checkouts or source versions must never relink a binary which
-    # another active trainer has already loaded from the global JIT cache.
-    digest = hashlib.sha256(str(root).encode())
-    for path in sorted(root.rglob('*')):
-        if path.is_file() and path.suffix in ('.cu', '.cuh', '.h', '.hpp', '.inl', '.cpp'):
-            digest.update(str(path.relative_to(root)).encode())
-            digest.update(path.read_bytes())
-    variant = 'stable' if stable_covariance_gradients else 'legacy'
-    flags = ['-O3'] + (['-DMY4DGS_STABLE_COVARIANCE_GRADIENTS']
-                       if stable_covariance_gradients else [])
-    return load(name=f'my4dgs_observed_{digest.hexdigest()[:12]}_{variant}',
+    return load(name='my4dgs_observed_rasterizer',
         sources=[str(root / p) for p in ('cuda_rasterizer/rasterizer_impl.cu',
             'cuda_rasterizer/forward.cu', 'cuda_rasterizer/backward.cu',
             'rasterize_points.cu', 'ext.cpp')],
         extra_include_paths=[str(root / 'third_party/glm')],
-        extra_cflags=flags, extra_cuda_cflags=flags, verbose=False)
+        extra_cflags=['-O3'], extra_cuda_cflags=['-O3'], verbose=False)
 
 
 def cpu_deep_copy_tuple(input_tuple):
@@ -53,7 +42,6 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
-    stable_covariance_gradients=False,
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -65,7 +53,6 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        stable_covariance_gradients,
     )
 
 class _RasterizeGaussians(torch.autograd.Function):
@@ -81,7 +68,6 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        stable_covariance_gradients,
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -111,17 +97,16 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend(stable_covariance_gradients).rasterize_gaussians(*args)
+                num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend().rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend(stable_covariance_gradients).rasterize_gaussians(*args)
+            num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend().rasterize_gaussians(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
-        ctx.stable_covariance_gradients = stable_covariance_gradients
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
         ctx.mark_non_differentiable(radii, observed)
@@ -162,13 +147,13 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _backend(ctx.stable_covariance_gradients).rasterize_gaussians_backward(*args)
+                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _backend().rasterize_gaussians_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
                 raise ex
         else:
-             grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _backend(ctx.stable_covariance_gradients).rasterize_gaussians_backward(*args)
+             grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _backend().rasterize_gaussians_backward(*args)
 
         grads = (
             grad_means3D,
@@ -179,7 +164,6 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_scales,
             grad_rotations,
             grad_cov3Ds_precomp,
-            None,
             None,
         )
 
@@ -200,18 +184,15 @@ class GaussianRasterizationSettings(NamedTuple):
     debug : bool
 
 class GaussianRasterizer(nn.Module):
-    def __init__(self, raster_settings, stable_covariance_gradients=False):
+    def __init__(self, raster_settings):
         super().__init__()
-        if not isinstance(stable_covariance_gradients, bool):
-            raise ValueError('stable_covariance_gradients must be boolean')
         self.raster_settings = raster_settings
-        self.stable_covariance_gradients = stable_covariance_gradients
 
     def markVisible(self, positions):
         # Mark visible points (based on frustum culling for camera) with a boolean
         with torch.no_grad():
             raster_settings = self.raster_settings
-            visible = _backend(self.stable_covariance_gradients).mark_visible(
+            visible = _backend().mark_visible(
                 positions,
                 raster_settings.viewmatrix,
                 raster_settings.projmatrix)
@@ -251,5 +232,4 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings,
-            self.stable_covariance_gradients,
         )

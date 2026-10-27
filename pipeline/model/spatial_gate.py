@@ -42,8 +42,13 @@ class SpatialGateConfig:
     proposal_image_weight: float = 0.
     predictor_image_weight: float = 0.
     shared_discovery: bool = False
+    frame_training_plan: bool = False
 
     def validate(self, motion_steps):
+        if self.frame_training_plan and (self.training_schedule != 'joint' or
+                not self.shared_discovery or self.freeze_step != 180 or
+                self.gate_start_step != 0 or motion_steps != 200):
+            raise ValueError('Frame plan requires joint discovery, gate1..100/151..180, motion200')
         relative_image = (self.region_motion == 'relative' and
                           self.image_relaxation == 'stochastic_ste' and
                           ((self.private_full_motion and

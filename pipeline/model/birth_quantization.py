@@ -187,7 +187,11 @@ class QuantizedNewGaussianView:
     def get_opacity(self):
         if self.early_raw is not None:
             return self.model.get_opacity
-        return torch.sigmoid(self.raw_value('opacity'))
+        alpha = torch.sigmoid(self.raw_value('opacity'))
+        if getattr(self.model, 'probability_alpha', False):
+            carrier = self.model._opacity.clamp(0, 1)
+            return alpha.detach()+(carrier-carrier.detach())
+        return alpha
 
     @property
     def get_features(self):

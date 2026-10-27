@@ -60,6 +60,8 @@ class StreamStep:
     opacity: OpacitySymbols | None
     opacity_before_births: bool
     stored_bytes: int
+    feature_dc: bytes | None = None
+    inherit_birth_rotation: bool = False
 
 
 def _birth_attributes(packet, old_count, count, rest):
@@ -158,21 +160,32 @@ def read_stream_step(directory, frame, *, region_count, depth, rest, max_points=
     manifest = json.loads(manifest_bytes)
     expected_names = dict(motion=f'motion_{frame:03d}.bin',birth=f'birth_{frame:03d}.bin',
                           opacity_update=f'opacity_{frame:03d}.bin')
-    if manifest.get('frame') != frame or manifest.get('feature_dc_update') is not None:
+    if manifest.get('frame') != frame:
         raise ValueError('Unsupported frame manifest')
     for key, name in expected_names.items():
         if manifest.get(key) not in (name,None) or (key == 'motion' and manifest.get(key) != name):
             raise ValueError('Unexpected stream filename')
-    if (directory/f'shdc_{frame:03d}.bin').exists():
-        raise ValueError('Unsupported feature DC packet')
+    feature = manifest.get('feature_dc_update')
+    feature_packet = None
+    if feature is not None:
+        if (feature != f'shdc_{frame:03d}.bin' or
+                manifest.get('feature_dc_update_timing', 'before_births') != 'before_births'):
+            raise ValueError('Shared color packet must precede newborn attributes')
+        feature_packet = (directory / feature).read_bytes()
+        if feature_packet[:4] not in (b'SDR1', b'SDC1'):
+            raise ValueError('Unknown shared color packet')
+    elif (directory/f'shdc_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected feature DC packet')
     packet = (directory/expected_names['motion']).read_bytes()
     stored = len(manifest_bytes)+len(packet)
+    if feature_packet is not None:stored += len(feature_packet)
     sections = {}
     raw = motion.uncompressed_motion_packet(packet,sparse_sections=sections)
     reader = integer._Reader(raw[:-motion.CHECKSUM_BYTES])
     magic = bytes(reader.take(4))
     if magic not in motion.OFFSET_SPATIAL_MAGICS:
-        raise ValueError('GPU streaming requires the active SPG5/6 offset-pose format')
+        raise ValueError('GPU streaming requires a spatial offset-pose format')
+    inherit_rotation = magic in motion.TRANSLATION_ONLY_MAGICS
     prior = bytes(reader.take(32))
     index, regions, count, births = [reader.integer() for _ in range(4)]
     if (index != frame or regions != region_count or count < 1 or
@@ -228,8 +241,11 @@ def read_stream_step(directory, frame, *, region_count, depth, rest, max_points=
     pose_steps = struct.unpack('<2d',reader.take(16))
     if not all(math.isfinite(value) and value > 0 for value in pose_steps):
         raise ValueError('Invalid newborn pose quantization steps')
-    packed = integer._read_unsigned_values(reader,births*7).astype(np.int64)
-    pose_symbols = ((packed>>1)^-(packed&1)).astype(np.float32).reshape(births,7)
+    width = 3 if inherit_rotation else 7
+    packed = integer._read_unsigned_values(reader,births*width).astype(np.int64)
+    pose_symbols = ((packed>>1)^-(packed&1)).astype(np.float32).reshape(births,width)
+    if inherit_rotation:
+        pose_symbols = np.pad(pose_symbols, ((0,0),(0,4)))
     if reader.remaining:
         raise ValueError('Unexpected motion trailer')
     if (manifest['old_count'] != count or manifest['birth_count'] != births or
@@ -253,6 +269,6 @@ def read_stream_step(directory, frame, *, region_count, depth, rest, max_points=
     if timing not in ('before_births','after_births'):
         raise ValueError('Unsupported opacity update timing')
     return StreamStep(frame,prior,bytes.fromhex(manifest['decoded_state_sha256']),manifest['raw_state_sha256'],
-        count+len(deleted),count,births,deleted,opened,regional,magic == b'SPG6',gs_rows,gs_values,
+        count+len(deleted),count,births,deleted,opened,regional,magic in (b'SPG6',b'SPG8'),gs_rows,gs_values,
         extent*region_step,extent*gs_step,sources,pose_symbols,pose_steps,attribute,update,
-        timing == 'before_births',stored)
+        timing == 'before_births',stored,feature_packet,inherit_rotation)

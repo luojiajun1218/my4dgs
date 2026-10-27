@@ -188,7 +188,7 @@ def _read_values(reader, count, components):
 
 
 def _spatial_prefix(reader):
-    if bytes(reader.take(4)) not in (b'SPG1', b'SPG2', b'SPG3', b'SPG4', b'SPG5', b'SPG6'):
+    if bytes(reader.take(4)) not in (b'SPG1', b'SPG2', b'SPG3', b'SPG4', b'SPG5', b'SPG6', b'SPG7', b'SPG8'):
         raise ValueError('Planar motion layout requires a spatial motion packet')
     reader.take(32)
     frame, regions, count, births = [reader.integer() for _ in range(4)]
@@ -277,7 +277,7 @@ def _check_motion_tail(tail, births, count, pose_bytes=28, offset=False):
     if offset:
         steps=struct.unpack('<2d',reader.take(16))
         if not all(np.isfinite(v) and v>0 for v in steps):raise ValueError('Invalid birth pose steps')
-        _read_unsigned_values(reader,births*7)
+        _read_unsigned_values(reader,births*pose_bytes)
         reader.take(16)
     else:reader.take(births * pose_bytes + 16)
     if reader.remaining:
@@ -291,7 +291,7 @@ def encode_motion_layout(raw):
     region = _encode_sparse(reader, regions - 1)
     point = _encode_sparse(reader, count)
     tail = bytes(reader.take(reader.remaining))
-    _check_motion_tail(tail, births, count, 12 if raw[:4] in (b'SPG3', b'SPG4') else 7 if raw[:4] in (b'SPG5',b'SPG6') else 28, offset=raw[:4] in (b'SPG5',b'SPG6'))
+    _check_motion_tail(tail, births, count, 12 if raw[:4] in (b'SPG3', b'SPG4') else 3 if raw[:4] in (b'SPG7',b'SPG8') else 7 if raw[:4] in (b'SPG5',b'SPG6') else 28, offset=raw[:4] in (b'SPG5',b'SPG6',b'SPG7',b'SPG8'))
     return _varint(len(prefix)) + prefix + region + point + tail
 
 
@@ -311,7 +311,7 @@ def decode_motion_layout(layout, raw_length, *, sparse_sections=None):
     region = _decode_sparse(reader, regions - 1, decoded=decoded)
     point = _decode_sparse(reader, count, decoded=decoded)
     tail = bytes(reader.take(reader.remaining))
-    _check_motion_tail(tail, births, count, 12 if prefix[:4] in (b'SPG3', b'SPG4') else 7 if prefix[:4] in (b'SPG5',b'SPG6') else 28, offset=prefix[:4] in (b'SPG5',b'SPG6'))
+    _check_motion_tail(tail, births, count, 12 if prefix[:4] in (b'SPG3', b'SPG4') else 3 if prefix[:4] in (b'SPG7',b'SPG8') else 7 if prefix[:4] in (b'SPG5',b'SPG6') else 28, offset=prefix[:4] in (b'SPG5',b'SPG6',b'SPG7',b'SPG8'))
     raw = prefix + region + point + tail
     if len(raw) != raw_length:
         raise ValueError('Reconstructed motion length mismatch')

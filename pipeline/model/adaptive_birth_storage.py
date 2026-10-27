@@ -1,6 +1,7 @@
 """Differentiable newborn storage pressure, deliberately not a byte predictor.
 
-SPG5/6 uses a source uvarint and seven signed pose uvarints per point. RTB2
+SPG5/6 uses seven signed pose uvarints; SPG7/8 inherits rotation and uses three.
+Both transmit a source uvarint per point. RTB2
 uses four whole int16/int32 arrays followed by zlib, not per-symbol varints.
 The appearance term below is only a compressibility proxy on integer symbols.
 """
@@ -34,10 +35,13 @@ def newborn_storage_terms(view, threshold=.01):
         zero=alpha.sum()
         return dict(surrogate_bytes=zero,support_points=zero,base_bytes=zero,
                     pose_extra_bytes=zero,appearance_entropy_bytes=zero)
-    base=source_bytes+7
+    rotation_updates=getattr(view, 'rotation_updates', True)
+    base=source_bytes+(7 if rotation_updates else 3)
     pose_extra=alpha.new_zeros(count)
     appearance_extra=alpha.new_zeros(count)
     for name,symbol in view.symbols.items():
+        if name=='rotation' and not rotation_updates:
+            continue
         if name=='rotation':
             # Pose codec normalizes the quantized quaternion once more before
             # forming its seven parent-offset symbols.
@@ -47,14 +51,17 @@ def newborn_storage_terms(view, threshold=.01):
             # rendered symbols exactly, but prevent its gradient from charging
             # the shared parent's already separately regularized motion.
             model=view.model
-            value=(_rotate(model._source_q.detach(),model.local_xyz)+model._source_xyz.detach()
-                   if name=='xyz' else F.normalize(_multiply(model._source_q.detach(),
-                       _rotation_vector(model.local_rotvec)),dim=-1))
+            if getattr(model, 'probability_alpha', False):
+                value=model.birth_parameter_values()[name]
+            elif name=='xyz':
+                value=_rotate(model._source_q.detach(),model.local_xyz)+model._source_xyz.detach()
+            else:
+                value=F.normalize(_multiply(model._source_q.detach(),_rotation_vector(model.local_rotvec)),dim=-1)
             if name=='rotation':
                 value=torch.where((value*view.predictor[name]).sum(-1,keepdim=True)<0,-value,value)
             carrier=(value-view.predictor[name])/view.steps[name]
             symbol=carrier+(symbol-carrier).detach()
-        if name=='opacity':
+        if name=='opacity' and not getattr(view.model, 'probability_alpha', False):
             symbol=torch.where(symbol.detach()>=0, symbol, symbol.detach())
         if name in ('xyz','rotation'):
             # Continuous log-length relaxation of zigzag uvarints. Actual
@@ -64,6 +71,12 @@ def newborn_storage_terms(view, threshold=.01):
             dimensions=symbol[0].numel() if count else symbol.shape[1:].numel()
             base=base+2*dimensions  # RTB2 minimum int16 storage before zlib.
             appearance_extra+=torch.log2(1+symbol.abs()).reshape(count,-1).sum(-1)/8
+    weights=getattr(view, 'storage_row_weights', torch.ones_like(support))
+    if getattr(view.model, 'probability_alpha', False):
+        # Attribute coding pressure and deletion pressure are separate. A zero
+        # difference means "same as reference", not transparent/deleted.
+        support=torch.ones_like(support)
+    support=support*weights
     raw=(support*(base+pose_extra+appearance_extra)).sum()
     return dict(surrogate_bytes=raw, support_points=support.sum(),
                 base_bytes=(support*base).sum(),

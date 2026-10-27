@@ -14,7 +14,7 @@ from libgs.metric import lpips, psnr, ssim
 from libgs.model.merged_gaussian import MergedGaussianModel
 from libgs.pipeline import Module as BaseModule
 from libgs.pipeline import ModuleConfig as BaseModuleConfig
-from libgs.renderer import Renderer
+from libgs.renderer import Renderer, RendererConfig
 
 from .model.gaussian import BirthGaussianModel, GaussianModel
 from .model.rigid_tree_birth_codec import export_birth_attributes
@@ -24,15 +24,17 @@ from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
 from .model.rigid_residual_tree import (RigidTreeConfig,
     quaternion_angle_error, quaternion_rotate,
     saved_config_with_default_motion_lr)
-from .model.contribution_renderer import ContributionRenderer, RendererConfig
+from .model.contribution_renderer import ContributionRenderer
 from .model.spatial_gated_motion import SpatialGatedMotion
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
+from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpdate
 from .model.residual_birth import (ResidualBirthConfig, BirthTransaction,
     SubsetView, propose as propose_residual_births, constrain_candidates,
     admit as admit_residual_births, fitting_errors, refine_transaction, RawView,
     selected_population, CommitTrial, encode_trial as encode_birth_trial,
     validation_errors as birth_validation_errors, qualify_crossfit_novel,nearest_sources)
 from .early_replacement import EarlyReplacementController
+from .frame_plan import FramePlanController
 
 
 BIRTH_ALLOCATION = 'clone_small_v1'
@@ -88,6 +90,8 @@ def uses_early_replacement(config):
 
 
 def birth_allocation(config):
+    if getattr(config.birth,'frame_training_plan',False):
+        return 'frame_training_plan_v1'
     return ('adaptive_residual_birth_300_v16' if getattr(config.birth,'radiance_mode','free')=='adaptive_residual_birth' else
             EARLY_BIRTH_ALLOCATION if uses_early_replacement(config) else
             PERSISTENT_BIRTH_ALLOCATION if uses_persistent_birth(config) else
@@ -189,12 +193,12 @@ class BirthConfig:
     storage_loss_strength: float = 1.0
     storage_warmup_steps: int = 20
     storage_ramp_steps: int = 70
+    frame_training_plan: bool = False
     joint_old_opacity: bool = False
     population_loss_weight: float = 0.0
     residual_colour_init: bool = False
     residual_colour_gain: float = 0.5
     residual_colour_max_rgb_delta: float = 0.05
-    native_dc_init: bool = False
     appearance_candidates: int = 0
     appearance_source_max_scale_extent: Optional[float] = None
     anchor_sfm_path: Optional[str] = None
@@ -206,7 +210,7 @@ class BirthConfig:
         if self.radiance_mode not in ('free','inherited_intrinsic','conservative_detail','surface_patch','support_reincarnation','dual_predictive_reincarnation','source_residual','quick_source_residual','shadow_source_residual','persistent_anchored_newborn','early_source_replacement','adaptive_residual_birth'):
             raise ValueError('Unknown newborn radiance mode')
         self.residual.validate()
-        for name in ('storage_loss_enabled','residual_colour_init','joint_old_opacity','native_dc_init'):
+        for name in ('storage_loss_enabled','residual_colour_init','joint_old_opacity'):
             if not isinstance(getattr(self,name),bool):raise ValueError(f'birth.{name} must be boolean')
         for name in ('storage_loss_strength','residual_colour_gain','residual_colour_max_rgb_delta'):
             value=getattr(self,name)
@@ -220,8 +224,6 @@ class BirthConfig:
                 raise ValueError(f'birth.{name} must be a valid non-negative warmup / positive ramp')
         if (self.storage_loss_enabled or self.residual_colour_init) and self.radiance_mode!='adaptive_residual_birth':
             raise ValueError('Newborn storage and residual colour initialization require adaptive_residual_birth')
-        if self.native_dc_init and self.radiance_mode!='adaptive_residual_birth':
-            raise ValueError('Native DC initialization requires adaptive_residual_birth')
         if (isinstance(self.population_loss_weight,bool) or
                 not isinstance(self.population_loss_weight,(int,float)) or
                 not math.isfinite(self.population_loss_weight) or self.population_loss_weight<0):
@@ -326,6 +328,7 @@ class ModuleConfig(BaseModuleConfig):
     rigid_tree: RigidTreeConfig = field(default_factory=RigidTreeConfig)
     birth: BirthConfig = field(default_factory=BirthConfig)
     opacity_update: OpacityUpdateConfig = field(default_factory=OpacityUpdateConfig)
+    feature_dc_update: FeatureDCUpdateConfig = field(default_factory=FeatureDCUpdateConfig)
 
 
 MOTION_IMAGE_SCHEDULE = 'bootstrap_aligned_v1'
@@ -507,26 +510,27 @@ def restore_retired_reference(raw, state, previous_rows, retired):
     return restored
 
 
-class Module(EarlyReplacementController,BaseModule):
+class Module(FramePlanController,EarlyReplacementController,BaseModule):
     """Old GS learn motion; newborn GS fit quantized geometry and appearance."""
 
     def setup(self):
         cfg = self.config
-        stable = getattr(cfg.renderer, 'stable_covariance_gradients', False)
-        if not isinstance(stable, bool):
-            raise ValueError('stable_covariance_gradients must be boolean')
         validate_initial_opacity_threshold(cfg.initial_opacity_threshold)
         cfg.birth.validate(cfg.rigid_tree.motion_steps)
         cfg.opacity_update.validate()
+        cfg.feature_dc_update.validate()
         if cfg.opacity_update.amplitude_refit_steps >= cfg.rigid_tree.motion_steps:
             raise ValueError('Opacity amplitude refitting must leave selection steps')
         if cfg.opacity_update.enabled and cfg.birth.replace_low_opacity:
             raise ValueError('Current-frame alpha pruning requires birth.replace_low_opacity=false')
         if uses_residual_birth(cfg) and (not cfg.opacity_update.enabled or
                 cfg.opacity_update.joint_with_birth or cfg.birth.source_handoff or
-                not cfg.birth.rotation_updates or not cfg.effective_motion_observations):
+                (not cfg.birth.rotation_updates and cfg.birth.radiance_mode != 'adaptive_residual_birth') or
+                not cfg.effective_motion_observations):
             raise ValueError('Residual transactions require frozen old alpha, actual visibility, '
                              'new orientation fitting and no destructive source handoff')
+        if cfg.feature_dc_update.enabled and uses_residual_birth(cfg) and cfg.birth.radiance_mode != 'adaptive_residual_birth':
+            raise ValueError('Shared colors support ordinary clone and adaptive residual births')
         if cfg.birth.source_handoff and (not cfg.opacity_update.enabled or
                 cfg.opacity_update.mode != 'alpha' or
                 not cfg.opacity_update.joint_with_birth or
@@ -548,10 +552,12 @@ class Module(EarlyReplacementController,BaseModule):
                                        self.datamodule.cameras_extent)
         self.gaussians.training_setup(cfg.gaussian)
         self.births = BirthGaussianModel(cfg.sh_degree)
-        renderer_type = ContributionRenderer if cfg.effective_motion_observations or stable else Renderer
+        renderer_type = ContributionRenderer if cfg.effective_motion_observations else Renderer
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = SpatialGatedMotion(cfg.rigid_tree)
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
+        self.feature_dc_update = (QuantizedFeatureDCUpdate(cfg.feature_dc_update, motion=self.motion)
+                                  if cfg.feature_dc_update.enabled else None)
         self.frame_prepared = False
         self.frame_finalized = False
         self.motion_committed = False
@@ -607,6 +613,8 @@ class Module(EarlyReplacementController,BaseModule):
             getattr(self.gaussians, attr).requires_grad_(False)
 
     def on_save_checkpoint(self, ckpt):
+        if getattr(self.config.birth,'frame_training_plan',False) and self.frame_prepared:
+            self._plan_record_phase_time()
         ckpt['birth_allocation'] = birth_allocation(self.config)
         ckpt['motion_image_schedule'] = MOTION_IMAGE_SCHEDULE
         ckpt['rigid_tree_version'] = 1
@@ -633,6 +641,8 @@ class Module(EarlyReplacementController,BaseModule):
                           not self.frame_finalized and self.births.optimizer is not None else None)
         ckpt['birth_source_rows'] = (self.births.source_rows.detach().cpu()
                                      if self.births.source_rows is not None else None)
+        feature_update = getattr(self, 'feature_dc_update', None)
+        ckpt['quantized_feature_dc_update'] = feature_update.capture() if feature_update is not None else None
         ckpt['birth_handoff_sources'] = (self.birth_handoff_sources.detach().cpu()
             if self.birth_handoff_sources is not None else None)
         transaction = getattr(self, 'birth_transaction', None)
@@ -672,7 +682,9 @@ class Module(EarlyReplacementController,BaseModule):
                 initialized=self.early_initialized,birth_updates=self.early_birth_updates,
                 shared_steps=self.early_shared_steps,selected=self.early_selected,
                 pinned_rows=self.early_pinned_rows,pinned_values=self.early_pinned_values,
-                focus_weights=self.early_focus_weights),'cpu')
+                focus_weights=self.early_focus_weights,
+                plan_used_quota=getattr(self,'_plan_used_quota',0),
+                plan_events=getattr(self,'_plan_events',[])),'cpu')
 
     def on_load_checkpoint(self, ckpt):
         self.gaussians.restore(ckpt['gaussians'], self.config.gaussian)
@@ -706,14 +718,12 @@ class Module(EarlyReplacementController,BaseModule):
             saved_config = {**saved_config, 'effective_motion_observations': False}
         if isinstance(saved_config, dict):
             saved_config = dict(saved_config)
-            saved_config['renderer'] = {**asdict(RendererConfig()), **saved_config.get('renderer', {})}
             saved_config.setdefault('motion_coarse_to_fine', False)
             saved_config.setdefault('photometric_loss', 'l1')
             saved_config.setdefault('opacity_update', asdict(OpacityUpdateConfig()))
             saved_config['opacity_update'] = {**asdict(OpacityUpdateConfig()), **saved_config['opacity_update']}
-            feature_dc = saved_config.pop('feature_dc_update', None)
-            if isinstance(feature_dc, dict) and feature_dc.get('enabled', False):
-                raise ValueError('Region-shared DC checkpoints are replay-only')
+            saved_config['feature_dc_update'] = {
+                **asdict(FeatureDCUpdateConfig()), **saved_config.get('feature_dc_update', {})}
             opacity = saved_config.pop('old_opacity', {})
             if opacity.get('enabled', False) or ckpt.get('old_opacity_delta') is not None:
                 raise ValueError('Opacity-correction checkpoints are replay-only')
@@ -764,6 +774,8 @@ class Module(EarlyReplacementController,BaseModule):
             self.motion.restore(ckpt['rigid_tree_motion'])
             if self.config.opacity_update.enabled:
                 self.opacity_update.restore(ckpt.get('quantized_opacity_update'), self.device)
+            if self.config.feature_dc_update.enabled:
+                self.feature_dc_update.restore(ckpt.get('quantized_feature_dc_update'), self.device)
             if self.motion_committed:
                 for parameter in self.motion.parameters():
                     parameter.requires_grad_(False)
@@ -817,6 +829,8 @@ class Module(EarlyReplacementController,BaseModule):
             self.early_pinned_rows=state.get('pinned_rows')
             self.early_pinned_values=state.get('pinned_values')
             self.early_focus_weights=state.get('focus_weights',{})
+            self._plan_used_quota=state.get('plan_used_quota',0)
+            self._plan_events=state.get('plan_events',[])
             if self.frame_prepared:
                 self._early_attach_opacity()
             if ckpt['births'] is not None:
@@ -824,10 +838,16 @@ class Module(EarlyReplacementController,BaseModule):
                 if self.config.birth.radiance_mode=='adaptive_residual_birth':
                     from .model.adaptive_birth_model import AdaptiveBirthModel
                     EarlyReplacementModel=AdaptiveBirthModel
-                self.births=EarlyReplacementModel(self.config.sh_degree)
-                self.births.restore(ckpt['births'],self.motion.optimizer,self.config.gaussian_stage2)
+                if getattr(self.config.birth,'frame_training_plan',False):
+                    from .model.frame_plan_birth import FramePlanBirthModel
+                    self.births=FramePlanBirthModel(self.config.sh_degree,self.device).restore(
+                        ckpt['births'],self.motion.optimizer,self.config.gaussian_stage2,self.device)
+                else:
+                    self.births=EarlyReplacementModel(self.config.sh_degree)
+                    self.births.restore(ckpt['births'],self.motion.optimizer,self.config.gaussian_stage2)
                 self.births.source_rows=ckpt['birth_source_rows'].to(self.device)
-                self.births._opacity.requires_grad_(self.motion_committed or self.config.birth.radiance_mode=='adaptive_residual_birth')
+                if not getattr(self.config.birth,'frame_training_plan',False):
+                    self.births._opacity.requires_grad_(self.motion_committed or self.config.birth.radiance_mode=='adaptive_residual_birth')
 
     def prepare_frame(self):
         if self.frame_prepared:
@@ -844,7 +864,7 @@ class Module(EarlyReplacementController,BaseModule):
             self._validate_persistent_layout()
         if uses_early_replacement(self.config) and (
                 self.motion_steps!=200 or self.config.rigid_tree.birth_steps!=100 or
-                self.config.rigid_tree.spatial_gate.freeze_step!=70):
+                self.config.rigid_tree.spatial_gate.freeze_step!=(180 if getattr(self.config.birth,'frame_training_plan',False) else 70)):
             raise ValueError('Early replacement requires unchanged gate70, motion200 and global300 schedule')
         self.retired_reference = None
         retirement = dict(previous_count=len(self.gaussians._xyz), retired_count=0)
@@ -893,6 +913,8 @@ class Module(EarlyReplacementController,BaseModule):
         self.early_initialized=False;self.early_birth_updates=0;self.early_shared_steps=0
         self.early_selected=None;self.early_pinned_rows=None;self.early_pinned_values=None
         self.early_focus_weights={}
+        self._plan_used_quota=0;self._plan_events=[]
+        self._plan_phase_started=None;self._plan_timed_phase=None
         self.birth_control = dict(clone_added=0, split_added=0, pruned=0,
                                   source_tracked=True, retirement=retirement,
                                   previous_birth_count=previous_birth_count)
@@ -900,10 +922,22 @@ class Module(EarlyReplacementController,BaseModule):
         self._freeze_base()
         if self.opacity_update is not None:
             self.opacity_update.setup(self.gaussians._opacity)
+        if self.feature_dc_update is not None:
+            self.feature_dc_update.setup(self.gaussians._features_dc)
         if uses_early_replacement(self.config):
             self._early_attach_opacity()
 
     def pre_training_step(self):
+        if getattr(self.config.birth,'frame_training_plan',False):
+            if (not self.config.rigid_tree.spatial_gate.frame_training_plan or
+                    self.config.birth.radiance_mode != 'adaptive_residual_birth' or
+                    self.config.rigid_tree.amplitude_refit_steps or
+                    self.config.opacity_update.amplitude_refit_steps or
+                    self.config.feature_dc_update.enabled or
+                    not self.config.birth.rotation_updates or
+                    not self.config.birth.joint_old_opacity or self.config.lambda_dssim != .2 or
+                    self.config.photometric_loss != 'l1' or self.config.birth.photometric_loss != 'l1'):
+                raise ValueError('Frame plan needs its gate schedule, independent residuals, no shared colour, new rotation and L1/DSSIM')
         self.prepare_frame()
         if not self.motion_committed and self.opacity_update is not None:
             self.opacity_update.prepare_step(self.trainer.global_step, self.motion_steps)
@@ -940,6 +974,10 @@ class Module(EarlyReplacementController,BaseModule):
                              transaction.fixed_reference is not None else
                              ({name:getattr(self.gaussians,attr).detach() for name,attr in zip(RAW_FIELDS,RAW_ATTRIBUTES)}
                               if self.config.birth.radiance_mode=='adaptive_residual_birth' else model_raw(self.gaussians)))
+        feature_update = getattr(self, 'feature_dc_update', None)
+        if feature_update is not None and not self.frame_finalized:
+            reference = dict(reference)
+            reference['sh_dc'] = feature_update().detach()
         result = QuantizedNewGaussianView(self.births, self.config.birth,
             self.datamodule.cameras_extent, reference,
             source_rows=self.births.source_rows)
@@ -1012,6 +1050,12 @@ class Module(EarlyReplacementController,BaseModule):
                     self.gaussians.rigid_alpha = self.opacity_update.alphas()
                 else:
                     self.gaussians.rigid_opacity = self.opacity_update()
+            if (getattr(self, 'feature_dc_update', None) is not None and self.frame_prepared and
+                    not self.frame_finalized and
+                    (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
+                self.gaussians.rigid_sh_dc = self.feature_dc_update(training=training)
+                if auxiliary:
+                    self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
             if (uses_early_replacement(self.config) and getattr(self,'early_initialized',False) and
                     not self.motion_committed and not old_only):
                 xyz=self.gaussians.rigid_xyz
@@ -1082,6 +1126,9 @@ class Module(EarlyReplacementController,BaseModule):
                 self.renderer.collect_contributions = previous_collection
 
     def training_step(self, viewpoint, step, regularization_weight=1.):
+        package = self.forward(viewpoint, training=True)
+        adaptive_rate_view=package.pop('_adaptive_birth_rate_view',None)
+        image = package['render']
         factor = motion_image_factor(step, self.motion_steps,
             enabled=self.config.motion_coarse_to_fine,
             fitting_motion=self.frame_prepared and not self.motion_committed,
@@ -1089,14 +1136,6 @@ class Module(EarlyReplacementController,BaseModule):
         metric = getattr(self.config, 'photometric_loss', 'l1')
         if (self.motion_committed or (uses_early_replacement(self.config) and self.early_initialized)) and self.config.birth.photometric_loss is not None:
             metric = self.config.birth.photometric_loss
-        if self.config.rigid_tree.counterfactual_residual_support and not self.motion_committed:
-            from .model.motion_evidence import probe_motion_evidence
-            probe_motion_evidence(self, viewpoint, step,
-                lambda image: motion_photometric_loss(image, viewpoint.image,
-                    self.config.lambda_dssim, factor, metric=metric))
-        package = self.forward(viewpoint, training=True)
-        adaptive_rate_view=package.pop('_adaptive_birth_rate_view',None)
-        image = package['render']
         image_loss = motion_photometric_loss(image, viewpoint.image,
                                              self.config.lambda_dssim, factor, metric=metric)
         loss = image_loss
@@ -1134,10 +1173,17 @@ class Module(EarlyReplacementController,BaseModule):
         if not self.motion_committed and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
         if (regularization_weight and getattr(self, 'opacity_update', None) is not None and
+                (not getattr(self.config.birth,'frame_training_plan',False) or step >= 101) and
                 (not self.motion_committed or
                  (not self.frame_finalized and (self.config.opacity_update.joint_with_birth or
                                                self.config.birth.joint_old_opacity)))):
             terms = self.opacity_update.rate_terms(self._rate_byte_price(step),
+                width=self.config.rigid_tree.sparse_rate_width_bins)
+            loss = loss + regularization_weight * terms['loss']
+        if (regularization_weight and getattr(self, 'feature_dc_update', None) is not None and
+                (not self.motion_committed or
+                 (not self.frame_finalized and self.config.feature_dc_update.joint_with_birth))):
+            terms = self.feature_dc_update.rate_terms(self._rate_byte_price(step),
                 width=self.config.rigid_tree.sparse_rate_width_bins)
             loss = loss + regularization_weight * terms['loss']
         if (self.motion_committed and regularization_weight and len(self.births._xyz) and
@@ -1153,7 +1199,8 @@ class Module(EarlyReplacementController,BaseModule):
             loss=loss+regularization_weight*penalty
             # Trainer divides both losses and metrics by the camera count.
             metrics.update({name:value*regularization_weight for name,value in storage_metrics.items()})
-        if regularization_weight and self.config.birth.population_loss_weight and self.early_initialized:
+        if (regularization_weight and self.config.birth.population_loss_weight and
+                ((getattr(self.config.birth,'frame_training_plan',False) and step >= 101) or self.early_initialized)):
             penalty,population_metrics=self._adaptive_population_regularization(step)
             loss=loss+regularization_weight*penalty
             metrics.update({name:value*regularization_weight for name,value in population_metrics.items()})
@@ -1168,6 +1215,17 @@ class Module(EarlyReplacementController,BaseModule):
         cfg = self.config.rigid_tree
         ramp = min(max((step - cfg.rate_warmup_steps) / cfg.rate_ramp_steps, 0.), 1.)
         return cfg.rate_loss_weight * ramp / self.motion.rate_normalization_bytes
+
+    @torch.no_grad()
+    def _step_feature_dc(self, step):
+        update = getattr(self, 'feature_dc_update', None)
+        if update is None:
+            return
+        window = self.config.rigid_tree.motion_fit_window_steps
+        update.optimizer_step(self._rate_byte_price(step),
+            proximal=(window is None or step % window == 0 or step == self.total_steps),
+            lr_factor=self.motion._motion_lr_factor(min(step, self.motion_steps))
+                if self.config.feature_dc_update.decay_with_motion else 1.)
 
     @torch.no_grad()
     def _commit_opacity_and_retire(self, forced_remove=None):
@@ -1200,6 +1258,9 @@ class Module(EarlyReplacementController,BaseModule):
                 self.birth_appearance_gradient = self.birth_appearance_gradient[rows]
         update.commit(rows)
         self.gaussians._opacity.copy_(logits[rows])
+        if getattr(self, 'feature_dc_update', None) is not None:
+            self.feature_dc_update.commit(rows)
+            self.gaussians._features_dc.copy_(self.feature_dc_update.canonical_features().to(self.device))
         return rows
 
     def transaction_camera_views(self):
@@ -2499,6 +2560,8 @@ class Module(EarlyReplacementController,BaseModule):
             self.birth_control['motion_observed_samples'] = (
                 self.birth_control.get('motion_observed_samples', 0) + observed_count)
             edits = self.motion.optimizer_step()
+            if getattr(self, 'feature_dc_update', None) is not None:
+                self._step_feature_dc(step)
             if getattr(self, 'opacity_update', None) is not None:
                 self.opacity_update.optimizer_step(self._rate_byte_price(step),
                     proximal=self.motion._motion_fit_window_due(),
@@ -2618,6 +2681,9 @@ class Module(EarlyReplacementController,BaseModule):
                 # Keep source predictors, export and rendering on the same
                 # canonical alpha grid while newborn attributes keep fitting.
                 self.gaussians._opacity.copy_(self.opacity_update.canonical_logits().to(self.device))
+            if getattr(self, 'feature_dc_update', None) is not None and self.config.feature_dc_update.joint_with_birth:
+                self._step_feature_dc(step)
+                self.gaussians._features_dc.copy_(self.feature_dc_update.canonical_features().to(self.device))
             if step == self.total_steps:
                 if uses_residual_birth(self.config):
                     if uses_persistent_birth(self.config):
@@ -2653,8 +2719,14 @@ class Module(EarlyReplacementController,BaseModule):
         if uses_early_replacement(self.config) and (
                 self.trainer.global_step not in (200,300) or self.early_shared_steps!=self.trainer.global_step):
             raise ValueError('Early replacement manifest requires a truthful single shared-Adam global200/300 ledger')
+        if getattr(self.config.birth,'frame_training_plan',False):
+            if self.trainer.global_step != 300:
+                raise ValueError('Frame plan can only encode after step300 cleanup')
+            self.gaussians._opacity.copy_(self.opacity_update.canonical_logits().to(self.device))
         if self.opacity_update is not None:
             self.opacity_update.finish()
+        if getattr(self, 'feature_dc_update', None) is not None:
+            self.feature_dc_update.finish()
         view = self.make_birth_view()
         raw, sources = materialize_quantized_gaussians(
             model_raw(self.gaussians), view)
@@ -2683,6 +2755,13 @@ class Module(EarlyReplacementController,BaseModule):
             expected_logits = self.opacity_update.canonical_logits().to(raw['opacity'])
             if not torch.equal(raw['opacity'][:len(self.motion.owner)], expected_logits):
                 raise ValueError('Materialized old opacity differs from its sparse packet')
+        feature_info = None
+        if getattr(self, 'feature_dc_update', None) is not None:
+            feature_info = self.feature_dc_update.export(
+                stream_dir / f'shdc_{self.current_frame:03d}.bin', self.current_frame)
+            expected_features = self.feature_dc_update.canonical_features().to(raw['sh_dc'])
+            if not torch.equal(raw['sh_dc'][:len(expected_features)], expected_features):
+                raise ValueError('Materialized old DC differs from its shared color packet')
         decoded = self.motion.codec_previous_state
         prior = self.motion.frame_reference_state
         old_count = len(self.motion.owner)
@@ -2754,9 +2833,20 @@ class Module(EarlyReplacementController,BaseModule):
                 topology_born_step=70,population_frozen_step=200)
             if self.config.birth.radiance_mode=='adaptive_residual_birth':
                 manifest['training_step_accounting'].update(population_frozen_step=70,final_alpha_cleanup_step=300)
+        if getattr(self.config.birth,'frame_training_plan',False):
+            manifest['training_step_accounting'] = dict(global_iterations=300, shared_adam_steps=self.early_shared_steps,
+                shared_gate=100, fixed_gate_residual=50, joint_gate_residual=30, final_motion=20,
+                birth_steps=[200,250], cleanup_steps=[200,250,300], old_opacity=200,
+                newborn_updates=[100,50], extra_SGD_steps=0)
+            manifest['frame_training_plan_version'] = 1
+            manifest['birth_cohorts'] = self.birth_control['early_replacement']['actual_birth_cohorts']
+            manifest['birth_events'] = [200,250]
         if self.opacity_update is not None:
             manifest.update(opacity_update=Path(opacity_info['path']).name if opacity_info else None,
                             opacity_update_timing='before_births')
+        if getattr(self, 'feature_dc_update', None) is not None:
+            manifest.update(feature_dc_update=Path(feature_info['path']).name if feature_info else None,
+                            feature_dc_update_timing='before_births')
         manifest_path = stream_dir / f'frame_{self.current_frame:03d}.json'
         manifest_path.write_text(json.dumps(manifest, indent=2))
         self.frame_report = dict(frame=self.current_frame,
@@ -2770,7 +2860,7 @@ class Module(EarlyReplacementController,BaseModule):
             old_count=len(raw['xyz']) - len(sources), birth_count=len(sources),
             previous_count=len(prior.xyz), retired_count=retired_count,
             total_count=len(raw['xyz']), motion=motion_info, birth=birth_info,
-            opacity_update=opacity_info,
+            opacity_update=opacity_info, feature_dc_update=feature_info,
             motion_observation_diagnostics=dict(
                 kind=('actual_compositing' if self.config.effective_motion_observations else 'frustum'),
                 frustum_samples=self.birth_control.get('motion_frustum_samples', 0),
@@ -2780,7 +2870,8 @@ class Module(EarlyReplacementController,BaseModule):
             stage_image_metrics=self.stage_image_metrics,
             encoded_bytes=motion_path.stat().st_size +
                 (birth_info['archive_bytes'] if birth_info else 0) +
-                (opacity_info['archive_bytes'] if opacity_info else 0),
+                (opacity_info['archive_bytes'] if opacity_info else 0) +
+                (feature_info['archive_bytes'] if feature_info else 0),
             shared_reference_bytes=self.trainer.decoder_reference_path.stat().st_size,
             materialized_sha256=raw_digest,
             decoder_reference=manifest['reference'],
@@ -2797,6 +2888,11 @@ class Module(EarlyReplacementController,BaseModule):
             semantics='Spatial gate motion and quantized births; shared first frame counted once. '
                       'Previous-row deletions are encoded in motion; optional quantized old-opacity/DC deltas; '
                       'old scale and higher-order SH fixed.')
+        if getattr(self.config.birth,'frame_training_plan',False):
+            self.frame_report['packet_bytes'] = self.frame_report['encoded_bytes']
+            self.frame_report['manifest_bytes'] = manifest_path.stat().st_size
+            self.frame_report['encoded_bytes'] += manifest_path.stat().st_size
+            self.frame_report['complete_dynamic_update_bytes'] = self.frame_report['encoded_bytes']
 
     @torch.no_grad()
     def validation_step(self, viewpoint, idx, loader_idx):

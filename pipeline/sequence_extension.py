@@ -100,6 +100,47 @@ def _empty_destination_stream(destination):
         raise ValueError('Extension destination already contains stream files')
 
 
+def _validate_adaptive_birth_completion(checkpoint, manifest, terminal_step):
+    """Validate the v19 adaptive-birth ledger, which has no population screening."""
+    birth_control = ((checkpoint.get('rigid_tree_frame') or {}).get('birth_control') or {})
+    control = birth_control.get('early_replacement') or {}
+    state = checkpoint.get('early_replacement_state') or {}
+    ledger = manifest.get('training_step_accounting') or {}
+    source = control.get('source_count')
+    population = control.get('training_population')
+    capacity = control.get('population_cap')
+    removed = control.get('low_alpha_newborns_removed')
+    committed = birth_control.get('committed_population_count')
+    encoded = manifest.get('birth_count')
+    counts = (source, population, capacity, removed, committed, encoded,
+              birth_control.get('proposal_count'))
+    if (terminal_step != 300 or any(isinstance(n, bool) or not isinstance(n, int) or n < 0
+                                    for n in counts)):
+        raise ValueError('Adaptive prefix has invalid completed population counts')
+    expected_birth = 230 if source else 0
+    expected = dict(warm_gate=70, joint=130, final_population=100,
+                    global_iterations=300, shared_adam_steps=300,
+                    motion_participation=200, birth_participation=expected_birth,
+                    joint_overlap=130 if source else 0, extra_SGD_steps=0,
+                    topology_born_step=70, population_frozen_step=70,
+                    final_alpha_cleanup_step=300)
+    expected_control = dict(global_iterations=300, motion_iterations=200,
+                            newborn_iterations=expected_birth,
+                            joint_overlap_iterations=130 if source else 0,
+                            final_population_iterations=100,
+                            new_alpha_iterations=expected_birth,
+                            population_screening=False, codec_trials200=0,
+                            finish_render_calls=0, extra_SGD_steps=0)
+    if (source != population or source != birth_control['proposal_count'] or source > capacity or
+            committed != encoded or committed + removed != source or
+            state.get('initialized') is not True or state.get('shared_steps') != 300 or
+            state.get('birth_updates') != expected_birth or
+            any(ledger.get(key) != value for key, value in expected.items()) or
+            any(control.get(key) != value for key, value in expected_control.items()) or
+            checkpoint.get('dual_birth_state') is not None):
+        raise ValueError('Adaptive prefix has inconsistent no-screening population or training ledger')
+
+
 def validate_sequence_extension(checkpoint, current_data_config,
                                 current_trainer_config, source_run,
                                 destination_run, current_extent, current_images,
@@ -237,7 +278,9 @@ def validate_sequence_extension(checkpoint, current_data_config,
                     (bool(layout) and bank.get('state') is None) or
                     checkpoint.get('dual_birth_state') is not None):
                 raise ValueError('Persistent prefix lost its single-model optimizer ledger or UID population')
-        if early:
+        if allocation == 'adaptive_residual_birth_300_v16':
+            _validate_adaptive_birth_completion(checkpoint, manifest, terminal_step)
+        elif early:
             ledger=manifest.get('training_step_accounting') or {}
             state=checkpoint.get('early_replacement_state') or {}
             control=((checkpoint.get('rigid_tree_frame') or {}).get('birth_control') or {}).get('early_replacement') or {}
@@ -308,7 +351,8 @@ def validate_sequence_extension(checkpoint, current_data_config,
             raise ValueError('Prefix frame references a different bootstrap or packet')
         relative_files.update((index, f'frame_storage/rigid_tree/motion_{frame:03d}.bin',
                                f'frame_summary/frame_{frame:03d}.json'))
-        for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity')):
+        for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity'),
+                            ('feature_dc_update', 'shdc')):
             name = manifest.get(field)
             if name is not None:
                 if name != f'{stem}_{frame:03d}.bin':

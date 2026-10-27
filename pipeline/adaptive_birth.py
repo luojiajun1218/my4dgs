@@ -2,12 +2,12 @@
 from types import SimpleNamespace
 import torch
 from .model.adaptive_birth_model import AdaptiveBirthModel
-from .model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES, QuantizedNewGaussianView
+from .model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES
 from .model.residual_birth import BirthTransaction, RawView, spatial_groups
 from .model.support_reincarnation_proposal import score_support_responsibility, _native_responsibility
 from .model.adaptive_birth_storage import newborn_storage_terms, storage_ramp
 from .model.adaptive_birth_colour import conservative_colour_seed
-from .model.adaptive_birth_dc import native_colour_seed
+from .model.early_replacement_model import _rotate
 
 
 class AdaptiveBirthController:
@@ -24,6 +24,8 @@ class AdaptiveBirthController:
         raw['xyz']=(self.gaussians._xyz if xyz is None else xyz).detach()
         raw['rotation']=(self.gaussians._rotation if rotation is None else rotation).detach()
         raw['opacity']=self.opacity_update().detach()
+        feature_update=getattr(self,'feature_dc_update',None)
+        if feature_update is not None:raw['sh_dc']=feature_update().detach()
         return raw
 
     @torch.no_grad()
@@ -68,11 +70,8 @@ class AdaptiveBirthController:
         # Deterministic local offsets avoid coincident-depth ties and RNG drift.
         index=torch.arange(len(rows),device=self.device,dtype=seed['xyz'].dtype)
         direction=torch.stack((torch.sin(index*2.399),torch.cos(index*2.399),torch.sin(index*1.37)),1)
-        # Scales live on the parent's local covariance axes. Rotate the local
-        # displacement before adding it to a world-space center; otherwise a
-        # flat rotated source can seed a child far outside its thin support.
-        from .model.early_replacement_model import _rotate
-        seed['xyz']+=_rotate(seed['rotation'],direction*seed['logscale'].exp()*.25)
+        local_offset=direction*seed['logscale'].exp()*.25
+        seed['xyz']+=_rotate(seed['rotation'],local_offset)
         seed['logscale']+=torch.tensor(.7,device=self.device).log()
         initial=alpha[rows].clamp(.03,.1)
         seed['opacity']=torch.logit(initial)
@@ -85,17 +84,9 @@ class AdaptiveBirthController:
         learner.active_sh_degree=self.gaussians.active_sh_degree
         learner.bind_source_pose(raw['xyz'],raw['rotation'],detach=True)
         # install defines local zero at seed; bind changes anchor to parent.
-        q=raw['rotation'][rows].clone();q[:,1:]*=-1
-        learner.local_xyz.copy_(_rotate(q,seed['xyz']-raw['xyz'][rows]))
-        native_colour_report=dict(enabled=False)
-        if self.config.birth.native_dc_init:
-            quantized=QuantizedNewGaussianView(learner,self.config.birth,self.motion.extent,raw,rows)
-            newborn={name:quantized.raw_value(name).detach() for name in RAW_FIELDS}
-            dc,native_colour_report=native_colour_seed(self.renderer,self.gaussians,raw,newborn,pair,
-                self.background,dc_step=self.config.birth.new_sh_step,predictor_dc=quantized.predictor['sh_dc'])
-            learner._features_dc.copy_(dc)
-            learner._seed_raw['sh_dc'].copy_(dc)
-            seed['sh_dc'].copy_(dc)
+        learner.local_xyz.copy_(local_offset)
+        if not self.config.birth.rotation_updates:
+            learner.local_rotvec.requires_grad_(False)
         learner.attach_optimizer(self.motion.optimizer,self.config.gaussian_stage2)
         self.births=learner;n=len(rows);names=tuple(views)
         self.birth_transaction=BirthTransaction(seed,rows.clone(),torch.full_like(rows,-1),scores[rows].clone(),
@@ -111,12 +102,10 @@ class AdaptiveBirthController:
                 residual_floor=self.config.birth.residual.residual_floor,
                 region_demands=demands,region_allocations=allocation,region_residual_mass=masses,
                 source_rows=rows.cpu().tolist(),native_responsibility=responsibility,
-                learnable_fields=['xyz','rotation','scale','DC','SH','alpha'],
+                learnable_fields=['xyz']+(['rotation'] if self.config.birth.rotation_updates else [])+['scale','DC','SH','alpha'],
                 source_preserved=True,parent_colour_envelope=False,quantized_training=True,
-                proposal_render_calls=4+native_colour_report.get('additional_render_calls',0),
-                proposal_colour_backward_calls=(6 if colour_enabled else 2)+native_colour_report.get('additional_backward_calls',0),
+                proposal_render_calls=4,proposal_colour_backward_calls=6 if colour_enabled else 2,
                 residual_colour_initialization=colour_report,
-                native_colour_initialization=native_colour_report,
                 storage_loss=dict(enabled=self.config.birth.storage_loss_enabled,
                     strength=self.config.birth.storage_loss_strength,
                     warmup_steps=self.config.birth.storage_warmup_steps,
@@ -126,6 +115,8 @@ class AdaptiveBirthController:
                 selection_cameras=list(pair)))
 
     def _adaptive_storage_regularization(self,step,birth_view=None):
+        if getattr(self.config.birth,'frame_training_plan',False):
+            return self._plan_storage_regularization(step,birth_view)
         cfg=self.config.birth
         view=self.make_birth_view() if birth_view is None else birth_view
         if view is None:
@@ -141,6 +132,8 @@ class AdaptiveBirthController:
         return penalty,metrics
 
     def _adaptive_population_regularization(self,step):
+        if getattr(self.config.birth,'frame_training_plan',False):
+            return self._plan_population_regularization(step)
         """Equal support pressure per observed point, independent of birth age.
 
         This is a representation penalty, not transmitted bytes. Unlike the

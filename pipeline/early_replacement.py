@@ -34,12 +34,17 @@ class EarlyReplacementController(AdaptiveBirthController):
             if group.get('name')=='early_old_opacity':update.optimizer.param_groups[0]['lr']=group['lr']
 
     def _early_prepare_rates(self,step):
+        if getattr(self.config.birth,'frame_training_plan',False):
+            return self._plan_prepare_rates(step)
+        return self._early_prepare_rates_legacy(step)
+
+    def _early_prepare_rates_legacy(self,step):
         self._early_attach_opacity()
         cfg=self.config.gaussian_stage2
         fraction=min(1.,max(0.,(step-71)/229))
         factor=self.config.birth.lr_final_ratio**fraction
         rates=dict(early_xyz=cfg.position_lr_init*self.gaussians.spatial_lr_scale,
-            early_rotation=cfg.rotation_lr,early_scaling=cfg.scaling_lr,
+            early_rotation=cfg.rotation_lr if self.config.birth.rotation_updates else 0.,early_scaling=cfg.scaling_lr,
             early_opacity=cfg.opacity_lr,early_f_dc=cfg.feature_lr,early_f_rest=cfg.feature_lr/20)
         for group in self.motion.optimizer.param_groups:
             name=group.get('name')
@@ -63,6 +68,8 @@ class EarlyReplacementController(AdaptiveBirthController):
     @torch.no_grad()
     def _early_current_old(self,step):
         raw=model_raw(self.gaussians)
+        feature_update=getattr(self,'feature_dc_update',None)
+        if feature_update is not None:raw['sh_dc']=feature_update().detach()
         if not self.motion_committed:
             xyz,q=self.motion(step,training=False)
             raw['xyz'],raw['rotation']=xyz.detach(),q.detach()
@@ -149,6 +156,8 @@ class EarlyReplacementController(AdaptiveBirthController):
 
     @torch.no_grad()
     def _early_post_training_step(self,packages,step):
+        if getattr(self.config.birth,'frame_training_plan',False):
+            return self._plan_post_step(packages,step)
         if step!=self.early_shared_steps+1 or not 1<=step<=300:
             raise ValueError('Early replacement allows exactly one shared Adam step per global iteration')
         self._early_pin_sources(before_step=True)
@@ -179,6 +188,8 @@ class EarlyReplacementController(AdaptiveBirthController):
             if self.config.birth.joint_old_opacity:
                 self._adaptive_post_motion_opacity(step,packages)
             self.motion.optimizer.zero_grad(set_to_none=True)
+        if getattr(self, 'feature_dc_update', None) is not None:
+            self._step_feature_dc(step)
         self.early_shared_steps+=1
         if self.early_initialized and len(self.births.parent_rows):
             self.early_birth_updates+=1;self.births.project_parameters()

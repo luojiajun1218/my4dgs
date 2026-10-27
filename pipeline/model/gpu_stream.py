@@ -172,29 +172,9 @@ class GPUStream:
         old_ids=self.ids[mask]
         if len(old_ids)!=step.old_count:
             raise ValueError('Survivor count mismatch')
-        self._canonicalize_old_q()
+        if not step.inherit_birth_rotation:
+            self._canonicalize_old_q()
         if step.opacity_before_births:
-            self._opacity(step.opacity,old_ids)
-        birth_ids=np.arange(self.next_uid,self.next_uid+step.birth_count,dtype=np.int64)
-        if step.birth_count:
-            source_ids=old_ids[step.sources]
-            source_q=torch.from_numpy(self.host['rotation'][source_ids].copy())
-            q=F.normalize(source_q,dim=-1)+torch.from_numpy(step.pose_symbols[:,3:].copy())*step.pose_steps[1]
-            self.host['rotation'][birth_ids]=q.numpy()
-            for index,name in enumerate(('logscale','opacity','sh_dc','sh_rest')):
-                encoded=step.attributes.values[name]
-                if step.attributes.steps is None:
-                    value=encoded.astype(np.float32,copy=True)
-                else:
-                    delta=encoded.astype(np.float32)*np.float32(step.attributes.steps[index])
-                    value=self.host[name][source_ids]+delta
-                if not bool(np.isfinite(value).all()):
-                    raise ValueError('Nonfinite newborn appearance')
-                self.host[name][birth_ids]=value
-            if not bool(torch.isfinite(q).all()):
-                raise ValueError('Nonfinite newborn quaternion')
-            self._activate(birth_ids,all_fields=True)
-        if not step.opacity_before_births:
             self._opacity(step.opacity,old_ids)
         regional=step.regional_symbols.copy()
         if step.relative:
@@ -215,6 +195,37 @@ class GPUStream:
             self._upload(adjusted),self._upload(step.gs_rows),self._upload(step.gs_symbols),
             self._upload(regional),step.gs_step,self.planes,gates,self.ball,self.leaves,self.nodes,
             ids,xyz,owner,paths,step.old_count,self.far_rows,self.far_count)
+        if step.feature_dc is not None:
+            from .sparse_features import decode_feature_dc_delta
+            old_owner=owner[:step.old_count].cpu()
+            reference=torch.from_numpy(self.host['sh_dc'][old_ids].copy())
+            features=decode_feature_dc_delta(step.feature_dc,reference,frame_index=step.frame,
+                owner=old_owner,node_count=self.regions).numpy()
+            self.host['sh_dc'][old_ids]=features
+            combined=np.concatenate((features,self.host['sh_rest'][old_ids]),axis=1)
+            self.attribute_bank['features'].index_copy_(0,self._upload(old_ids),self._upload(combined))
+        birth_ids=np.arange(self.next_uid,self.next_uid+step.birth_count,dtype=np.int64)
+        if step.birth_count:
+            source_ids=old_ids[step.sources]
+            source_q=torch.from_numpy(self.host['rotation'][source_ids].copy())
+            q=(source_q if step.inherit_birth_rotation else
+               F.normalize(source_q,dim=-1)+torch.from_numpy(step.pose_symbols[:,3:].copy())*step.pose_steps[1])
+            self.host['rotation'][birth_ids]=q.numpy()
+            for index,name in enumerate(('logscale','opacity','sh_dc','sh_rest')):
+                encoded=step.attributes.values[name]
+                if step.attributes.steps is None:
+                    value=encoded.astype(np.float32,copy=True)
+                else:
+                    delta=encoded.astype(np.float32)*np.float32(step.attributes.steps[index])
+                    value=self.host[name][source_ids]+delta
+                if not bool(np.isfinite(value).all()):
+                    raise ValueError('Nonfinite newborn appearance')
+                self.host[name][birth_ids]=value
+            if not bool(torch.isfinite(q).all()):
+                raise ValueError('Nonfinite newborn quaternion')
+            self._activate(birth_ids,all_fields=True)
+        if not step.opacity_before_births:
+            self._opacity(step.opacity,old_ids)
         if step.birth_count:
             engine.append_births(self.xyz_bank,ids,self._upload(step.sources),self._upload(step.pose_symbols),
                 step.pose_steps[0],self.next_uid,step.old_count,self.planes,gates,self.ball,self.leaves,

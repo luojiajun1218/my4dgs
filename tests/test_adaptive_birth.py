@@ -8,6 +8,28 @@ from pipeline.model.birth_quantization import QuantizedNewGaussianView, RAW_FIEL
 
 
 class AdaptiveBirthTests(unittest.TestCase):
+    def test_inherited_rotation_has_no_pose_symbols_or_storage_charge_and_stays_frozen_after_restore(self):
+        from pipeline.model.adaptive_birth_storage import newborn_storage_terms
+        old,raw=early_model_fixture()
+        model=AdaptiveBirthModel(1).install(old._seed_raw,old.parent_rows)
+        model.local_rotvec.requires_grad_(False)
+        cfg=SimpleNamespace(new_xyz_step_extent=1e-5,new_rotation_step=.001,
+            new_logscale_step=.001,new_opacity_step=.01,new_sh_step=.001,rotation_updates=False)
+        view=QuantizedNewGaussianView(model,cfg,2.,raw,model.parent_rows)
+        self.assertTrue(torch.equal(view.raw_value('rotation'),raw['rotation'][model.parent_rows]))
+        terms=newborn_storage_terms(view)
+        support=model._opacity.flatten()/(model._opacity.flatten()+.01)
+        source_bytes=torch.ones_like(support)
+        for bits in (7,14,21,28):source_bytes+=(view.source>=(1<<bits)).to(support.dtype)
+        attribute_bytes=2*sum(view.symbols[name][0].numel()
+                              for name in ('logscale','opacity','sh_dc','sh_rest'))
+        expected=(support*(source_bytes+3+attribute_bytes)).sum()
+        torch.testing.assert_close(terms['base_bytes'],expected,rtol=0,atol=0)
+        terms['surrogate_bytes'].backward()
+        self.assertIsNone(model.local_rotvec.grad)
+        clone=AdaptiveBirthModel(1).restore(model.capture())
+        self.assertFalse(clone.local_rotvec.requires_grad)
+
     def test_bulk_raw_matches_per_field_symbols_and_gradients(self):
         from unittest.mock import patch
         from pipeline.model.birth_quantization import model_raw
@@ -68,7 +90,7 @@ class AdaptiveBirthTests(unittest.TestCase):
         self.assertTrue(clone._opacity.requires_grad)
 
 
-def controller_fixture(directory,empty=False):
+def controller_fixture(directory,empty=False,raw_transform=None):
     from types import MethodType
     from unittest.mock import patch
     from tests.test_reincarnation import early_controller_fixture
@@ -79,6 +101,12 @@ def controller_fixture(directory,empty=False):
     for name,value in vars(AdaptiveBirthController).items():
         if callable(value):setattr(m,name,MethodType(value,m))
     m.trainer.global_step=70
+    if raw_transform is not None:
+        current_old=m._early_current_old
+        def transformed_old(step):
+            raw,alpha=current_old(step)
+            return raw_transform(raw),alpha
+        m._early_current_old=transformed_old
     n=len(m.gaussians._xyz)
     score=torch.zeros(n) if empty else torch.arange(n,dtype=torch.float32)
     observed=torch.full((n,),3,dtype=torch.long)
@@ -91,6 +119,48 @@ def controller_fixture(directory,empty=False):
 
 
 class AdaptiveControllerTests(unittest.TestCase):
+    def test_seed_offsets_follow_parent_axes_and_rigid_rotation_after_restore(self):
+        import math
+        import tempfile
+        from unittest.mock import patch
+        snapshots=[]
+        for transformed in (False,True):
+            def source_frame(raw):
+                raw={name:value.clone() for name,value in raw.items()}
+                # Nonunit quaternions exercise the model's normalized rotation
+                # convention. Parent local x/y are world y/-x at seed time.
+                q=([.5,.5,-.5,.5] if transformed else [math.sqrt(.5),0,0,math.sqrt(.5)])
+                raw['rotation'][:]=raw['rotation'].new_tensor(q)*2
+                if transformed:
+                    x,y,z=raw['xyz'].unbind(-1)
+                    raw['xyz']=torch.stack((x,-z,y),-1)+raw['xyz'].new_tensor([.7,-.3,.2])
+                return raw
+            # Fix proposal grouping so this checks coordinate conversion, not
+            # the axis-aligned candidate-region construction.
+            with tempfile.TemporaryDirectory() as directory,patch(
+                    'pipeline.adaptive_birth.spatial_groups',
+                    side_effect=lambda xyz,_:[torch.arange(len(xyz))] if len(xyz) else []):
+                m,_=controller_fixture(directory,raw_transform=source_frame)
+                raw,_=m._early_current_old(70)
+                rows=m.birth_transaction.sources
+                index=torch.arange(len(rows),dtype=raw['xyz'].dtype)
+                direction=torch.stack((torch.sin(index*2.399),torch.cos(index*2.399),torch.sin(index*1.37)),1)
+                expected_local=direction*raw['logscale'][rows].exp()*.25
+                torch.testing.assert_close(m.births.local_xyz,expected_local,rtol=0,atol=0)
+                # Independent matrix oracle: Rz(90), then Rx(90) if requested.
+                x,y,z=expected_local.unbind(-1)
+                expected_world=torch.stack((-y,-z,x) if transformed else (-y,x,z),-1)+raw['xyz'][rows]
+                torch.testing.assert_close(m.birth_transaction.seed_xyz,expected_world)
+                torch.testing.assert_close(m.births.get_xyz,expected_world)
+                restored=AdaptiveBirthModel(1).restore(m.births.capture())
+                torch.testing.assert_close(restored.local_xyz,expected_local,rtol=0,atol=0)
+                torch.testing.assert_close(restored.get_xyz,expected_world)
+                snapshots.append((rows.clone(),m.births.get_xyz.detach().clone()))
+        torch.testing.assert_close(snapshots[0][0],snapshots[1][0],rtol=0,atol=0)
+        x,y,z=snapshots[0][1].unbind(-1)
+        expected=torch.stack((x,-z,y),-1)+x.new_tensor([.7,-.3,.2])
+        torch.testing.assert_close(snapshots[1][1],expected)
+
     def test_predictor_reference_skips_discarded_opacity_graph(self):
         import tempfile
         from unittest.mock import patch

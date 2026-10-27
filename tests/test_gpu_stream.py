@@ -16,7 +16,7 @@ from tests.test_codec import (reference_raw,motion_model,appearance_fixture,
                               opacity_fixture,wrapped)
 
 
-def make_stream(directory,births=2,rotate=False,nearest=False):
+def make_stream(directory,births=2,rotate=False,nearest=False,inherit_rotation=False,colour=False):
     raw=reference_raw()
     if nearest:raw['xyz'][0,0]=0.
     model=motion_model(raw);prior=model.frame_reference_state
@@ -35,17 +35,31 @@ def make_stream(directory,births=2,rotate=False,nearest=False):
     if rotate:gr[0,1]=1
     sources=torch.tensor([0,4][:births],dtype=torch.long)
     xyz,q=codec.compose_decoded_survivors(prior,2.,rows,prior.owner[rows],prior.parents,
-        rt,rr,gt,gr,.001,.001,spatial_open=prior.spatial_open,spatial_relative=True)
+        rt,rr,gt,gr,.001,.001,spatial_open=prior.spatial_open,spatial_relative=True,
+        inherit_birth_rotation=inherit_rotation)
     newborn_xyz=xyz[sources]+torch.tensor([.002,0.,-.002])
     payload=codec.encode_motion(prior,1,2.,rows,prior.owner[rows],prior.parents,rt,rr,gt,gr,
         sources,newborn_xyz,q[sources],.001,.001,spatial_open=prior.spatial_open,
         spatial_relative=True,birth_pose_steps=(.002,.001),
+        inherit_birth_rotation=inherit_rotation,
         gs_translation_step_extent=.001,gs_rotation_step_rad=.001)
     payload=codec.compress_motion_packet(payload)
     decoded=codec.decode_motion(payload,prior)
     current={name:value[rows].clone() for name,value in raw.items()}
     current['xyz']=decoded.xyz[:n];current['rotation']=decoded.rotation[:n]
     (directory/'motion_001.bin').write_bytes(payload)
+    if colour:
+        from pipeline.model.sparse_features import (REGIONAL_MAGIC, _regional_digest,
+                                                    decode_feature_dc_delta)
+        from pipeline.model.sparse_updates import encode_opacity_delta
+        reference=current['sh_dc'].clone()
+        table=torch.ones(len(prior.parents)*3,1,dtype=torch.int16)
+        packet=(REGIONAL_MAGIC+_regional_digest(reference,decoded.owner[:n],len(prior.parents))+
+                encode_opacity_delta(torch.zeros_like(table,dtype=torch.float32),table,
+                                     frame_index=1,step=.01))
+        (directory/'shdc_001.bin').write_bytes(packet)
+        current['sh_dc']=decode_feature_dc_delta(packet,reference,frame_index=1,
+            owner=decoded.owner[:n],node_count=len(prior.parents))
     if births:
         predictor={name:current[name][sources] for name in birth.ATTRIBUTES}
         symbols={name:torch.ones_like(value) for name,value in predictor.items()}
@@ -61,11 +75,32 @@ def make_stream(directory,births=2,rotate=False,nearest=False):
         opacity_update=None,old_count=n,birth_count=births,total_count=n+births,
         previous_count=len(prior.xyz),decoded_state_sha256=decoded.digest().hex(),
         raw_state_sha256=reference_digest(current))
+    if colour:
+        manifest.update(feature_dc_update='shdc_001.bin',feature_dc_update_timing='before_births')
     (directory/'frame_001.json').write_text(json.dumps(manifest))
     return prior,raw,decoded,current,manifest
 
 
 class StreamPacketTests(unittest.TestCase):
+    def test_inherited_rotation_offsets_and_shared_colour_replay_before_newborn_prediction(self):
+        from scripts.replay_rigid_tree import decode_frame
+        for births in (0,2):
+            with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
+                directory=Path(folder)
+                prior,raw,expected,attributes,_=make_stream(directory,births,inherit_rotation=True,colour=True)
+                step=read_stream_step(directory,1,region_count=len(prior.parents),
+                    depth=prior.spatial_paths.shape[1],rest=3)
+                self.assertTrue(step.inherit_birth_rotation)
+                self.assertTrue(step.relative)
+                self.assertEqual(step.stored_bytes,sum(p.stat().st_size for p in directory.iterdir()))
+                self.assertEqual(codec.uncompressed_motion_packet((directory/'motion_001.bin').read_bytes())[:4],b'SPG8')
+                self.assertTrue(torch.equal(expected.rotation[:step.old_count],raw['rotation'][[0,2,3,4,5,6,7]]))
+                if births:
+                    self.assertTrue(torch.equal(expected.rotation[step.old_count:],expected.rotation[step.sources]))
+                state,decoded=decode_frame(directory,1,prior,raw)
+                self.assertEqual(state.digest(),expected.digest())
+                self.assertEqual(reference_digest(decoded),reference_digest(attributes))
+
     def test_birth_symbols_and_absolute_fallback_match_original_attribute_decoder(self):
         for rest in (0,3):
             base,raw,symbols,steps,predictor,sources,xyz,q=appearance_fixture(rest=rest)
@@ -128,6 +163,20 @@ class StreamPacketTests(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(),'GPU incremental stream checks')
 class GPUStreamTests(unittest.TestCase):
+    def test_inherited_rotation_and_regional_colour_match_cpu_bits_with_newborns(self):
+        from pipeline.model.gpu_stream import GPUStream
+        for births in (0,2):
+            with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
+                directory=Path(folder)
+                prior,raw,expected,attributes,_=make_stream(directory,births,inherit_rotation=True,colour=True)
+                player=GPUStream(prior,raw,capacity=32)
+                step=read_stream_step(directory,1,region_count=len(prior.parents),depth=player.depth,rest=player.rest)
+                player.advance(step)
+                actual=player.capture_raw()
+                self.assertEqual(player.capture_state(actual).digest(),expected.digest())
+                self.assertEqual(reference_digest(actual),reference_digest(attributes))
+                player.verify_render_inputs(attributes)
+
     def test_cooperative_nearest_leaf_keeps_exact_ties_and_routes_newborns_again(self):
         from pipeline.model.gpu_stream import GPUStream
         with tempfile.TemporaryDirectory() as folder:

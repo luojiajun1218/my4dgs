@@ -39,9 +39,9 @@ def input_hashes(stream):
     for frame in range(1,300):
         files += [stream/f'frame_{frame:03d}.json',stream/f'motion_{frame:03d}.bin']
         manifest=json.loads((stream/f'frame_{frame:03d}.json').read_text())
-        for key in ('birth','opacity_update'):
+        for key in ('birth','opacity_update','feature_dc_update'):
             if manifest.get(key):
-                expected=('birth' if key=='birth' else 'opacity')+f'_{frame:03d}.bin'
+                expected=dict(birth='birth',opacity_update='opacity',feature_dc_update='shdc')[key]+f'_{frame:03d}.bin'
                 if manifest[key]!=expected:
                     raise ValueError('Unexpected input packet path')
                 files.append(stream/expected)

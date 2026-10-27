@@ -1,6 +1,9 @@
+import os
 import sys
 import warnings
 from typing import List, Tuple, Type
+
+os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6")
 
 warnings.filterwarnings("ignore", category=UserWarning, module="tinycudann")
 warnings.filterwarnings("ignore", category=UserWarning, message="No seed found")

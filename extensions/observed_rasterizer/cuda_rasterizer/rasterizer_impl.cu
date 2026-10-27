@@ -360,11 +360,11 @@ void ObservedCudaRasterizer::Rasterizer::backward(
 	char* img_buffer,
 	const float* dL_dpix,
 	float* dL_dmean2D,
-	CovarianceGradientScalar* dL_dconic,
+	float* dL_dconic,
 	float* dL_dopacity,
 	float* dL_dcolor,
 	float* dL_dmean3D,
-	CovarianceGradientScalar* dL_dcov3D,
+	float* dL_dcov3D,
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
@@ -403,7 +403,7 @@ void ObservedCudaRasterizer::Rasterizer::backward(
 		imgState.n_contrib,
 		dL_dpix,
 		(float3*)dL_dmean2D,
-		dL_dconic,
+		(float4*)dL_dconic,
 		dL_dopacity,
 		dL_dcolor), debug)
 

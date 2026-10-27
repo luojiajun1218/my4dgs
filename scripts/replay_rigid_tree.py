@@ -59,10 +59,16 @@ def decode_frame(directory: Path, frame: int, state, raw):
         raise ValueError('Unknown opacity update timing')
     if timing == 'before_births':
         current = apply_stream_opacity_update(directory, frame, current, old_count, manifest)
-    if manifest.get('feature_dc_update') is not None:
-        raise ValueError('Region-shared DC packets are no longer supported; '
-                         'prefixes recorded with them remain replay-only')
-    if (directory / f'shdc_{frame:03d}.bin').exists():
+    feature_name = manifest.get('feature_dc_update')
+    if feature_name is not None:
+        from pipeline.model.sparse_features import decode_feature_dc_delta
+        if (feature_name != f'shdc_{frame:03d}.bin' or
+                manifest.get('feature_dc_update_timing', 'before_births') != 'before_births'):
+            raise ValueError('Shared color packet must precede newborn attribute prediction')
+        current['sh_dc'] = decode_feature_dc_delta(
+            (directory / feature_name).read_bytes(), current['sh_dc'], frame_index=frame,
+            owner=decoded.owner[:old_count], node_count=len(decoded.parents))
+    elif (directory / f'shdc_{frame:03d}.bin').exists():
         raise ValueError('Unexpected DC feature packet absent from frame manifest')
     birth_file = directory / f'birth_{frame:03d}.bin'
     if birth_count:
