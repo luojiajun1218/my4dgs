@@ -371,6 +371,37 @@ class FramePlanControllerTests(unittest.TestCase):
             self.assertEqual(a,b)
             self.assertNotIn('cam00.png',a)
 
+    def test_old_opacity_byte_pressure_survives_motion_commit_and_final_partial_window(self):
+        from pipeline.model.legacy_opacity_codec import decode_opacity_delta
+        # Real old-alpha carriers/Adam metric and encoded sparse rows: a weak
+        # update must pay the same byte price after step200 and before export.
+        for step,window,should_prune in ((219,20,False),(220,20,True),(300,30,True)):
+            with self.subTest(step=step),tempfile.TemporaryDirectory() as directory:
+                m,_=controller_fixture(directory)
+                m.motion_committed=True;m.early_initialized=False;m.early_shared_steps=step-1
+                m.config.rigid_tree.motion_fit_window_steps=window
+                m.config.opacity_update.l1_weight=0  # Isolate the missing row-support cost.
+                m._rate_byte_price=lambda current_step:.01
+                m._plan_cleanup=Mock();m._plan_birth=Mock();m._plan_finish=Mock()
+                update=m.opacity_update
+                with torch.no_grad():
+                    update.delta.zero_();update.delta[0]=.01;update.delta[1]=.3
+                state=dict(step=torch.tensor(1.),exp_avg=torch.zeros_like(update.delta),
+                    exp_avg_sq=torch.full_like(update.delta,1e-5))
+                m.motion.optimizer.state[update.delta]=state
+                before=update.alphas().detach().clone()
+                m._plan_post_step([],step)
+                self.assertEqual(int(update.symbols()[0]),0 if should_prune else 1)
+                self.assertEqual(int(update.symbols()[1]),30)
+                self.assertEqual(int(state['step']),1,'Proximal must not add an Adam update')
+                if not should_prune:torch.testing.assert_close(update.alphas(),before)
+                path=Path(directory)/'opacity.bin';update.export(path,1)
+                decoded=decode_opacity_delta(path.read_bytes(),update.reference[update.rows],frame_index=1)
+                self.assertEqual(0 in decoded.rows.tolist(),not should_prune)
+                self.assertTrue(torch.equal(decoded.logits,update.canonical_logits()))
+                if step==300:
+                    m._plan_cleanup.assert_called_once_with(300);m._plan_finish.assert_called_once()
+
 
 
 

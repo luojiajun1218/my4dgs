@@ -114,8 +114,14 @@ class FramePlanController:
             self.motion.optimizer.zero_grad(set_to_none=True)
         if step >= 101:
             self._early_sync_opacity_state()
+            window = self.config.rigid_tree.motion_fit_window_steps
+            # The old-alpha carrier keeps learning after old motion commits.
+            # Its rate terms detach in proximal mode, so skipping these birth-
+            # phase windows silently disables its nonzero-update byte price.
+            opacity_proximal = (self.motion._motion_fit_window_due() if step <= 200 else
+                window is None or (step-200) % window == 0 or step == 300)
             self.opacity_update.optimizer_step(self._rate_byte_price(step),
-                proximal=(step <= 200 and self.motion._motion_fit_window_due()),
+                proximal=opacity_proximal,
                 lr_factor=self.motion._motion_lr_factor(min(step, 200))
                     if self.config.opacity_update.decay_with_motion else 1.,
                 perform_step=False, external_state=self.motion.optimizer.state.get(self.opacity_update.delta, {}))
