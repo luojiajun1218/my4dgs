@@ -176,6 +176,48 @@ class FramePlanMotionTests(unittest.TestCase):
             model.prepare_plan_step(step)
             self.assertEqual(float(model.loss_terms(step,diagnostics=False)['candidate_motion_loss']),0.)
 
+    def test_fixed_gate_phase_can_prepare_unused_candidates_without_pose_changes(self):
+        model=motion_fixture()
+        model.config.spatial_gate.refine_unselected_candidates=True
+        model.config.spatial_gate.candidate_refinement_start_step=101
+        with torch.no_grad():
+            model.region_translation.zero_();model.gate_logits.fill_(-5.)
+        model._select_frontier(freeze=True)
+        model.prepare_plan_step(101)
+        with torch.no_grad():model.gs_translation[:,0]=.02
+        before=model(101,training=False)[0].detach().clone()
+        unused=model.node_counts.gt(0)&~model._stored_region_support()
+        loss=model.loss_terms(101,diagnostics=False)['candidate_motion_loss']
+        loss.backward();model._mask_regional_fit_updates()
+        self.assertTrue(model._hard_gate_frozen)
+        self.assertTrue(model.region_translation.grad[unused].ne(0).any())
+        self.assertIsNone(model.gate_logits.grad)
+        model.optimizer.step()
+        torch.testing.assert_close(before,model(101,training=False)[0],rtol=0,atol=0)
+
+    def test_gate_objective_restart_is_once_and_preserves_other_optimizer_states(self):
+        model=motion_fixture()
+        model.config.spatial_gate.reset_gate_optimizer_on_refine=True
+        p,_=model(100,training=True)
+        (p.square().mean()+model.regularization_loss(100)).backward();model.optimizer_step()
+        self.assertIn(model.gate_logits,model.optimizer.state)
+        region_state=model.optimizer.state[model.region_translation]
+        before_logits=model.gate_logits.detach().clone()
+        model.prepare_plan_step(150);model.prepare_plan_step(151)
+        self.assertNotIn(model.gate_logits,model.optimizer.state)
+        self.assertIs(model.optimizer.state[model.region_translation],region_state)
+        torch.testing.assert_close(before_logits,model.gate_logits,rtol=0,atol=0)
+        p,_=model(151,training=True)
+        (p.square().mean()+model.regularization_loss(151)).backward();model.optimizer_step()
+        new_state=model.optimizer.state[model.gate_logits]
+        self.assertEqual(int(new_state['step']),1)
+        model.prepare_plan_step(151)
+        self.assertIs(model.optimizer.state[model.gate_logits],new_state)
+        packet=copy.deepcopy(model.capture())
+        restored=SpatialGatedMotion(copy.deepcopy(model.config));restored.restore(packet)
+        restored.prepare_plan_step(152)
+        self.assertEqual(int(restored.optimizer.state[restored.gate_logits]['step']),1)
+
 
 class FramePlanBirthTests(unittest.TestCase):
     @classmethod

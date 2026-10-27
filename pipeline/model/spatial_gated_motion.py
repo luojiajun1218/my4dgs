@@ -143,11 +143,24 @@ class SpatialGatedMotion(MotionBase):
         return self.config.spatial_gate.shared_discovery and (
             self.last_step <= 100 if self.config.spatial_gate.frame_training_plan else not self._hard_gate_frozen)
 
+    @property
+    def refining_unselected_candidates(self):
+        cfg=self.config.spatial_gate
+        return (cfg.frame_training_plan and cfg.refine_unselected_candidates and
+                cfg.candidate_refinement_start_step <= self.last_step <= 180)
+
     @torch.no_grad()
     def prepare_plan_step(self, step):
         if not self.config.spatial_gate.frame_training_plan:
             return
+        previous_step=self.last_step
         self.last_step = int(step)
+        if (self.config.spatial_gate.reset_gate_optimizer_on_refine and
+                previous_step < 151 <= self.last_step <= 180):
+            # The gate now prices an existing full-motion representation,
+            # rather than fitting the first shared-only images. Its old
+            # image moments must not govern this different objective.
+            self.optimizer.state.pop(self.gate_logits,None)
         gate = step <= 100 or 151 <= step <= 180
         self._hard_gate_frozen = not gate
         for parameter, enabled in ((self.gate_logits, gate),
@@ -652,7 +665,8 @@ class SpatialGatedMotion(MotionBase):
             self.region_rotation.grad = None
             return
         support = support.clone()
-        if self._hard_gate_frozen or (self._coding_initialized and not self.joint_training):
+        if ((self._hard_gate_frozen and not self.refining_unselected_candidates) or
+                (self._coding_initialized and not self.joint_training)):
             support &= self._stored_region_support()
         for parameter in (self.region_translation, self.region_rotation):
             if parameter.grad is not None:
@@ -662,7 +676,7 @@ class SpatialGatedMotion(MotionBase):
                 if key in state:
                     state[key].mul_(support[:, None])
             if (self.shared_image_recode and self.joint_image_gradients and
-                    not self._hard_gate_frozen and parameter.grad is not None and
+                    (not self._hard_gate_frozen or self.refining_unselected_candidates) and parameter.grad is not None and
                     'exp_avg' in state):
                 # These predictors fit only actual main/auxiliary images.
                 # A sampled-out row must not move on its old velocity; retain
@@ -1126,11 +1140,9 @@ class SpatialGatedMotion(MotionBase):
         # The probability a candidate is selected is the same for every point
         # it covers. Recover it by averaging their path weights, not by charging
         # a region once for each GS.
-        refine_closed = (self.config.spatial_gate.refine_unselected_candidates and
-                         self.config.spatial_gate.frame_training_plan and
-                         not self.shared_discovery_active)
+        refine_closed = self.refining_unselected_candidates
         if (self.relative_regions and (not self.joint_image_gradients or refine_closed)
-                and not self._hard_gate_frozen):
+                and (not self._hard_gate_frozen or refine_closed)):
             # Closed candidates fit the required correction even when an
             # ancestor is hard closed. This loss cannot train the gate, GS,
             # or parent target; only the candidate's own correction changes.

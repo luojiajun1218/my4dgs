@@ -44,12 +44,21 @@ class SpatialGateConfig:
     shared_discovery: bool = False
     frame_training_plan: bool = False
     refine_unselected_candidates: bool = False
+    candidate_refinement_start_step: int = 151
+    reset_gate_optimizer_on_refine: bool = False
 
     def validate(self, motion_steps):
         if not isinstance(self.refine_unselected_candidates, bool):
             raise ValueError('refine_unselected_candidates must be boolean')
         if self.refine_unselected_candidates and not self.frame_training_plan:
             raise ValueError('Unselected-candidate refinement requires the frame training plan')
+        if (isinstance(self.candidate_refinement_start_step, bool) or
+                not isinstance(self.candidate_refinement_start_step,int) or
+                self.candidate_refinement_start_step not in (101,151)):
+            raise ValueError('Candidate refinement starts at step101 or151')
+        if (not isinstance(self.reset_gate_optimizer_on_refine, bool) or
+                (self.reset_gate_optimizer_on_refine and not self.frame_training_plan)):
+            raise ValueError('Gate optimizer restart requires the frame training plan')
         if self.frame_training_plan and (self.training_schedule != 'joint' or
                 not self.shared_discovery or self.freeze_step != 180 or
                 self.gate_start_step != 0 or motion_steps != 200):
