@@ -341,6 +341,29 @@ class FramePlanBirthTests(unittest.TestCase):
                 self.assertTrue(model.cohorts[0]['parameters']['_opacity'].grad.isfinite().all())
         self.assertTrue((results[False]==0).all())
 
+    def test_storage_alone_can_retire_unneeded_logit_births_in_both_lifetimes(self):
+        raw=reference_raw();cfg=BirthConfig(rotation_updates=True,survival_aware_storage=True)
+        seed={key:value[[1,2]].clone() for key,value in raw.items()}
+        seed['opacity']=torch.logit(torch.tensor([[.05],[.285]]))
+        args=GaussianConfig(opacity_lr=.06)
+        for birth_step in (200,250):
+            with self.subTest(birth=birth_step):
+                optimizer=torch.optim.Adam([torch.nn.Parameter(torch.tensor(0.))])
+                model=FramePlanBirthModel(1,logit_opacity=True)
+                model.add(seed,torch.tensor([1,2]),torch.tensor([1,2]),birth_step,optimizer,args)
+                for step in range(birth_step+1,301):
+                    model.set_rates(step,args,.1);optimizer.zero_grad(set_to_none=True)
+                    view=QuantizedNewGaussianView(model,cfg,2.,raw,model.source_rows)
+                    newborn_storage_terms(view)['surrogate_bytes'].backward()
+                    optimizer.step();model.project_parameters()
+                    if step==birth_step+1:
+                        self.assertTrue((model._opacity>.01).all(),'No one-step disappearance')
+                final=QuantizedNewGaussianView(model,cfg,2.,raw,model.source_rows)
+                self.assertTrue((final.get_opacity<.01).all(),'No image demand: byte price must permit actual exit')
+                self.assertTrue((final.get_opacity>0).all())
+                state=optimizer.state[model.cohorts[0]['parameters']['_opacity']]
+                self.assertEqual(int(state['step']),300-birth_step)
+
 
 class FramePlanControllerTests(unittest.TestCase):
     @classmethod

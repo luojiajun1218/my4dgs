@@ -92,7 +92,11 @@ class FramePlanBirthModel:
     def set_rates(self, step, args, ratio):
         rates = dict(_xyz=args.position_lr_init*self.spatial_lr_scale,
                      _rotation=args.rotation_lr, _scaling=args.scaling_lr,
-                     _opacity=args.opacity_lr, _features_dc=args.feature_lr,
+                     # Preserve the probability-carrier rate's local scale at
+                     # alpha=.5: d sigmoid / d logit = 1/4 there. Merely using
+                     # the same numeric logit rate can leave unused late
+                     # births unable to reach the deletion threshold in50steps.
+                     _opacity=args.opacity_lr*(4 if self.logit_opacity else 1), _features_dc=args.feature_lr,
                      _features_rest=args.feature_lr/20)
         for index, batch in enumerate(self.cohorts):
             start = batch['birth_step']
