@@ -16,8 +16,16 @@ trainer:
   saving_ckpt_frames:
   - 1
   - 29
+  - 59
+  - 89
   - 99
+  - 119
+  - 149
+  - 179
   - 199
+  - 209
+  - 239
+  - 269
   - 299
   saving_ckpt_every_n_frames: 1000
   stage_image_camera: cam00.png
