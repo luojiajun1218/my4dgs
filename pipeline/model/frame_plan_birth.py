@@ -14,13 +14,14 @@ from .conservative_family import _clone_tree
 
 class FramePlanBirthModel:
     independent_birth = True
-    probability_alpha = True
+    probability_alpha = True  # Public physical-alpha view; optimizer may own logits.
     early_quantized_raw = None
 
-    def __init__(self, sh_degree=1, device='cpu'):
+    def __init__(self, sh_degree=1, device='cpu', *, logit_opacity=False):
         self.max_sh_degree = self.active_sh_degree = sh_degree
         self.spatial_lr_scale = 1.
         self.device = torch.device(device)
+        self.logit_opacity = bool(logit_opacity)
         self.cohorts = []
         self.source_rows = torch.empty(0, dtype=torch.long, device=device)
         self.parent_rows = self.source_rows.clone()  # initialization lineage only
@@ -29,7 +30,8 @@ class FramePlanBirthModel:
 
     def _cat(self, attr):
         if self.cohorts:
-            return torch.cat([batch['parameters'][attr] for batch in self.cohorts])
+            value = torch.cat([batch['parameters'][attr] for batch in self.cohorts])
+            return value.sigmoid() if attr == '_opacity' and self.logit_opacity else value
         shape = dict(_xyz=(3,), _rotation=(4,), _scaling=(3,), _opacity=(1,),
                      _features_dc=(1, 3), _features_rest=((self.max_sh_degree+1)**2-1, 3))[attr]
         return torch.empty((0, *shape), device=self.device)
@@ -47,8 +49,9 @@ class FramePlanBirthModel:
     def birth_parameter_values(self):
         opacity=[]
         for batch in self.cohorts:
-            alpha=batch['parameters']['_opacity'].clamp(0,1)
-            logits=_logits(alpha)
+            parameter=batch['parameters']['_opacity']
+            alpha=parameter.sigmoid() if self.logit_opacity else parameter.clamp(0,1)
+            logits=parameter if self.logit_opacity else _logits(alpha)
             # sigmoid(quantized logit) may round to one in float32. Preserve
             # its finite coded logit while the probability carrier is pristine;
             # converting one back to +100 would silently reinitialize alpha.
@@ -70,7 +73,7 @@ class FramePlanBirthModel:
             raise ValueError('Frame-plan births require aligned finite raw attributes and references')
         self.optimizer = optimizer
         cohort = dict(birth_step=step, parameters={attr: nn.Parameter(
-            (raw[name].sigmoid() if name == 'opacity' else raw[name]).detach().clone())
+            (raw[name].sigmoid() if name == 'opacity' and not self.logit_opacity else raw[name]).detach().clone())
             for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES)})
         cohort['opacity_reference']=raw['opacity'].detach().clone()
         cohort['alpha_reference']=raw['opacity'].sigmoid().detach().clone()
@@ -132,7 +135,7 @@ class FramePlanBirthModel:
             count = len(batch['parameters']['_xyz'])
             for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
                 value = raw[name][offset:offset+count]
-                batch['parameters'][attr].copy_(value.sigmoid() if name == 'opacity' else value)
+                batch['parameters'][attr].copy_(value.sigmoid() if name == 'opacity' and not self.logit_opacity else value)
             batch['opacity_reference']=raw['opacity'][offset:offset+count].detach().clone()
             batch['alpha_reference']=raw['opacity'][offset:offset+count].sigmoid().detach().clone()
             offset += count
@@ -140,7 +143,10 @@ class FramePlanBirthModel:
     @torch.no_grad()
     def project_parameters(self):
         for batch in self.cohorts:
-            batch['parameters']['_opacity'].clamp_(0, 1)
+            if self.logit_opacity:
+                batch['parameters']['_opacity'].clamp_(-100, 100)
+            else:
+                batch['parameters']['_opacity'].clamp_(0, 1)
 
     def capture(self):
         groups = {}
@@ -151,11 +157,13 @@ class FramePlanBirthModel:
                     groups[group['name']] = dict(hyper={k: v for k, v in group.items() if k != 'params'},
                                                 state=self.optimizer.state.get(param, {}))
         return dict(frame_plan_birth=_clone_tree(dict(cohorts=self.cohorts, source_rows=self.source_rows,
-            parent_rows=self.parent_rows, groups=groups, spatial_lr_scale=self.spatial_lr_scale), 'cpu'))
+            parent_rows=self.parent_rows, groups=groups, spatial_lr_scale=self.spatial_lr_scale,
+            logit_opacity=self.logit_opacity), 'cpu'))
 
     def restore(self, packet, optimizer, args, device):
         state = _clone_tree(packet['frame_plan_birth'], device)
         self.device = torch.device(device)
+        self.logit_opacity = bool(state.get('logit_opacity', False))
         self.optimizer = optimizer
         self.spatial_lr_scale = state['spatial_lr_scale']
         self.source_rows, self.parent_rows = state['source_rows'], state['parent_rows']

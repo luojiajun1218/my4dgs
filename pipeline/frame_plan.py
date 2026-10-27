@@ -136,7 +136,8 @@ class FramePlanController:
                 parameter.requires_grad_(False)
                 parameter.grad = None
             self.motion_committed = True
-            self.births = FramePlanBirthModel(self.config.sh_degree, self.device)
+            self.births = FramePlanBirthModel(self.config.sh_degree, self.device,
+                logit_opacity=getattr(self.config.birth,'residual_support_init',False))
             self.births.spatial_lr_scale = self.gaussians.spatial_lr_scale
             self.births.active_sh_degree = self.gaussians.active_sh_degree
             self.early_initialized = True

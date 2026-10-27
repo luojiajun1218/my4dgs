@@ -307,6 +307,40 @@ class FramePlanBirthTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'zero surviving old'):
             nearest_old_references(seed,{k:v[:0] for k,v in raw.items()},2.)
 
+    def test_low_alpha_support_gets_time_to_fit_with_logit_learning_rates(self):
+        raw=reference_raw();cfg=BirthConfig(rotation_updates=True,survival_aware_storage=True)
+        args=GaussianConfig(opacity_lr=.06)
+        seed={k:v[[1,2]].clone() for k,v in raw.items()}
+        seed['opacity']=torch.logit(torch.full_like(seed['opacity'],.05))
+        results={}
+        for logit in (False,True):
+            optimizer=torch.optim.Adam([torch.nn.Parameter(torch.tensor(0.))])
+            model=FramePlanBirthModel(1,logit_opacity=logit)
+            model.add(seed,torch.tensor([1,2]),torch.tensor([1,2]),200,optimizer,args)
+            model.set_rates(201,args,.1)
+            view=QuantizedNewGaussianView(model,cfg,2.,raw,model.source_rows)
+            initial=view.get_opacity.detach().clone()
+            # A positive finite alpha gradient is normal for a not-yet-fitted
+            # seed; the old probability step erases it in one Adam update.
+            view.get_opacity.sum().backward();optimizer.step();model.project_parameters()
+            results[logit]=model._opacity.detach().clone()
+            if logit:
+                self.assertTrue((model._opacity>.01).all())
+                self.assertTrue((model._opacity<initial).all())
+                state=model.capture();restored=FramePlanBirthModel(1).restore(state,
+                    torch.optim.Adam([torch.nn.Parameter(torch.tensor(0.))]),args,'cpu')
+                self.assertTrue(restored.logit_opacity)
+                torch.testing.assert_close(restored._opacity,model._opacity,rtol=0,atol=0)
+                fitted=QuantizedNewGaussianView(model,cfg,2.,raw,model.source_rows)
+                actual={name:fitted.raw_value(name).detach().clone() for name in RAW_FIELDS}
+                model.set_actual(actual)
+                again=QuantizedNewGaussianView(model,cfg,2.,raw,model.source_rows)
+                for name in RAW_FIELDS:torch.testing.assert_close(again.raw_value(name),actual[name],rtol=0,atol=0)
+                optimizer.zero_grad(set_to_none=True)
+                loss=newborn_storage_terms(again)['surrogate_bytes'];loss.backward()
+                self.assertTrue(model.cohorts[0]['parameters']['_opacity'].grad.isfinite().all())
+        self.assertTrue((results[False]==0).all())
+
 
 class FramePlanControllerTests(unittest.TestCase):
     @classmethod

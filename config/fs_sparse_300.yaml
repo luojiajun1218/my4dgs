@@ -1,4 +1,4 @@
-# Residual support seeds; keep old-alpha sparse byte pressure through step300.
+# Residual support seeds, logit newborn alpha, full-phase old-alpha sparsity.
 output_dir: /home/gamer-02/Documents/DeepLearning/my4dgs/output/flame_steak_1027
 experiment_name: fs_sparse_300
 mode: train
