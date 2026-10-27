@@ -1,6 +1,6 @@
 # 每帧训练与 GS 新增、删除计划
 
-状态：**初版、候选预备、存活计费与码率反馈扩展均已完成30帧；后者准备续跑300帧。** 当前配置为 `config/fs_rate_30.yaml`，300帧使用 `config/fs_rate_300.yaml`；`fs_plan`、`fs_ready` 配置保留对应已完成版本。均通过 `birth.frame_training_plan` 和 `rigid_tree.spatial_gate.frame_training_plan` 启用本训练流程，v19 配置保留原流程。新点局部坐标初始化的实现错误已单独修复，不作为方法改进。结果分别记录在 `docs/experiment/`，本文维护实施计划。
+状态：**初版、候选预备、存活计费与码率反馈扩展均已完成30帧；后者正在续跑300帧。** 短配置为 `config/fs_rate_30.yaml`，300帧使用 `config/fs_rate_300.yaml`；`fs_plan`、`fs_ready` 配置保留对应已完成版本。均通过 `birth.frame_training_plan` 和 `rigid_tree.spatial_gate.frame_training_plan` 启用本训练流程，v19 配置保留原流程。新点局部坐标初始化的实现错误已单独修复，不作为方法改进。结果分别记录在 `docs/experiment/`，本文维护实施计划。
 
 ## 目标与已有依据
 
