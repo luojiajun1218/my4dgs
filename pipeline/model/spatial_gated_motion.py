@@ -1208,7 +1208,7 @@ class SpatialGatedMotion(MotionBase):
             # Free point motion supplies proposals, not transmitted parameters.
             ramp = 0.
         rate = soft_bytes / self.rate_normalization_bytes
-        result = dict(rate_loss=rate * self.config.rate_loss_weight * ramp,
+        result = dict(rate_loss=rate * self.effective_rate_loss_weight * ramp,
             relative_motion_loss=relative * self.config.relative_motion_loss_weight * ramp,
             rate_bytes_surrogate=soft_bytes, rate_fraction=rate, relative_motion=relative)
         if self.joint_image_gradients or self.relative_regions or self.shared_image_recode:
@@ -1219,7 +1219,7 @@ class SpatialGatedMotion(MotionBase):
             result.update(self._support_diagnostics(probabilities))
             result.update(rate_bytes_hard=self._hard_motion_bytes() + self._metadata_bytes(),
                 rate_normalization_gs_count=self.base_xyz.new_tensor(self.rate_normalization_count),
-                rate_byte_price=self.base_xyz.new_tensor(self.config.rate_loss_weight * ramp / self.rate_normalization_bytes))
+                rate_byte_price=self.base_xyz.new_tensor(self.effective_rate_loss_weight * ramp / self.rate_normalization_bytes))
             if codec:
                 result.update(rate_bytes_raw=result['rate_bytes_hard'],
                               rate_bytes_hard=self.base_xyz.new_tensor(codec_bytes),
@@ -1266,7 +1266,7 @@ class SpatialGatedMotion(MotionBase):
         result = dict(rate_loss=zero, relative_motion_loss=zero, candidate_motion_loss=zero)
         state = getattr(self, '_predictor_fit_state', None)
         ramp = min(max((step - self.config.rate_warmup_steps) / self.config.rate_ramp_steps, 0.), 1.)
-        price = self.config.rate_loss_weight * ramp / self.rate_normalization_bytes
+        price = self.effective_rate_loss_weight * ramp / self.rate_normalization_bytes
         if state is not None:
             rt, rr = self._regional_predictions()
             prediction = torch.cat((rt, rr), -1)
@@ -1315,7 +1315,7 @@ class SpatialGatedMotion(MotionBase):
             return np.empty((0, 7), dtype=np.int32)
         row_costs = self._gs_id_lengths.detach().cpu().numpy() + 1
         # Both gate losses have the same ramp, which cancels in this argmin.
-        price = self.config.rate_loss_weight / self.rate_normalization_bytes
+        price = self.effective_rate_loss_weight / self.rate_normalization_bytes
         scales = (self.gs_steps.detach().cpu().numpy().astype(np.float64) /
                   np.array([self.extent] * 3 + [1.] * 3) *
                   self.config.relative_motion_loss_weight / len(self.owner))

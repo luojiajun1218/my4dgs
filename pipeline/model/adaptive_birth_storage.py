@@ -18,14 +18,15 @@ def storage_ramp(step, warmup_steps=20, ramp_steps=70, birth_step=70):
 def newborn_storage_terms(view, threshold=.01):
     """Return byte-scaled surrogate and diagnostics, with STE symbols.
 
-    Continuous probability alpha supplies support gradients even inside a
-    quantization bin; the existing final prune uses the model alpha threshold.
-    s=a/(a+t) does not saturate at the observable deletion threshold. Negative
-    opacity offsets retain their forward price but do not pull alpha upward
-    toward an opaque parent. Their support gradient still encourages removal.
+    The optional survival-aware mode prices the actual decoded-alpha threshold
+    in forward and uses a/(a+t) to differentiate the whole-row exit. Zero
+    attribute differences still pay a surviving point's base. Negative opacity
+    differences keep their forward price without pushing fading points upward.
+    Earlier configurations retain their original support convention.
     """
     alpha=view.model._opacity.clamp(0, 1).flatten()
     support=alpha/(alpha+threshold)
+    survival_aware=getattr(getattr(view,'config',None),'survival_aware_storage',False)
     sources=view.source
     # IDs are discrete lineage metadata, never optimized. This stays on device.
     source_bytes=torch.ones_like(alpha)
@@ -61,7 +62,7 @@ def newborn_storage_terms(view, threshold=.01):
                 value=torch.where((value*view.predictor[name]).sum(-1,keepdim=True)<0,-value,value)
             carrier=(value-view.predictor[name])/view.steps[name]
             symbol=carrier+(symbol-carrier).detach()
-        if name=='opacity' and not getattr(view.model, 'probability_alpha', False):
+        if name=='opacity' and (survival_aware or not getattr(view.model, 'probability_alpha', False)):
             symbol=torch.where(symbol.detach()>=0, symbol, symbol.detach())
         if name in ('xyz','rotation'):
             # Continuous log-length relaxation of zigzag uvarints. Actual
@@ -73,9 +74,13 @@ def newborn_storage_terms(view, threshold=.01):
             appearance_extra+=torch.log2(1+symbol.abs()).reshape(count,-1).sum(-1)/8
     weights=getattr(view, 'storage_row_weights', torch.ones_like(support))
     if getattr(view.model, 'probability_alpha', False):
-        # Attribute coding pressure and deletion pressure are separate. A zero
-        # difference means "same as reference", not transparent/deleted.
-        support=torch.ones_like(support)
+        if survival_aware:
+            # Final cleanup omits this whole row only when physical alpha is
+            # below threshold. Zero attribute differences still pay its base.
+            alive=view.get_opacity.flatten().detach().ge(threshold).to(alpha)
+            support=alive+(support-support.detach())
+        else:
+            support=torch.ones_like(support)
     support=support*weights
     raw=(support*(base+pose_extra+appearance_extra)).sum()
     return dict(surrogate_bytes=raw, support_points=support.sum(),

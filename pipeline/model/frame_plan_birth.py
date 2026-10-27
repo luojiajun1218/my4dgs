@@ -62,6 +62,12 @@ class FramePlanBirthModel:
     def add(self, raw, parents, references, step, optimizer, args):
         if not len(parents):
             return
+        count=len(parents)
+        shapes=dict(xyz=(count,3),rotation=(count,4),logscale=(count,3),opacity=(count,1),
+                    sh_dc=(count,1,3),sh_rest=(count,(self.max_sh_degree+1)**2-1,3))
+        if (len(references)!=count or any(raw[name].shape!=shape or not bool(torch.isfinite(raw[name]).all())
+                                         for name,shape in shapes.items())):
+            raise ValueError('Frame-plan births require aligned finite raw attributes and references')
         self.optimizer = optimizer
         cohort = dict(birth_step=step, parameters={attr: nn.Parameter(
             (raw[name].sigmoid() if name == 'opacity' else raw[name]).detach().clone())

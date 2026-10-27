@@ -33,6 +33,9 @@ class RigidTreeConfig:
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
+    target_update_bytes: int = 0
+    rate_controller_gain: float = 0.25
+    max_rate_multiplier: float = 64.0
     differentiable_rate_support: bool = False
     sparse_rate_width_bins: float = 1.0
     proximal_gs_regularization: bool = False
@@ -56,6 +59,17 @@ class RigidTreeConfig:
 
     def validate(self):
         self.spatial_gate.validate(self.motion_steps)
+        if (isinstance(self.target_update_bytes,bool) or not isinstance(self.target_update_bytes,int)
+                or self.target_update_bytes < 0):
+            raise ValueError('target_update_bytes must be a nonnegative integer')
+        if self.target_update_bytes and (not self.spatial_gate.frame_training_plan or self.rate_loss_weight <= 0):
+            raise ValueError('Actual-byte feedback needs the frame plan and a positive base rate weight')
+        for name,minimum in (('rate_controller_gain',0.),('max_rate_multiplier',1.)):
+            value=getattr(self,name)
+            if (isinstance(value,bool) or not isinstance(value,(int,float)) or
+                    not math.isfinite(value) or value < minimum or
+                    (name=='rate_controller_gain' and value==0)):
+                raise ValueError(f'{name} has an invalid finite positive value')
         if not isinstance(self.rotation_updates, bool):
             raise ValueError('rotation_updates must be boolean')
         if (isinstance(self.amplitude_refit_steps, bool) or
@@ -399,6 +413,10 @@ class MotionBase(nn.Module):
     def rate_normalization_bytes(self):
         return max(1, self.rate_normalization_count * 24)
 
+    @property
+    def effective_rate_loss_weight(self):
+        return self.config.rate_loss_weight*getattr(self,'rate_multiplier',1.)
+
 
     def materialized_pose(self, step=None):
         return self.forward(self.motion_steps if step is None else step)
@@ -431,7 +449,7 @@ class MotionBase(nn.Module):
         normalized by raw six-float motion bytes. A region starts at row one
         because the identity root never carries a stored motion block.
         """
-        if self.config.rate_loss_weight == 0:
+        if self.effective_rate_loss_weight == 0:
             return 0, 0
         ramp = min(max((self.last_step - self.config.rate_warmup_steps) /
                        self.config.rate_ramp_steps, 0.), 1.)
@@ -459,7 +477,7 @@ class MotionBase(nn.Module):
         active_t = _integer(residual_t, step_t).ne(0).any(-1)
         active_r = _integer(residual_r, step_r).ne(0).any(-1)
         index_cost = id_lengths + 1
-        price = self.config.rate_loss_weight * ramp / self.rate_normalization_bytes
+        price = self.effective_rate_loss_weight * ramp / self.rate_normalization_bytes
         if block_bytes is None:
             both = (active_t | active_r).to(index_cost) * index_cost + 6 * (active_t.to(index_cost) + active_r.to(index_cost))
             only_t = active_t.to(index_cost) * (index_cost + 6)
@@ -560,6 +578,7 @@ class MotionBase(nn.Module):
                  'pending_birth_sources', 'observations')
         tensors = {name: getattr(self, name, None) for name in names}
         return dict(config=asdict(self.config), tensors=tensors,
+                    rate_multiplier=getattr(self,'rate_multiplier',1.),
                     rate_reference_count=self.rate_reference_count,
                     frame_index=self.frame_index, extent=self.extent,
                     parameters={name: parameter.detach().clone() for name, parameter in
@@ -586,6 +605,11 @@ class MotionBase(nn.Module):
             raise ValueError('Retired motion checkpoints can be replayed, but cannot resume spatial training')
         if saved_config_with_default_motion_lr(packet['config']) != asdict(self.config):
             raise ValueError('Spatial motion checkpoint configuration differs')
+        self.rate_multiplier=float(packet.get('rate_multiplier',1.))
+        if (not math.isfinite(self.rate_multiplier) or self.rate_multiplier < 1 or
+                (self.rate_multiplier > self.config.max_rate_multiplier and
+                 not math.isclose(self.rate_multiplier,self.config.max_rate_multiplier,rel_tol=1e-12))):
+            raise ValueError('Invalid saved rate multiplier')
         from .rigid_tree_codec import DecodedState
         state = packet['codec_previous_state']
         self.codec_previous_state = None if state is None else DecodedState.restore(state)

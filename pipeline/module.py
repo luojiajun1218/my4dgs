@@ -190,6 +190,7 @@ class BirthConfig:
     initial_alpha: Optional[float] = None
     alpha_sparsity_weight: float = 0.0
     storage_loss_enabled: bool = False
+    survival_aware_storage: bool = False
     storage_loss_strength: float = 1.0
     storage_warmup_steps: int = 20
     storage_ramp_steps: int = 70
@@ -210,8 +211,10 @@ class BirthConfig:
         if self.radiance_mode not in ('free','inherited_intrinsic','conservative_detail','surface_patch','support_reincarnation','dual_predictive_reincarnation','source_residual','quick_source_residual','shadow_source_residual','persistent_anchored_newborn','early_source_replacement','adaptive_residual_birth'):
             raise ValueError('Unknown newborn radiance mode')
         self.residual.validate()
-        for name in ('storage_loss_enabled','residual_colour_init','joint_old_opacity'):
+        for name in ('storage_loss_enabled','survival_aware_storage','residual_colour_init','joint_old_opacity'):
             if not isinstance(getattr(self,name),bool):raise ValueError(f'birth.{name} must be boolean')
+        if self.survival_aware_storage and not (self.frame_training_plan and self.storage_loss_enabled):
+            raise ValueError('Survival-aware storage requires the frame plan with newborn storage enabled')
         for name in ('storage_loss_strength','residual_colour_gain','residual_colour_max_rgb_delta'):
             value=getattr(self,name)
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:
@@ -588,6 +591,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.early_initialized=False
         self.early_birth_updates=0
         self.early_shared_steps=0
+        self._rate_budget_state=None
         self.early_selected=None
         self.early_pinned_rows=None
         self.early_pinned_values=None
@@ -619,6 +623,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         ckpt['motion_image_schedule'] = MOTION_IMAGE_SCHEDULE
         ckpt['rigid_tree_version'] = 1
         ckpt['rigid_tree_config'] = asdict(self.config.rigid_tree)
+        ckpt['rate_budget_controller'] = BirthTransaction.tensor_tree(getattr(self,'_rate_budget_state',None),'cpu')
         ckpt['rigid_tree_module_config'] = asdict(self.config)
         ckpt['rigid_tree_initial_reference'] = self.initial_reference
         ckpt['gaussians'] = self.gaussians.capture()
@@ -687,6 +692,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 plan_events=getattr(self,'_plan_events',[])),'cpu')
 
     def on_load_checkpoint(self, ckpt):
+        self._rate_budget_state=ckpt.get('rate_budget_controller')
         self.gaussians.restore(ckpt['gaussians'], self.config.gaussian)
         self.renderer.gaussians = self.gaussians
         version = ckpt.get('rigid_tree_version')
@@ -698,6 +704,12 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.reference_count = self.initial_reference['retained_count']
             self._freeze_base()
             return
+        if (getattr(self.config.rigid_tree,'target_update_bytes',0) and
+                ckpt.get('current_frame',0)>=1 and self._rate_budget_state is None):
+            raise ValueError('Budget-controlled checkpoint lost its controller state')
+        if self._rate_budget_state is not None:
+            from .model.rate_budget import RateBudgetState
+            RateBudgetState.restore(self._rate_budget_state,self.config.rigid_tree.max_rate_multiplier)
         allocation = birth_allocation(self.config)
         if (ckpt.get('current_frame', 0) >= 1 and
                 ckpt.get('birth_allocation', 'clone_small_v1') != allocation):
@@ -882,6 +894,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         xyz, rotation = self.gaussians._xyz.detach(), self.gaussians._rotation.detach()
         if previous_rows is None and self.current_frame > 1:
             previous_rows = torch.arange(len(xyz), device=xyz.device)
+        if getattr(self.config.birth,'frame_training_plan',False):
+            self._plan_setup_rate_budget()
         self.motion.setup(xyz, rotation, self.datamodule.cameras_extent,
                           frame_index=self.current_frame, previous_rows=previous_rows)
         self.frame_prepared = True
@@ -1214,7 +1228,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def _rate_byte_price(self, step):
         cfg = self.config.rigid_tree
         ramp = min(max((step - cfg.rate_warmup_steps) / cfg.rate_ramp_steps, 0.), 1.)
-        return cfg.rate_loss_weight * ramp / self.motion.rate_normalization_bytes
+        weight=getattr(self.motion,'effective_rate_loss_weight',cfg.rate_loss_weight)
+        return weight * ramp / self.motion.rate_normalization_bytes
 
     @torch.no_grad()
     def _step_feature_dc(self, step):

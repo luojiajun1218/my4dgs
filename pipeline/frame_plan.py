@@ -10,9 +10,32 @@ from .model.early_replacement_model import _rotate
 from .model.residual_birth import RawView
 from .model.support_reincarnation_proposal import _native_responsibility, _sample
 from .model.adaptive_birth_storage import newborn_storage_terms
+from .model.rate_budget import RateBudgetState
 
 
 class FramePlanController:
+    def _plan_setup_rate_budget(self):
+        cfg=self.config.rigid_tree
+        if not cfg.target_update_bytes:
+            self.motion.rate_multiplier=1.
+            return
+        state=RateBudgetState.restore(getattr(self,'_rate_budget_state',None),cfg.max_rate_multiplier)
+        if self.current_frame!=state.last_frame+1:
+            raise ValueError('Frame budget state does not precede the current frame')
+        self.motion.rate_multiplier=state.multiplier
+        self._rate_budget_state=state.capture()
+
+    def _plan_update_rate_budget(self):
+        cfg=self.config.rigid_tree
+        if not cfg.target_update_bytes:
+            return
+        state=RateBudgetState.restore(self._rate_budget_state,cfg.max_rate_multiplier)
+        report=state.update(int(self.current_frame),int(self.frame_report['encoded_bytes']),
+            cfg.target_update_bytes,cfg.rate_controller_gain,cfg.max_rate_multiplier)
+        report['effective_rate_weight']=self.motion.effective_rate_loss_weight
+        self.frame_report['rate_budget']=report
+        self._rate_budget_state=state.capture()
+
     def frame_plan_training_views(self, step, count):
         # Existing per-frame cache loads training images once; it does not render them.
         cached = self.transaction_camera_views()
@@ -267,13 +290,13 @@ class FramePlanController:
             ramps.append(view.source.new_full((len(batch['parameters']['_xyz']),), ramp, dtype=view.get_xyz.dtype))
         view.storage_row_weights = torch.cat(ramps)
         terms = newborn_storage_terms(view, self.config.birth.opacity_threshold)
-        price = self.config.birth.storage_loss_strength*self.config.rigid_tree.rate_loss_weight/self.motion.rate_normalization_bytes
+        price = self.config.birth.storage_loss_strength*self._rate_byte_price(step)
         loss = terms['surrogate_bytes']*price
         return loss, {**{f'birth_storage_{name}': value.detach() for name, value in terms.items()},
                       'birth_storage_loss': loss.detach()}
 
     def _plan_population_regularization(self, step):
-        # Separate physical occupancy pressure from attribute-difference cost.
+        # Uniform representation pressure complements survival-priced bytes.
         # The same a/(a+.01) penalty applies to old/new decoded alpha.
         old = self.opacity_update.alphas().flatten()
         view = self.make_birth_view(reference=self._adaptive_reference()) if self.early_initialized else None
@@ -297,3 +320,4 @@ class FramePlanController:
             actual_birth_cohorts=len(self.births.cohorts),
             birth_updates_by_cohort=[300-batch['birth_step'] for batch in self.births.cohorts])
         self.finalize_frame()
+        self._plan_update_rate_budget()

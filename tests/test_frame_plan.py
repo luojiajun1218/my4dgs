@@ -41,7 +41,7 @@ def motion_fixture():
     return model
 
 
-def controller_fixture(directory):
+def controller_fixture(directory,budget=False):
     m, views = early_controller_fixture(directory)
     m.config.birth.frame_training_plan = True
     m.config.birth.radiance_mode = 'adaptive_residual_birth'
@@ -57,6 +57,7 @@ def controller_fixture(directory):
     m.config.lambda_dssim = .2
     motion = motion_fixture()
     cfg = motion.config
+    cfg.target_update_bytes=100 if budget else 0
     m.config.rigid_tree = cfg
     m.motion = SpatialGatedMotion(cfg)
     m.motion.setup(m.gaussians._xyz, m.gaussians._rotation, 1., frame_index=1)
@@ -81,6 +82,7 @@ def controller_fixture(directory):
     m.prepare_frame = lambda: None
     m.pre_training_step = MethodType(Module.pre_training_step, m)
     m._early_attach_opacity()
+    m._plan_setup_rate_budget()
     return m, views
 
 
@@ -402,7 +404,7 @@ class FramePlanPersistenceTests(unittest.TestCase):
         from scripts.replay_rigid_tree import decode_frame
         from pipeline.model.birth_quantization import reference_digest
         with tempfile.TemporaryDirectory() as directory, patch.object(BirthGaussianModel,'training_setup',cpu_gaussian_setup):
-            m,_=controller_fixture(directory)
+            m,_=controller_fixture(directory,budget=True)
             checkpoint_harness(m)
             initial=model_raw(m.gaussians)
             prior=copy.deepcopy(m.motion.frame_reference_state)
@@ -433,7 +435,7 @@ class FramePlanPersistenceTests(unittest.TestCase):
                     import io
                     stream=io.BytesIO();torch.save(packet,stream);stream.seek(0)
                     packet=torch.load(stream,weights_only=False)
-                    clone,_=controller_fixture(directory)
+                    clone,_=controller_fixture(directory,budget=True)
                     checkpoint_harness(clone)
                     Module.on_load_checkpoint(clone,packet)
                     self.assertEqual(clone._plan_used_quota,m._plan_used_quota)
@@ -473,6 +475,15 @@ class FramePlanPersistenceTests(unittest.TestCase):
             self.assertEqual(manifest['birth_events'],[200,250])
             self.assertEqual(m.frame_report['retired_count'],3)
             self.assertEqual(m.frame_report['birth_count'],4)
+            self.assertEqual(m._rate_budget_state['last_frame'],1)
+            self.assertGreater(m.frame_report['rate_budget']['next_multiplier'],1.)
+            self.assertEqual(m.motion.rate_multiplier,1.)
+            checkpoint={"current_frame":1,"global_step":300}
+            Module.on_save_checkpoint(m,checkpoint)
+            resumed,_=controller_fixture(directory,budget=True)
+            checkpoint_harness(resumed)
+            Module.on_load_checkpoint(resumed,copy.deepcopy(checkpoint))
+            self.assertEqual(resumed._rate_budget_state,m._rate_budget_state)
             self.assertEqual(m.frame_report['complete_dynamic_update_bytes'],sum(
                 p.stat().st_size for p in stream_dir.iterdir() if p.suffix in ('.bin','.json')))
             # Previous newborns now become ordinary old rows; new frame has
@@ -484,6 +495,7 @@ class FramePlanPersistenceTests(unittest.TestCase):
             self.assertFalse(m.motion.gs_translation.requires_grad)
             self.assertTrue((m.motion.gs_translation==0).all())
             self.assertEqual(len(m.motion.optimizer.state),0)
+            self.assertGreater(m.motion.rate_multiplier,1.)
 
 
 if __name__=='__main__':unittest.main()

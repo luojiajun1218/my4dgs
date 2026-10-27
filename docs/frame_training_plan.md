@@ -1,6 +1,6 @@
 # 每帧训练与 GS 新增、删除计划
 
-状态：**已实现独立开关与配置，尚未运行场景训练实验。** 使用 `config/fs_plan_30.yaml` 先跑 30 帧，另备 `config/fs_plan_300.yaml`；两者均通过 `birth.frame_training_plan` 和 `rigid_tree.spatial_gate.frame_training_plan` 启用新流程，v19 配置保持原流程。新点局部坐标初始化的实现错误已单独修复，不作为本计划的方法改进。本文不是实验结果记录。
+状态：**初版及候选预备扩展已完成30帧；当前存活计费与码率反馈扩展待实验验证。** 当前配置为 `config/fs_rate_30.yaml`，另备300帧配置；`fs_plan`、`fs_ready` 配置保留对应已完成版本。均通过 `birth.frame_training_plan` 和 `rigid_tree.spatial_gate.frame_training_plan` 启用本训练流程，v19 配置保留原流程。新点局部坐标初始化的实现错误已单独修复，不作为方法改进。结果分别记录在 `docs/experiment/`，本文维护实施计划。
 
 ## 目标与已有依据
 
@@ -26,7 +26,11 @@
 
 第一阶段区域存储代价保留对 gate 选择的约束；对应区域代价值对区域平移参数的直接梯度沿用当前截断方式。共享平移仍接受图像梯度。第二阶段新增逐点残差与透明度的实际存储代理，需检查各梯度路径及近端更新是否按设计生效，不能只看 loss 数值。
 
-当前实验扩展 `config/fs_ready_30.yaml`（另备300帧配置）保持上述步数：通过 `refine_unselected_candidates: true`、`candidate_refinement_start_step: 101`，在101–180步让未选候选拟合detach后的当前总运动，只更新候选自身相对父区域的偏移；101–150步保持gate固定，先准备可比较的候选。`reset_gate_optimizer_on_refine: true` 在第151步仅重启gate自身Adam，因为其目标已从共享场图像拟合转向已有运动的表示代价；其余参数状态仍保留，重复前向或恢复不能重复重置。未选候选更新不改变当前实际位姿，切换区域仍按差分换算保持量化总运动。该扩展尚待场景实验验证；初版结果见 [完整前30帧记录](experiment/20261028_plan_first30.md)。旧配置默认不启用这些扩展。
+候选预备扩展 `config/fs_ready_30.yaml` 保持上述步数：通过 `refine_unselected_candidates: true`、`candidate_refinement_start_step: 101`，在101–180步让未选候选拟合detach后的当前总运动，只更新候选自身相对父区域的偏移；101–150步保持gate固定，先准备可比较的候选。`reset_gate_optimizer_on_refine: true` 在第151步仅重启gate自身Adam，因为其目标已从共享场图像拟合转向已有运动的表示代价；其余参数状态仍保留，重复前向或恢复不能重复重置。未选候选更新不改变当前实际位姿，切换区域仍按差分换算保持量化总运动。初版结果见 [完整前30帧记录](experiment/20261028_plan_first30.md)。旧配置默认不启用这些扩展。
+
+上述候选扩展已完成30帧，未取得实质码率收益，见 [候选预备记录](experiment/20261028_ready_first30.md)。当前试验配置为 `config/fs_rate_30.yaml`（另备300帧）：`birth.survival_aware_storage` 使新增存活点始终支付基础属性开销，低于实际解码透明度阈值的点按退出计费，并用可微存活代理提供梯度；零属性差分不等于删除。负透明度差分保留前向代价，不再由熵项把淡出的点推回不透明父点。
+
+同时以 `rigid_tree.target_update_bytes: 50000` 反馈完整动态字节数。每帧使用固定的码率倍率，编码完成后按 `log倍率 += 0.25 × log(实际完整字节/50000)` 更新下一帧，倍率限制为1–64；统一作用于运动、旧点透明度及新增属性的字节价格。共享首帧不参与反馈，量化精度不变，测试图像不参与该控制。倍率及累计字节状态随checkpoint保存并支持前缀续跑。它是待验证的带宽反馈机制，不保证在50 KB下保住画质；仍须以完整实验检验。
 
 ## 二、跨帧、阶段与 gate 的状态
 
