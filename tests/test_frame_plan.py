@@ -145,6 +145,37 @@ class FramePlanMotionTests(unittest.TestCase):
         for name in ('region_translation','gs_translation','gate_logits'):
             torch.testing.assert_close(getattr(model,name),getattr(clone,name),rtol=0,atol=0)
 
+    def test_closed_candidates_learn_current_motion_without_changing_rendered_field(self):
+        model=motion_fixture()
+        model.config.spatial_gate.refine_unselected_candidates=True
+        model.prepare_plan_step(151)
+        with torch.no_grad():
+            model.region_translation.zero_()
+            model.gate_logits.fill_(-5.)
+        model._select_frontier(freeze=False)
+        with torch.no_grad():
+            model.gs_translation[:,0]=.02
+        before=model(151,training=False)[0].detach().clone()
+        used=model._stored_region_support()
+        unused=model.node_counts.gt(0)&~used
+        loss=model.loss_terms(151,diagnostics=False)['candidate_motion_loss']
+        self.assertGreater(float(loss),0.)
+        loss.backward()
+        self.assertTrue(model.region_translation.grad[unused].ne(0).any())
+        self.assertFalse(model.region_translation.grad[used].ne(0).any())
+        self.assertIsNone(model.gs_translation.grad)
+        self.assertIsNone(model.gate_logits.grad)
+        model.optimizer.param_groups[0]['lr']=float(model.steps[0])*2
+        model._mask_regional_fit_updates()
+        model.optimizer.step()
+        after=model(151,training=False)[0].detach()
+        torch.testing.assert_close(before,after,rtol=0,atol=0)
+        fitted=model.loss_terms(151,diagnostics=False)['candidate_motion_loss']
+        self.assertLess(float(fitted),float(loss))
+        for step in (100,150,181):
+            model.prepare_plan_step(step)
+            self.assertEqual(float(model.loss_terms(step,diagnostics=False)['candidate_motion_loss']),0.)
+
 
 class FramePlanBirthTests(unittest.TestCase):
     @classmethod

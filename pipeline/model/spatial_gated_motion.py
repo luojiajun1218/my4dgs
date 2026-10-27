@@ -1126,7 +1126,11 @@ class SpatialGatedMotion(MotionBase):
         # The probability a candidate is selected is the same for every point
         # it covers. Recover it by averaging their path weights, not by charging
         # a region once for each GS.
-        if self.relative_regions and not self.joint_image_gradients and not self._hard_gate_frozen:
+        refine_closed = (self.config.spatial_gate.refine_unselected_candidates and
+                         self.config.spatial_gate.frame_training_plan and
+                         not self.shared_discovery_active)
+        if (self.relative_regions and (not self.joint_image_gradients or refine_closed)
+                and not self._hard_gate_frozen):
             # Closed candidates fit the required correction even when an
             # ancestor is hard closed. This loss cannot train the gate, GS,
             # or parent target; only the candidate's own correction changes.

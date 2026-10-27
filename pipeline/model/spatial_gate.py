@@ -43,8 +43,13 @@ class SpatialGateConfig:
     predictor_image_weight: float = 0.
     shared_discovery: bool = False
     frame_training_plan: bool = False
+    refine_unselected_candidates: bool = False
 
     def validate(self, motion_steps):
+        if not isinstance(self.refine_unselected_candidates, bool):
+            raise ValueError('refine_unselected_candidates must be boolean')
+        if self.refine_unselected_candidates and not self.frame_training_plan:
+            raise ValueError('Unselected-candidate refinement requires the frame training plan')
         if self.frame_training_plan and (self.training_schedule != 'joint' or
                 not self.shared_discovery or self.freeze_step != 180 or
                 self.gate_start_step != 0 or motion_steps != 200):
