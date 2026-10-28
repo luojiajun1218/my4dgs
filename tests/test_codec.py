@@ -1674,6 +1674,35 @@ class SequenceAggregationTests(unittest.TestCase):
                 benchmark._actual_frame_storage(stream, 1, manifest, summary,
                                                  11, 'reference_frame0.npz')
 
+    def test_frame_plan_complete_byte_fields_are_checked_without_double_counting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stream=Path(directory)
+            (stream/'motion_001.bin').write_bytes(b'12345')
+            (stream/'opacity_001.bin').write_bytes(b'alpha')
+            manifest=dict(motion='motion_001.bin',birth=None,opacity_update='opacity_001.bin')
+            path=stream/'frame_001.json'
+            path.write_text(json.dumps(manifest,indent=2))
+            size=path.stat().st_size
+            summary=dict(motion=dict(bytes=5),birth=None,opacity_update=dict(archive_bytes=5),
+                packet_bytes=10,manifest_bytes=size,complete_dynamic_update_bytes=10+size,
+                encoded_bytes=10+size,shared_reference_bytes=11,decoder_reference='reference_frame0.npz')
+            measured=benchmark._actual_frame_storage(stream,1,manifest,summary,11,'reference_frame0.npz')
+            self.assertEqual(measured['payload_bytes'],10)
+            self.assertEqual(measured['complete_update_bytes'],10+size)
+            stats=benchmark._summarize_sequence_storage([dict(frame=1,**measured)],11)
+            self.assertEqual(stats['total_reference_and_complete_update_bytes'],11+10+size)
+            for field in ('packet_bytes','manifest_bytes','complete_dynamic_update_bytes','encoded_bytes'):
+                with self.subTest(field=field):
+                    bad=dict(summary);bad[field]+=1
+                    with self.assertRaisesRegex(ValueError,'storage summary'):
+                        benchmark._actual_frame_storage(stream,1,manifest,bad,11,'reference_frame0.npz')
+            bad=dict(summary);del bad['packet_bytes']
+            with self.assertRaisesRegex(ValueError,'storage summary'):
+                benchmark._actual_frame_storage(stream,1,manifest,bad,11,'reference_frame0.npz')
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError,'storage summary'):
+                benchmark._actual_frame_storage(stream,1,manifest,summary,11,'reference_frame0.npz')
+
     def test_historical_rows_cannot_silently_claim_zero_index_bytes(self):
         row = frame_row(1, 1., 34., motion_bytes=50000)
         summary = benchmark._summarize_sequence_storage([row], reference_bytes=11)

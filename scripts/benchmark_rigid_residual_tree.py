@@ -493,9 +493,19 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
     saved_opacity = summary['opacity_update']['archive_bytes'] if summary.get('opacity_update') else 0
     saved_feature = summary['feature_dc_update']['archive_bytes'] if summary.get('feature_dc_update') else 0
     payload = motion_bytes + birth_bytes + opacity_bytes + feature_bytes
+    complete = payload + manifest_index_bytes
+    # Frame-plan summaries explicitly include the manifest in encoded_bytes.
+    # Historical summaries use that name for payload only. Validate every
+    # modern accounting field, preserving the benchmark's legacy payload key.
+    modern = ('packet_bytes', 'manifest_bytes', 'complete_dynamic_update_bytes')
+    has_complete_accounting = any(name in summary for name in modern)
+    valid_accounting = (all(name in summary for name in modern) and
+        summary['packet_bytes'] == payload and summary['manifest_bytes'] == manifest_index_bytes and
+        summary['complete_dynamic_update_bytes'] == complete and summary['encoded_bytes'] == complete
+        if has_complete_accounting else summary['encoded_bytes'] == payload)
     if (saved_motion != motion_bytes or saved_birth != birth_bytes or saved_opacity != opacity_bytes or
             saved_feature != feature_bytes or
-            summary['encoded_bytes'] != payload or
+            not valid_accounting or
             summary['shared_reference_bytes'] != reference_bytes or
             summary['decoder_reference'] != relative_reference or
             (summary.get('birth') is None) != (manifest['birth'] is None)):
