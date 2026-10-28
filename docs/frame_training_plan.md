@@ -128,6 +128,12 @@
 
 当前日志PSNR是逐RGB通道算dB后平均；本地S2GS的PSNR函数将RGB乘255并取整，再以整幅整数误差的单一MSE计算，离线脚本读取RGB8 PNG。这是公式差异，不仅是CHW/BCHW形状差异。正在准备的独立全300审计会同时列出现有口径、整幅RGB浮点与复现本地S2GS离线公式的RGB8口径，保持当前训练不变；论文对比采用核实后的同一口径，不将不同定义的数字混在一个结论中。实际差值及全300审计尚待完成，不能提前据此判断目标已达到或未达到。
 
+官方仓库的[PSNR函数](https://github.com/liyw420/S2GS/blob/main/utils/image_utils.py)和[离线读图](https://github.com/liyw420/S2GS/blob/main/metrics_video.py)已在线复核，相关代码与本地检查一致，blob SHA记录在`tmp/goal_frame_plan/s2gs_official_metric_sources.json`。当前动态1–239帧按保存PNG的整幅RGB公式为34.219909 dB，原生日志为34.246100 dB；旧units完整动态1–299对应34.038418和34.065092 dB。它们都不含首帧，不能直接当全300指标。当前完整300帧审计仍待验收进程结束。
+
+另准备逐点稀疏颜色诊断`tmp/goal_frame_plan/probe_private_dc_native.py`：用已有`QuantizedFeatureDCUpdate(sharing='per_gs')`对旧点DC做20步量化拟合，复用实际字节价格和稀疏正则；位置、透明度、高阶SH及新点属性冻结，区域共享颜色保持关闭。CPU真实色彩码流、恢复和负零保持检查通过，尚无GPU图像或总包收益结论。诊断只能在本轮300及两种FPS验收完成后运行；若有收益，启用实际FramePlan前还需补齐其颜色optimizer、三次删除映射、参考与编码衔接，不能只开配置。该路径是检验外观变化是否被误交给运动/新点解释的假设，不预设优于已准备的出生SH初始化。
+
+已核对[S²GS v1论文](https://arxiv.org/html/2608.19639v1)：表I的Flame Steak为34.04 dB，0.11 MB属于六场景平均存储，不能直接当该场景单独存储。其附录J指出固定支撑难处理新结构、区域gate难区分动静混合，为我们的支撑更新与共享粒度问题提供相关背景；这不是当前方法已解决这些问题的证据。论文使用4090，本机使用3090Ti，速度分别报告；动态更新与含首帧总流均单列。当前工程目标保持不变，单场景达到数值目标也不直接称为整体SOTA。协议摘要在`tmp/goal_frame_plan/s2gs_paper_protocol.json`。
+
 实现方面，`scripts/run_first_frame.py --colour-only`显式管理恢复后的可训练字段并核对冻结属性哈希；`scripts/compact_initial_model.py --coverage-reference`支持上述保留区域覆盖的排序。7项CPU回归覆盖Adam续训、冻结字段和覆盖选择；真实首帧渲染、保留属性及区域数量另行核验。静态裁点工具另修正新保存点将Parameter错误转为不可训练Tensor的问题（`3ce17a7`）；既有15万点候选没有运行恢复训练，动态阶段采用新建运动参数，因此之前的动态比较不受该修正影响。有限alpha扰动的VJP投影检查在本次三个点中最大相对偏差约30%，不将该影响分数称为精确删除代价；裁点仍须依靠实际图像与动态结果验证。
 
 
