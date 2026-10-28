@@ -16,7 +16,8 @@ from torch.nn import functional as F
 from .rigid_residual_tree import (MotionBase, _id_lengths, _integer,
     _quantized, quaternion_multiply,
     rotation_vector_quaternion)
-from .spatial_gate import spatial_layout, spatial_owner, spatial_state_route, spatial_accumulate
+from .spatial_gate import (spatial_layout, spatial_owner, spatial_state_route,
+                          spatial_accumulate, SPATIAL_ROUTING_FIELDS)
 
 
 def _hard_value_soft_gradient(hard, soft):
@@ -457,19 +458,46 @@ class SpatialGatedMotion(MotionBase):
         assert all(torch.equal(a, b) for a, b in zip(full, self._full_motion_symbols()))
 
     def initialize_reference(self, xyz, rotation, extent, frame_index=0):
-        from .rigid_tree_codec import DecodedState
-        paths, parents, opened, centers, routing = spatial_layout(
-            xyz.detach(), self.config.spatial_gate.max_depth, return_centers=True,
-            initialization=self.config.spatial_gate.initialization,
-            distance_quantile=self.config.spatial_gate.initialization_distance_quantile,
-            outlier_assignment=self.config.spatial_gate.outlier_assignment,
-            return_routing=True)
+        from .rigid_tree_codec import DecodedState, _validate_state
+        cfg=self.config.spatial_gate
+        if cfg.reference_layout is None:
+            paths, parents, opened, centers, routing = spatial_layout(
+                xyz.detach(), cfg.max_depth, return_centers=True,
+                initialization=cfg.initialization,
+                distance_quantile=cfg.initialization_distance_quantile,
+                outlier_assignment=cfg.outlier_assignment,
+                return_routing=True)
+        else:
+            # Compaction changes the GS population, not the predefined
+            # physical candidate boundaries. The new reference embeds all
+            # routing arrays; decoding never needs the source template.
+            with np.load(cfg.reference_layout,allow_pickle=False) as packet:
+                template=DecodedState.from_reference(packet)
+                source_extent=float(packet['extent'])
+            _validate_state(template)
+            if (frame_index!=0 or template.frame_index!=0 or
+                    template.spatial_paths is None or template.spatial_centers is None or
+                    template.spatial_paths.shape[1]!=cfg.max_depth):
+                raise ValueError('reference_layout must be a frame0 reference at the same spatial depth')
+            if not np.isclose(source_extent,float(extent),rtol=1e-6,atol=1e-8):
+                raise ValueError('reference_layout extent differs from the current coordinate system')
+            nearest=template.spatial_support_ball is not None
+            if nearest!=(cfg.outlier_assignment=='nearest_region'):
+                raise ValueError('reference_layout outlier routing differs from configuration')
+            paths=spatial_state_route(xyz.detach(),template,cfg.max_depth)
+            parents=template.parents.clone()
+            centers=template.spatial_centers.clone()
+            opened=torch.zeros_like(template.spatial_open)
+            opened[0]=True
+            routing={name:(None if getattr(template,name) is None else getattr(template,name).clone())
+                     for name in SPATIAL_ROUTING_FIELDS}
         owner = spatial_owner(paths, opened)
         self.codec_previous_state = DecodedState(
             xyz.detach().cpu().float().clone(), rotation.detach().cpu().float().clone(),
             owner.cpu(), parents.cpu(), frame_index,
             spatial_paths=paths.cpu(), spatial_open=opened.cpu(), spatial_centers=centers,
             **routing)
+        _validate_state(self.codec_previous_state)
         return self.codec_previous_state
 
     def setup(self, xyz, rotation, extent, frame_index=0, previous_rows=None):
@@ -1874,6 +1902,7 @@ class SpatialGatedMotion(MotionBase):
             semantics=('parent-relative region corrections' if self.relative_regions else 'absolute region increments') + '; orientation-only rotations; GS residuals',
             spatial_assignment='previous_decoded_position_v1',
             spatial_initialization=self.config.spatial_gate.initialization,
+            spatial_reference_layout=self.config.spatial_gate.reference_layout,
             spatial_initialization_distance_quantile=self.config.spatial_gate.initialization_distance_quantile,
             spatial_outlier_assignment=self.config.spatial_gate.outlier_assignment,
             training_schedule=self.config.spatial_gate.training_schedule,

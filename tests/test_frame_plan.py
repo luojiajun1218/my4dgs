@@ -132,6 +132,45 @@ class FramePlanMotionTests(unittest.TestCase):
         del saved['spatial_gate']['final_joint_refine_steps']
         self.assertEqual(saved_config_with_default_motion_lr(saved)['spatial_gate']['final_joint_refine_steps'],0)
 
+    def test_compact_reference_can_reuse_physical_candidate_layout_and_restore_without_source(self):
+        from pipeline.trainer import Trainer
+        from pipeline.model.spatial_gate import spatial_state_route
+        with tempfile.TemporaryDirectory() as directory:
+            source,_=controller_fixture(directory)
+            checkpoint_harness(source)
+            template=source.motion.frame_reference_state
+            worker=NS(output_dir=Path(directory),module=source,datamodule=source.datamodule)
+            Trainer._write_reference(worker,0,template)
+            path=worker.decoder_reference_path
+            cfg=copy.deepcopy(source.motion.config)
+            cfg.spatial_gate.reference_layout=str(path)
+            cfg.validate()
+            # Changed populations and slightly refined geometry must not
+            # move the precomputed split planes or the outlier dictionary.
+            xyz=template.xyz[::2].clone()+.003
+            rotation=template.rotation[::2].clone()
+            model=SpatialGatedMotion(cfg)
+            state=model.initialize_reference(xyz,rotation,source.motion.extent)
+            self.assertTrue(torch.equal(state.xyz,xyz))
+            self.assertTrue(torch.equal(state.rotation,rotation))
+            self.assertTrue(torch.equal(state.spatial_centers,template.spatial_centers))
+            self.assertTrue(torch.equal(state.parents,template.parents))
+            self.assertTrue(torch.equal(state.spatial_paths,spatial_state_route(xyz,template)))
+            for name in ('spatial_support_ball','spatial_leaf_centers','spatial_leaf_nodes'):
+                a,b=getattr(state,name),getattr(template,name)
+                self.assertTrue(a is None and b is None or torch.equal(a,b))
+            bad=copy.deepcopy(cfg);bad.spatial_gate.max_depth+=1
+            with self.assertRaisesRegex(ValueError,'same spatial depth'):
+                SpatialGatedMotion(bad).initialize_reference(xyz,rotation,source.motion.extent)
+            with self.assertRaisesRegex(ValueError,'extent'):
+                SpatialGatedMotion(cfg).initialize_reference(xyz,rotation,source.motion.extent*2)
+            model.setup(xyz,rotation,source.motion.extent,frame_index=1)
+            saved=copy.deepcopy(model.capture())
+            Path(path).unlink()
+            restored=SpatialGatedMotion(copy.deepcopy(cfg));restored.restore(saved)
+            for a,b in zip(model(101,training=False),restored(101,training=False)):
+                torch.testing.assert_close(a,b,rtol=0,atol=0)
+
     def test_gate_reference_changes_preserve_quantized_motion_and_adam_history(self):
         model = motion_fixture()
         model.prepare_plan_step(151)

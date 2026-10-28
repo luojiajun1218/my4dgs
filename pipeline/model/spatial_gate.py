@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+from typing import Optional
 
 import torch
 import numpy as np
@@ -17,6 +18,7 @@ class SpatialGateConfig:
     max_depth: int = 4
     initialization: str = 'median'
     initialization_distance_quantile: float = 0.999
+    reference_layout: Optional[str] = None
     outlier_assignment: str = 'spatial'
     training_schedule: str = 'staged'
     min_region_size: int = 16
@@ -49,6 +51,10 @@ class SpatialGateConfig:
     reset_gate_optimizer_on_refine: bool = False
 
     def validate(self, motion_steps):
+        if self.reference_layout is not None and (
+                not isinstance(self.reference_layout,str) or not self.reference_layout.strip() or
+                not self.enabled):
+            raise ValueError('reference_layout requires an enabled spatial gate and a reference NPZ path')
         if (isinstance(self.final_joint_refine_steps, bool) or
                 not isinstance(self.final_joint_refine_steps, int) or
                 not 0 <= self.final_joint_refine_steps <= 50 or
