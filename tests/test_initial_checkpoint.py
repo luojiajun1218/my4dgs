@@ -5,12 +5,27 @@ import unittest
 
 import torch
 
-from scripts.compact_initial_model import cpu_tree
+from scripts.compact_initial_model import cpu_tree, coverage_selection
 from scripts.run_first_frame import (COLOUR_FIELDS, STATIC_FIELDS,
     configure_static_parameters, static_field_digests, verify_colour_only)
 
 
 class InitialCheckpointTest(unittest.TestCase):
+    def test_coverage_keeps_best_available_points_in_every_region(self):
+        scores = torch.tensor([9., 8., 7., 6., 5., 4., .1, .0])
+        groups = torch.tensor([0, 0, 0, 0, 1, 1, 2, 2])
+        selected = coverage_selection(scores, groups, 6)
+        self.assertEqual(selected.tolist(), [0, 1, 4, 5, 6, 7])
+        self.assertEqual(torch.bincount(groups[selected]).tolist(), [2, 2, 2])
+
+    def test_coverage_ties_are_stable_and_remaining_budget_uses_global_rank(self):
+        scores = torch.ones(7)
+        groups = torch.tensor([2, 0, 1, 0, 1, 0, 1])
+        selected = coverage_selection(scores, groups, 6)
+        self.assertEqual(selected.tolist(), [0, 1, 2, 3, 4, 5])
+        with self.assertRaisesRegex(ValueError, 'requires'):
+            coverage_selection(scores, groups, 4)
+
     def make_model(self, *, parameters=True):
         model = SimpleNamespace()
         for name in STATIC_FIELDS:
