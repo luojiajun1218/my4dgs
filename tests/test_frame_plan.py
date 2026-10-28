@@ -111,6 +111,27 @@ class FramePlanMotionTests(unittest.TestCase):
                 self.assertNotIn(model.gs_translation,model.optimizer.state)
         self.assertGreater(int(model.optimizer.state[model.gs_translation]['step']),0)
 
+    def test_final_joint_schedule_and_partial_proximal_window(self):
+        from pipeline.model.rigid_residual_tree import saved_config_with_default_motion_lr
+        model = motion_fixture()
+        cfg = model.config.spatial_gate
+        for invalid in (-1, 51, True, 1.5):
+            cfg.final_joint_refine_steps = invalid
+            with self.assertRaises(ValueError): model.config.validate()
+        cfg.final_joint_refine_steps = 20
+        model.config.motion_fit_window_steps = 23
+        model.config.validate()
+        for step, active in ((200,True),(201,False),(280,False),(281,True),(300,True)):
+            model.prepare_plan_step(step)
+            self.assertEqual(model.region_translation.requires_grad,active)
+            self.assertEqual(model.gs_translation.requires_grad,active)
+            self.assertFalse(model.gate_logits.requires_grad)
+            self.assertFalse(model.region_rotation.requires_grad)
+        self.assertTrue(model._motion_fit_window_due())
+        saved=copy.deepcopy(model.capture()['config'])
+        del saved['spatial_gate']['final_joint_refine_steps']
+        self.assertEqual(saved_config_with_default_motion_lr(saved)['spatial_gate']['final_joint_refine_steps'],0)
+
     def test_gate_reference_changes_preserve_quantized_motion_and_adam_history(self):
         model = motion_fixture()
         model.prepare_plan_step(151)
@@ -487,12 +508,18 @@ class FramePlanPersistenceTests(unittest.TestCase):
     def setUpClass(cls):torch.set_num_threads(2)
 
     def test_real_module_checkpoint_cleanup200_250_and_final_cpu_packets(self):
+        for tail_steps in (0,20):
+            with self.subTest(final_joint_refine_steps=tail_steps):
+                self.check_real_module_checkpoint_and_packets(tail_steps)
+
+    def check_real_module_checkpoint_and_packets(self,tail_steps):
         from pipeline.trainer import Trainer
         from pipeline.model.gaussian import BirthGaussianModel
         from scripts.replay_rigid_tree import decode_frame
         from pipeline.model.birth_quantization import reference_digest
         with tempfile.TemporaryDirectory() as directory, patch.object(BirthGaussianModel,'training_setup',cpu_gaussian_setup):
             m,_=controller_fixture(directory,budget=True)
+            m.config.rigid_tree.spatial_gate.final_joint_refine_steps=tail_steps
             checkpoint_harness(m)
             initial=model_raw(m.gaussians)
             prior=copy.deepcopy(m.motion.frame_reference_state)
@@ -516,7 +543,21 @@ class FramePlanPersistenceTests(unittest.TestCase):
                 if step==201:
                     with torch.no_grad():m.births.cohorts[0]['parameters']['_rotation'][:,1]=.123
                 Trainer._fit_views(trainer,None,step)
-                if step in (200,250):
+                if step==280:
+                    fixed_gate=m.motion.gate_logits.detach().clone()
+                    motion_updates=int(m.motion.optimizer.state[m.motion.region_translation]['step'])
+                if tail_steps and step==281:
+                    from pipeline.frame_plan import fitting_old_motion
+                    self.assertTrue(m.motion_committed,'Births must remain in render/capture')
+                    self.assertTrue(fitting_old_motion(m))
+                    image=m.forward(next(iter(m.transaction_camera_views().values())),training=False)
+                    self.assertEqual(len(image['visibility_filter']),len(m.gaussians._xyz)+len(m.births._xyz))
+                    row=m.birth_control['frame_plan_gradients'][-1]['parameters']
+                    for name in ('region_translation','gs_translation'):
+                        self.assertTrue(row[name]['trainable'])
+                        self.assertGreater(row[name]['gradient_norm'],0.)
+                    self.assertFalse(row['gate_logits']['has_gradient'])
+                if step in (200,250,280,281):
                     packet=dict(global_step=step,current_frame=1)
                     Module.on_save_checkpoint(m,packet)
                     # Real save/load serialization also removes tensor aliasing.
@@ -524,11 +565,18 @@ class FramePlanPersistenceTests(unittest.TestCase):
                     stream=io.BytesIO();torch.save(packet,stream);stream.seek(0)
                     packet=torch.load(stream,weights_only=False)
                     clone,_=controller_fixture(directory,budget=True)
+                    clone.config.rigid_tree.spatial_gate.final_joint_refine_steps=tail_steps
                     checkpoint_harness(clone)
                     Module.on_load_checkpoint(clone,packet)
                     self.assertEqual(clone._plan_used_quota,m._plan_used_quota)
                     self.assertEqual([e['step'] for e in clone._plan_events],[e['step'] for e in m._plan_events])
                     self.assertEqual(clone.early_shared_steps,step)
+                    if tail_steps and step==281:
+                        from pipeline.frame_plan import fitting_old_motion
+                        self.assertTrue(fitting_old_motion(clone))
+                        self.assertTrue(clone.motion_committed)
+                        self.assertEqual(len(clone.births._xyz),len(m.births._xyz))
+                        self.assertTrue(clone.motion.region_translation.requires_grad)
                     clone.trainer.global_step=step+1;clone.pre_training_step()
                     if step==200:
                         with torch.no_grad():clone.births.cohorts[0]['parameters']['_rotation'][:,1]=.123
@@ -540,7 +588,16 @@ class FramePlanPersistenceTests(unittest.TestCase):
                     for name in RAW_FIELDS:
                         torch.testing.assert_close(model_raw(m.births)[name],model_raw(clone.births)[name],rtol=0,atol=0)
                     torch.testing.assert_close(m.opacity_update.delta,clone.opacity_update.delta,rtol=0,atol=0)
+                    for name in ('region_translation','gs_translation','gate_logits'):
+                        torch.testing.assert_close(getattr(m.motion,name),getattr(clone.motion,name),rtol=0,atol=0)
+                    self.assertEqual([e['step'] for e in clone._plan_events],[e['step'] for e in m._plan_events])
             self.assertTrue(m.frame_finalized)
+            torch.testing.assert_close(fixed_gate,m.motion.gate_logits,rtol=0,atol=0)
+            self.assertEqual(int(m.motion.optimizer.state[m.motion.region_translation]['step']),motion_updates+tail_steps)
+            self.assertEqual(m.birth_control['early_replacement']['motion_iterations'],200+tail_steps)
+            self.assertEqual(m.early_shared_steps,300)
+            self.assertEqual(m.early_birth_updates,100)
+            self.assertEqual([e['step'] for e in m._plan_events],[200,250,300])
             stream_dir=Path(directory)/'frame_storage'/'rigid_tree'
             state,decoded=decode_frame(stream_dir,1,prior,initial)
             actual=model_raw(m.gaussians)
@@ -569,6 +626,7 @@ class FramePlanPersistenceTests(unittest.TestCase):
             checkpoint={"current_frame":1,"global_step":300}
             Module.on_save_checkpoint(m,checkpoint)
             resumed,_=controller_fixture(directory,budget=True)
+            resumed.config.rigid_tree.spatial_gate.final_joint_refine_steps=tail_steps
             checkpoint_harness(resumed)
             Module.on_load_checkpoint(resumed,copy.deepcopy(checkpoint))
             self.assertEqual(resumed._rate_budget_state,m._rate_budget_state)

@@ -34,7 +34,7 @@ from .model.residual_birth import (ResidualBirthConfig, BirthTransaction,
     selected_population, CommitTrial, encode_trial as encode_birth_trial,
     validation_errors as birth_validation_errors, qualify_crossfit_novel,nearest_sources)
 from .early_replacement import EarlyReplacementController
-from .frame_plan import FramePlanController
+from .frame_plan import FramePlanController, fitting_old_motion
 
 
 BIRTH_ALLOCATION = 'clone_small_v1'
@@ -863,6 +863,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self.births.source_rows=ckpt['birth_source_rows'].to(self.device)
                 if not getattr(self.config.birth,'frame_training_plan',False):
                     self.births._opacity.requires_grad_(self.motion_committed or self.config.birth.radiance_mode=='adaptive_residual_birth')
+            if self.motion_committed and fitting_old_motion(self):
+                self.motion.prepare_plan_step(self.motion.last_step)
 
     def prepare_frame(self):
         if self.frame_prepared:
@@ -1042,7 +1044,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 (not self.motion_committed or (uses_residual_birth(self.config) and
                   not self.frame_finalized)))
         try:
-            if self.frame_prepared and not self.motion_committed:
+            if fitting_old_motion(self):
                 xyz, rotation = (self.motion.predictor_pose() if predictor_only else
                                  self.motion.proposal_pose() if proposal_only else
                                  self.motion(self.trainer.global_step, training=training))
@@ -1148,7 +1150,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         image = package['render']
         factor = motion_image_factor(step, self.motion_steps,
             enabled=self.config.motion_coarse_to_fine,
-            fitting_motion=self.frame_prepared and not self.motion_committed,
+            fitting_motion=fitting_old_motion(self),
             bootstrap_steps=self.config.rigid_tree.spatial_gate.start_step)
         metric = getattr(self.config, 'photometric_loss', 'l1')
         if (self.motion_committed or (uses_early_replacement(self.config) and self.early_initialized)) and self.config.birth.photometric_loss is not None:
@@ -1187,7 +1189,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self.config.lambda_dssim, factor, metric=metric)
             loss = loss + predictor_weight * prediction_loss
             metrics['predictor_image_loss'] = prediction_loss.detach()
-        if not self.motion_committed and regularization_weight:
+        if fitting_old_motion(self) and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
         if (regularization_weight and getattr(self, 'opacity_update', None) is not None and
                 (not getattr(self.config.birth,'frame_training_plan',False) or step >= 101) and

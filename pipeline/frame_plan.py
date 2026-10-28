@@ -14,6 +14,22 @@ from .model.rate_budget import RateBudgetState
 from .model.residual_support_geometry import residual_support_seed,residual_support_opacity
 
 
+def final_joint_scheduled(module, step):
+    """The optional tail fits old motion with the complete newborn population."""
+    if not getattr(module.config.birth, 'frame_training_plan', False):
+        return False
+    count = module.config.rigid_tree.spatial_gate.final_joint_refine_steps
+    return bool(count and 301-count <= step <= 300)
+
+
+def fitting_old_motion(module):
+    # motion_committed is also the newborn-render/checkpoint readiness flag.
+    # Keep it true after birth200, including while old motion learns again.
+    return module.frame_prepared and (not module.motion_committed or (
+        not module.frame_finalized and getattr(module, 'early_initialized', False) and
+        final_joint_scheduled(module, module.motion.last_step)))
+
+
 class FramePlanController:
     def _plan_setup_rate_budget(self):
         cfg=self.config.rigid_tree
@@ -65,7 +81,9 @@ class FramePlanController:
         self._plan_phase_started = None
 
     def _plan_prepare_rates(self, step):
-        phase = ('shared_gate' if step <= 100 else 'fixed_gate_residual' if step <= 150 else
+        tail = final_joint_scheduled(self, step)
+        phase = ('final_joint_refine' if tail else
+                 'shared_gate' if step <= 100 else 'fixed_gate_residual' if step <= 150 else
                  'joint_gate_residual' if step <= 180 else 'fixed_gate_motion' if step <= 200 else
                  'newborn_old_alpha')
         if getattr(self,'_plan_timed_phase',None) != phase:
@@ -74,7 +92,7 @@ class FramePlanController:
             self._plan_timed_phase = phase
             self._plan_phase_started = time.perf_counter()
         self._early_attach_opacity()
-        if not self.motion_committed:
+        if not self.motion_committed or tail:
             self.motion.prepare_plan_step(step)
         update = self.opacity_update
         update.delta.requires_grad_(step >= 101)
@@ -88,7 +106,9 @@ class FramePlanController:
     def _plan_post_step(self, packages, step):
         if step != self.early_shared_steps+1 or not 1 <= step <= 300:
             raise ValueError('Frame plan requires one shared Adam update per iteration')
-        if step in (1,100,101,150,151,180,181,200,201,250,251,300):
+        tail_start = 301-self.config.rigid_tree.spatial_gate.final_joint_refine_steps
+        boundaries = (1,100,101,150,151,180,181,200,201,250,251,300)
+        if step in boundaries or (tail_start <= 300 and step in (tail_start-1,tail_start)):
             parameters = {name: getattr(self.motion,name) for name in
                           ('gate_logits','region_translation','gs_translation','region_rotation','gs_rotation')}
             parameters['old_alpha'] = self.opacity_update.delta
@@ -106,7 +126,7 @@ class FramePlanController:
             self.motion.mark_observed(observed)
             self.birth_control['motion_frustum_samples'] = torch.as_tensor(self.birth_control.get('motion_frustum_samples',0),device=self.device)+package['visibility_filter'][:count].sum()
             self.birth_control['motion_observed_samples'] = torch.as_tensor(self.birth_control.get('motion_observed_samples',0),device=self.device)+observed.sum()
-        if not self.motion_committed:
+        if fitting_old_motion(self):
             edits = self.motion.optimizer_step()
             self.birth_control['tree_edit_count'] = self.birth_control.get('tree_edit_count', 0)+len(edits)
         else:
@@ -148,6 +168,11 @@ class FramePlanController:
                 colour_initialization='responsibility-weighted training RGB to SH DC; higher SH zero',
                 reference_distance='0.5 squared position/extent + 0.5 mean squared RGB DC; ties lowest old row',
                 storage_loss=dict(units='surrogate bytes; not compressed bytes', enabled=True))
+        if step == 300 and final_joint_scheduled(self, step):
+            # Canonical old attributes must reflect the final quantized pose
+            # before deletion/reanchoring and before the codec checks it.
+            xyz, rotation = self.motion.decoded_survivor_pose()
+            self.gaussians.apply_selected_motion(xyz.to(self.device), rotation.to(self.device))
         if step in (200, 250, 300):
             self._plan_cleanup(step)
             if step < 300:
@@ -339,7 +364,9 @@ class FramePlanController:
             self.birth_control[name] = int(self.birth_control.get(name,0))
         self.birth_control['phase_timing_scope'] = 'synchronized wall seconds; includes topology events; excludes checkpoint writes and final encoding'
         self.motion.record_final_diagnostics()
-        self.birth_control['early_replacement'].update(global_iterations=300, motion_iterations=200,
+        tail_steps = self.config.rigid_tree.spatial_gate.final_joint_refine_steps
+        self.birth_control['early_replacement'].update(global_iterations=300, motion_iterations=200+tail_steps,
+            final_joint_refine_steps=tail_steps,
             newborn_iterations=self.early_birth_updates, extra_SGD_steps=0, codec_trials200=0,
             actual_birth_cohorts=len(self.births.cohorts),
             birth_updates_by_cohort=[300-batch['birth_step'] for batch in self.births.cohorts])

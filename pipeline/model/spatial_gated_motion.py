@@ -162,13 +162,24 @@ class SpatialGatedMotion(MotionBase):
             # image moments must not govern this different objective.
             self.optimizer.state.pop(self.gate_logits,None)
         gate = step <= 100 or 151 <= step <= 180
+        tail_steps = self.config.spatial_gate.final_joint_refine_steps
+        motion = step <= 200 or bool(tail_steps and 301-tail_steps <= step <= 300)
         self._hard_gate_frozen = not gate
         for parameter, enabled in ((self.gate_logits, gate),
-                (self.gs_translation, step >= 101), (self.gs_rotation, step >= 101 and self.config.rotation_updates)):
+                (self.region_translation, motion),
+                (self.region_rotation, motion and self.config.rotation_updates),
+                (self.gs_translation, motion and step >= 101),
+                (self.gs_rotation, motion and step >= 101 and self.config.rotation_updates)):
             parameter.requires_grad_(enabled)
             if not enabled:
                 parameter.grad = None
         self._enforce_rotation_policy()
+
+    def _motion_fit_window_due(self):
+        if (self.config.spatial_gate.frame_training_plan and
+                self.config.spatial_gate.final_joint_refine_steps and self.last_step == 300):
+            return True
+        return super()._motion_fit_window_due()
 
     def _private_nodes(self):
         return self.spatial_paths[:, -1] if self.hierarchical_private else self.owner

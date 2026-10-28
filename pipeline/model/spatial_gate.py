@@ -43,11 +43,17 @@ class SpatialGateConfig:
     predictor_image_weight: float = 0.
     shared_discovery: bool = False
     frame_training_plan: bool = False
+    final_joint_refine_steps: int = 0
     refine_unselected_candidates: bool = False
     candidate_refinement_start_step: int = 151
     reset_gate_optimizer_on_refine: bool = False
 
     def validate(self, motion_steps):
+        if (isinstance(self.final_joint_refine_steps, bool) or
+                not isinstance(self.final_joint_refine_steps, int) or
+                not 0 <= self.final_joint_refine_steps <= 50 or
+                (self.final_joint_refine_steps and not self.frame_training_plan)):
+            raise ValueError('Final joint refinement requires frame plan and 0..50 steps after birth250')
         if not isinstance(self.refine_unselected_candidates, bool):
             raise ValueError('refine_unselected_candidates must be boolean')
         if self.refine_unselected_candidates and not self.frame_training_plan:
