@@ -24,6 +24,8 @@ from scripts import benchmark_rigid_residual_tree as base
 
 
 def cpu_tree(value):
+    if isinstance(value,torch.nn.Parameter):
+        return torch.nn.Parameter(value.detach().cpu(),requires_grad=value.requires_grad)
     if isinstance(value,torch.Tensor):return value.detach().cpu()
     if isinstance(value,dict):return {k:cpu_tree(v) for k,v in value.items()}
     if isinstance(value,list):return [cpu_tree(v) for v in value]
