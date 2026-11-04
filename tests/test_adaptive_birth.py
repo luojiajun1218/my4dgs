@@ -1,10 +1,18 @@
-"""CPU checks for independent parent-offset births."""
+"""CPU checks for adaptive births and clone checkpoint recovery."""
+import copy
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
+
 import torch
-from tests.test_reincarnation import early_model_fixture, optimizer
+
 from pipeline.model.adaptive_birth_model import AdaptiveBirthModel
-from pipeline.model.birth_quantization import QuantizedNewGaussianView, RAW_FIELDS
+from pipeline.model.birth_quantization import QuantizedNewGaussianView, RAW_ATTRIBUTES, RAW_FIELDS, model_raw
+from pipeline.model.gaussian import BirthGaussianModel
+from pipeline.module import BirthConfig, Module
+from tests.fixture_birth_cpu import early_controller_fixture, early_model_fixture, optimizer
+from tests.test_frame_plan import checkpoint_harness, cpu_gaussian_setup
 
 
 class AdaptiveBirthTests(unittest.TestCase):
@@ -93,7 +101,7 @@ class AdaptiveBirthTests(unittest.TestCase):
 def controller_fixture(directory,empty=False,raw_transform=None):
     from types import MethodType
     from unittest.mock import patch
-    from tests.test_reincarnation import early_controller_fixture
+    from tests.fixture_birth_cpu import early_controller_fixture
     from pipeline.adaptive_birth import AdaptiveBirthController
     m,views=early_controller_fixture(directory)
     m.config.birth.radiance_mode='adaptive_residual_birth'
@@ -186,7 +194,7 @@ class AdaptiveControllerTests(unittest.TestCase):
                 m,_=controller_fixture(directory,empty)
                 n=len(m.births.parent_rows)
                 m.trainer.global_step=200;m.early_birth_updates=130 if n else 0
-                with patch('pipeline.model.residual_birth.encode_trial',side_effect=AssertionError('trial')),patch('pipeline.early_replacement.encode_trial',side_effect=AssertionError('codec')),patch('pipeline.early_replacement.validation_errors',side_effect=AssertionError('quality')):
+                with patch('pipeline.model.residual_birth.encode_trial',side_effect=AssertionError('trial')):
                     m._early_select_population()
                     self.assertTrue(m.motion_committed)
                     self.assertEqual(len(m.births.parent_rows),n)
@@ -203,7 +211,7 @@ class AdaptiveControllerTests(unittest.TestCase):
         import tempfile
         from types import MethodType,SimpleNamespace
         from unittest.mock import patch
-        from tests.test_reincarnation import T
+        import pipeline.trainer as T
         for empty in (False,True):
             with self.subTest(empty=empty),tempfile.TemporaryDirectory() as directory:
                 m,views=controller_fixture(directory,empty)
@@ -274,7 +282,7 @@ class AdaptiveFinalizationTests(unittest.TestCase):
         import tempfile
         from types import MethodType
         from unittest.mock import patch
-        from tests.test_reincarnation import M
+        import pipeline.module as M
         from pipeline.model import rigid_tree_codec as codec
         from pipeline.model.residual_birth import BirthTransaction
         from pipeline.model.birth_quantization import model_raw
@@ -319,4 +327,56 @@ class AdaptiveFinalizationTests(unittest.TestCase):
                            previous_rows=torch.arange(len(xyz)))
             self.assertEqual(m.motion.frame_reference_state.digest(),decoded.digest())
 
-if __name__=='__main__':unittest.main()
+
+def clone_fixture(directory):
+    module, _ = early_controller_fixture(directory)
+    module.config.birth = BirthConfig(mechanism='clone')
+    module.config.rigid_tree = module.motion.config
+    module.config.opacity_update = module.opacity_update.config
+    module.motion.optimizer.param_groups[:] = [group for group in module.motion.optimizer.param_groups
+                                               if group.get('name') != 'early_old_opacity']
+    module.births = BirthGaussianModel(1)
+    rows = torch.tensor([1, 3])
+    for attr in RAW_ATTRIBUTES:
+        value = getattr(module.gaussians, attr).detach()[rows].clone()
+        setattr(module.births, attr, torch.nn.Parameter(value))
+    module.births.active_sh_degree = 1
+    module.births.spatial_lr_scale = 1.
+    module.births.max_radii2D = torch.zeros(len(rows))
+    module.births.source_rows = rows.clone()
+    cpu_gaussian_setup(module.births, module.config.gaussian_stage2)
+    module.motion_committed = True
+    module.retired_reference = None
+    module.trainer.global_step = 250
+    checkpoint_harness(module)
+    return module
+
+
+def update_births(module):
+    module.births.optimizer.zero_grad(set_to_none=True)
+    loss = sum(getattr(module.births, attr).square().sum() for attr in RAW_ATTRIBUTES)
+    loss.backward()
+    module.births.optimizer.step()
+
+
+class CloneResumeTests(unittest.TestCase):
+    def test_midframe_clone_checkpoint_restores_lineage_and_adam(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second, \
+                patch.object(BirthGaussianModel, 'training_setup', cpu_gaussian_setup):
+            module = clone_fixture(first)
+            update_births(module)
+            packet = dict(current_frame=1, global_step=250)
+            Module.on_save_checkpoint(module, packet)
+            resumed = clone_fixture(second)
+            Module.on_load_checkpoint(resumed, copy.deepcopy(packet))
+            self.assertTrue(torch.equal(module.births.source_rows, resumed.births.source_rows))
+            for name, value in model_raw(module.births).items():
+                torch.testing.assert_close(value, model_raw(resumed.births)[name], rtol=0, atol=0)
+            update_births(module)
+            update_births(resumed)
+            for name, value in model_raw(module.births).items():
+                torch.testing.assert_close(value, model_raw(resumed.births)[name], rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -39,9 +39,10 @@ def input_hashes(stream):
     for frame in range(1,300):
         files += [stream/f'frame_{frame:03d}.json',stream/f'motion_{frame:03d}.bin']
         manifest=json.loads((stream/f'frame_{frame:03d}.json').read_text())
-        for key in ('birth','opacity_update','feature_dc_update'):
+        for key in ('birth','opacity_update','feature_dc_update','logscale_update'):
             if manifest.get(key):
-                expected=dict(birth='birth',opacity_update='opacity',feature_dc_update='shdc')[key]+f'_{frame:03d}.bin'
+                expected=dict(birth='birth',opacity_update='opacity',feature_dc_update='shdc',
+                              logscale_update='logscale')[key]+f'_{frame:03d}.bin'
                 if manifest[key]!=expected:
                     raise ValueError('Unexpected input packet path')
                 files.append(stream/expected)
@@ -52,6 +53,16 @@ def camera_signature(view):
     return dict(shape=list(view.image.shape),fov=[float(view.fovx),float(view.fovy)],
         matrices={key:hashlib.sha256(getattr(view,key).cpu().contiguous().numpy().tobytes()).hexdigest()
             for key in ('world_view_transform','full_proj_transform','camera_center')})
+
+
+def _expected_image_shape(config):
+    expected=config.data.expected_image_size
+    if (expected is None or len(expected)!=2 or any(
+            isinstance(value,bool) or not isinstance(value,int) or value<1
+            for value in expected)):
+        raise ValueError('Full300 verification requires config.data.expected_image_size '
+                         'as a positive integer [width, height] pair')
+    return 3,int(expected[1]),int(expected[0])
 
 
 def make(run):
@@ -71,6 +82,7 @@ def make(run):
 def verify(run):
     before_sources=source_hashes()
     config,module,dm,stream,state,raw,capacity=make(run)
+    expected_shape=_expected_image_shape(config)
     before_inputs=input_hashes(stream)
     player=GPUStream(state,raw,capacity=capacity)
     pool=ready_pool()
@@ -94,8 +106,9 @@ def verify(run):
             raise ValueError(f'GPU decode differs from original manifest at frame{frame}')
         player.verify_render_inputs(raw)
         view,count=base._cam00(dm,frame,torch.device('cuda'))
-        if count!=1 or tuple(view.image.shape)!=(3,1008,1345):
-            raise ValueError('Full300 verification needs the original1345x1008 cam00 test split')
+        if count!=1 or tuple(view.image.shape)!=expected_shape:
+            raise ValueError('Full300 verification needs one cam00 test view with the '
+                             f'configured image shape {expected_shape}')
         current=camera_signature(view)
         if signature is None: signature=current
         static=static and signature==current

@@ -34,6 +34,7 @@ class RigidTreeConfig:
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
     target_update_bytes: int = 0
+    initial_rate_multiplier: float = 1.0
     rate_controller_gain: float = 0.25
     max_rate_multiplier: float = 64.0
     differentiable_rate_support: bool = False
@@ -70,6 +71,11 @@ class RigidTreeConfig:
                     not math.isfinite(value) or value < minimum or
                     (name=='rate_controller_gain' and value==0)):
                 raise ValueError(f'{name} has an invalid finite positive value')
+        initial=self.initial_rate_multiplier
+        if (isinstance(initial,bool) or not isinstance(initial,(int,float)) or
+                not math.isfinite(initial) or not 1 <= initial <= self.max_rate_multiplier or
+                (initial != 1 and not self.target_update_bytes)):
+            raise ValueError('initial_rate_multiplier requires byte feedback and must fit controller bounds')
         if not isinstance(self.rotation_updates, bool):
             raise ValueError('rotation_updates must be boolean')
         if (isinstance(self.amplitude_refit_steps, bool) or

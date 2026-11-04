@@ -1,0 +1,28 @@
+{
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/flame_steak_1028/fs_cov150_300/20261028T133500_9a96a2",
+  "frame": 149,
+  "source_frame": 148,
+  "gs_sample_count": 1042,
+  "region_arrow_count": 150,
+  "nonzero_GS_residual_count": 297,
+  "common_pixels_per_quantization_bin": 0.3,
+  "roi": [
+    420,
+    400,
+    1050,
+    1005
+  ],
+  "grid_sampling_pixels": 18,
+  "arrow_magnitude": "Euclidean norm of each decoded 3-D integer displacement vector; one identical linear display scale in all panels, no per-vector magnitude normalization or clipping.",
+  "actual_state_sha": "1f0265a128922a0a4d676189a918e64ea49548dd13a6a668a3c98be34fe5f3e0",
+  "raw_sha": "a38825f69656aab0c58171018815bd45ef5c27217ddc74b0ac94e4a94c5bf5d6",
+  "maximum_raw_projected_endpoint_decomposition_error": 0.0,
+  "quantization_step_world_units": 0.0003896181335449219,
+  "display_scope": "Arrows show camera-projected directions with lengths proportional to 3-D Euclidean displacement, not pixel-flow displacement. Full/share/residual 3-D vectors are exact decoded quantities.",
+  "scope": "Three comparable arrow maps: full GS motion, regional share, GS residual.\n\nAll quantities come from the same saved decoded frame. The no-sharing map is\nthe full per-GS motion of this fitted field, not a separately trained model.\n",
+  "residual_projection": "project(base + shared + residual) - project(base + shared); displayed at base for correspondence.",
+  "sampling": "One eligible Gaussian centre nearest each 18px grid cell centre; depth/opacity-filtered centres; no motion-magnitude selection. All three maps use identical scale and origin set. Regional arrows are one actual member per represented region, not a normalized average.",
+  "status": "superseded: 3-D-norm arrow illustration must not be read as screen motion",
+  "corrected_projection_figures": "../motion_projection_audit/gain10/00_three_fields.png",
+  "audit": "../motion_projection_audit/audit.json"
+}

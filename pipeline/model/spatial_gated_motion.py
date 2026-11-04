@@ -760,6 +760,19 @@ class SpatialGatedMotion(MotionBase):
             previous_start, start = start, end
         return torch.cat(selected)
 
+    def _rate_gate_probabilities(self, probabilities):
+        """Keep literal selection probabilities but scale only their rate gradient."""
+        scale = self.config.spatial_gate.region_selection_rate_gradient_scale
+        return probabilities.detach() + scale * (probabilities - probabilities.detach())
+
+    def _rate_region_selection_probabilities(self, include_ancestors=False):
+        if not self._candidate_initialized:
+            return self._region_selection_probabilities(
+                include_ancestors=include_ancestors)
+        return self._region_selection_probabilities(
+            self._rate_gate_probabilities(self._frontier_probabilities()),
+            include_ancestors=include_ancestors)
+
     def _path_weights(self, probabilities):
         reach, weights = torch.ones_like(self.gs_translation[:, 0]), []
         for level in range(self.spatial_paths.shape[1]):
@@ -1032,6 +1045,7 @@ class SpatialGatedMotion(MotionBase):
         probabilities = self._frontier_probabilities()
         if step <= self.config.spatial_gate.gate_start_step or step > self.config.spatial_gate.freeze_step:
             probabilities = probabilities.detach()
+        rate_probabilities = self._rate_gate_probabilities(probabilities)
         from .sparse_updates import sparse_block_support
         def support(value, scale, continuous=None):
             return sparse_block_support(value, scale, continuous=continuous,
@@ -1043,6 +1057,7 @@ class SpatialGatedMotion(MotionBase):
         hard_residual_bytes = self.base_xyz.new_zeros(())
         hard_relative = self.base_xyz.new_zeros(())
         candidate_relative = self.base_xyz.new_zeros(())
+        candidate_bytes = self.base_xyz.new_zeros(())
         discrete_joint = self.joint_training and not self._hard_gate_frozen
         gate_only_soft_cost = discrete_joint and self.config.differentiable_rate_support
         # Shared-field fitting has no point residual objective. Once the gate
@@ -1055,6 +1070,7 @@ class SpatialGatedMotion(MotionBase):
             total_t = (shared_t + point_t).detach()
             total_r = (shared_r + point_r).detach()
             weights = None if self._hard_gate_frozen else self._path_weights(probabilities)
+            rate_weights = None if self._hard_gate_frozen else self._path_weights(rate_probabilities)
             nodes = ([self.owner] if self._hard_gate_frozen else
                      self.spatial_paths.unbind(1))
         else:
@@ -1075,7 +1091,8 @@ class SpatialGatedMotion(MotionBase):
                         if codec else (st + sr - st * sr) * (self._gs_id_lengths + 1) + (st + sr) * 6)
                 magnitude = (ct / self.extent).abs().sum(-1) + cr.abs().sum(-1)
                 weight = weights[:, level]
-                residual_bytes = residual_bytes + (weight * cost).sum()
+                rate_weight = rate_weights[:, level]
+                residual_bytes = residual_bytes + (rate_weight * cost).sum()
                 relative = relative + (weight * magnitude).mean()
                 selected = self.owner.eq(node).to(cost)
                 hard_residual_bytes = hard_residual_bytes + (selected * cost).sum()
@@ -1156,7 +1173,9 @@ class SpatialGatedMotion(MotionBase):
             cost = (self._codec_rate.costs(candidate_t / gs_steps[:3], candidate_r / gs_steps[3:], st, sr, 1)
                     if codec else (st + sr - st * sr) * (self._gs_id_lengths + 1) + (st + sr) * 6)
             weight = 1. if weights is None else weights[:, level]
-            residual_bytes = residual_bytes + (weight * (cost.detach() if gate_only_soft_cost or self.shared_image_recode else cost)).sum()
+            rate_weight = 1. if rate_weights is None else rate_weights[:, level]
+            residual_bytes = residual_bytes + (rate_weight * (
+                cost.detach() if gate_only_soft_cost or self.shared_image_recode else cost)).sum()
             # Each candidate must represent the *full* required motion, not
             # an arbitrary component of a soft mixture. Condition on the
             # current shared prediction when fitting point residuals. In a
@@ -1195,11 +1214,36 @@ class SpatialGatedMotion(MotionBase):
                 mask = (~used[node] & self.observations.gt(0)).to(rt)
                 candidate_relative = candidate_relative + (mask * (
                     (error_t / self.extent).abs().sum(-1) + error_r.abs().sum(-1))).mean() / self.spatial_paths.shape[1]
-        regional_weight = self._region_selection_probabilities(probabilities,
+                if refine_closed:
+                    # Fit unopened alternatives to the same residual byte objective
+                    # that selects the frontier, rather than L1 alone. Targets and
+                    # ancestors stay detached: this cannot move the rendered field.
+                    st, sr = support(error_t, gs_steps[:3]), support(error_r, gs_steps[3:])
+                    cost = (self._codec_rate.costs(error_t / gs_steps[:3],
+                                error_r / gs_steps[3:], st, sr, 1) if codec else
+                            (st + sr - st * sr) * (self._gs_id_lengths + 1) + (st + sr) * 6)
+                    candidate_bytes = candidate_bytes + (mask * cost).sum() / self.spatial_paths.shape[1]
+            if refine_closed:
+                # Charge each candidate block once, not once per member. Opening
+                # a region must save enough point bytes to pay for its predictor.
+                active = (~used & self.node_counts.gt(0)).clone()
+                active[0] = False
+                st, sr = support(local_rt, steps[:3]), support(local_rr, steps[3:])
+                rid = torch.cat((self._region_id_lengths.new_zeros(1), self._region_id_lengths))
+                cost = (self._codec_rate.costs(local_rt / steps[:3], local_rr / steps[3:], st, sr, 0)
+                        if codec else (st + sr - st * sr) * (rid + 1) + (st + sr) * 6)
+                candidate_bytes = candidate_bytes + (active.to(cost) * cost).sum() / self.spatial_paths.shape[1]
+        regional_weight = self._region_selection_probabilities(rate_probabilities,
             include_ancestors=self.relative_regions)
         if self.joint_image_gradients and not self.soft_image_active and not self.private_full_motion:
             selected = self._stored_region_support().to(rt)
             regional_weight = _hard_value_soft_gradient(selected, regional_weight)
+        # A high frame-level multiplier should still prune expensive point
+        # residuals without forcing the spatial predictor itself to collapse to
+        # a coarse cut. The same discounted gate derivative is used above for
+        # residual rows and here for region blocks. Forward bytes and gradients
+        # into the transmitted values themselves remain unchanged.
+        selection_scale = self.config.spatial_gate.region_selection_rate_gradient_scale
         st = support(local_rt, steps[:3], continuous=self.region_translation)
         sr = support(local_rr, steps[3:], continuous=self.region_rotation)
         rid = torch.cat((self._region_id_lengths.new_zeros(1), self._region_id_lengths))
@@ -1251,14 +1295,19 @@ class SpatialGatedMotion(MotionBase):
             relative_motion_loss=relative * self.config.relative_motion_loss_weight * ramp,
             rate_bytes_surrogate=soft_bytes, rate_fraction=rate, relative_motion=relative)
         if self.joint_image_gradients or self.relative_regions or self.shared_image_recode:
-            result['candidate_motion_loss'] = candidate_relative * self.config.relative_motion_loss_weight * ramp
+            result['candidate_motion_loss'] = ramp * (
+                candidate_relative * self.config.relative_motion_loss_weight +
+                candidate_bytes / self.rate_normalization_bytes * self.effective_rate_loss_weight *
+                (codec_scale if codec else 1.))
+            result['candidate_rate_bytes_surrogate'] = candidate_bytes.detach()
         if codec:
             result['rate_codec_measured'] = self.base_xyz.new_tensor(codec_bytes is not None)
         if diagnostics:
             result.update(self._support_diagnostics(probabilities))
             result.update(rate_bytes_hard=self._hard_motion_bytes() + self._metadata_bytes(),
                 rate_normalization_gs_count=self.base_xyz.new_tensor(self.rate_normalization_count),
-                rate_byte_price=self.base_xyz.new_tensor(self.effective_rate_loss_weight * ramp / self.rate_normalization_bytes))
+                rate_byte_price=self.base_xyz.new_tensor(self.effective_rate_loss_weight * ramp / self.rate_normalization_bytes),
+                region_selection_rate_gradient_scale=self.base_xyz.new_tensor(selection_scale))
             if codec:
                 result.update(rate_bytes_raw=result['rate_bytes_hard'],
                               rate_bytes_hard=self.base_xyz.new_tensor(codec_bytes),
@@ -1315,6 +1364,8 @@ class SpatialGatedMotion(MotionBase):
             if self._hard_gate_frozen:
                 probabilities = probabilities.detach()
             weights = None if self._hard_gate_frozen else self._path_weights(probabilities)
+            rate_weights = (None if self._hard_gate_frozen else
+                            self._path_weights(self._rate_gate_probabilities(probabilities)))
             paths = [self.owner] if self._hard_gate_frozen else self.spatial_paths.unbind(1)
             expected, fitted, expected_bytes = zero, zero, zero
             observed = self.observations.gt(0).to(rt)
@@ -1323,13 +1374,18 @@ class SpatialGatedMotion(MotionBase):
                     state['metric'], self.gs_steps, l1, price, self._gs_id_lengths + 1)
                 cost = cost * observed
                 weight = 1. if weights is None else weights[:, level]
-                expected = expected + (weight * cost.detach()).sum()
-                expected_bytes = expected_bytes + (weight * byte_cost * observed).sum()
+                rate_weight = 1. if rate_weights is None else rate_weights[:, level]
+                priced_bytes = byte_cost * observed
+                nonrate = cost - price * priced_bytes
+                expected = expected + (weight * nonrate.detach()).sum()
+                expected = expected + (rate_weight * (price * priced_bytes).detach()).sum()
+                expected_bytes = expected_bytes + (weight * priced_bytes).sum()
                 fitted = fitted + cost.sum() / len(paths)
             active_t, active_r = rt.ne(0).any(-1).to(rt), rr.ne(0).any(-1).to(rr)
             ids = torch.cat((self._region_id_lengths.new_zeros(1), self._region_id_lengths)) + 1
             region_cost = (active_t + active_r - active_t * active_r) * ids + 6 * (active_t + active_r)
-            selection = self._region_selection_probabilities(probabilities)
+            selection = self._region_selection_probabilities(
+                self._rate_gate_probabilities(probabilities))
             region_bytes = (selection * region_cost).sum()
             # Expected costs train only the gate. The envelope fits predictors
             # independently; photo-only GS Adam receives neither derivative.
@@ -1344,6 +1400,8 @@ class SpatialGatedMotion(MotionBase):
             result.update(self._support_diagnostics(self._frontier_probabilities()))
             result.update(rate_bytes_surrogate=hard_bytes, rate_bytes_hard=hard_bytes,
                 rate_byte_price=self.base_xyz.new_tensor(price),
+                region_selection_rate_gradient_scale=self.base_xyz.new_tensor(
+                    self.config.spatial_gate.region_selection_rate_gradient_scale),
                 rate_normalization_gs_count=self.base_xyz.new_tensor(self.rate_normalization_count),
                 rate_normalization_bytes=self.base_xyz.new_tensor(self.rate_normalization_bytes))
         return result

@@ -2,7 +2,7 @@
 
 For a scalar opacity gate, Rademacher image VJPs estimate the squared norm
 of its image Jacobian. This approximates individual removal influence;
-simultaneous removals interact, so use progressive pruning and recovery fit.
+simultaneous removals interact, so validate the pruned result separately.
 Scores use training cameras only. Historical checkpoints are never modified.
 """
 import argparse
@@ -61,7 +61,8 @@ def coverage_selection(scores, groups, target, minimum=2):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkpoint',type=Path,required=True)
-    parser.add_argument('--render-config',type=Path,default=ROOT/'config/fs_units_300.yaml')
+    parser.add_argument('--render-config',type=Path,required=True,
+        help='Rendering configuration for the checkpoint dataset and resolution')
     parser.add_argument('--output',type=Path,required=True)
     budget=parser.add_mutually_exclusive_group(required=True)
     budget.add_argument('--target-count',type=int)
@@ -82,6 +83,10 @@ def main():
     torch.set_num_threads(2)
     config,extra=to_structured(OmegaConf.load(args.render_config),Config)
     if extra:raise ValueError(extra)
+    expected_size=config.data.expected_image_size
+    if expected_size is None or len(expected_size)!=2:
+        raise ValueError('render-config must specify expected_image_size as [width, height]')
+    expected_shape=(3,int(expected_size[1]),int(expected_size[0]))
     config.data.extra_dataset_kwargs['num_frames']=1
     packet=torch.load(args.checkpoint,map_location='cuda',weights_only=False)
     if packet.get('current_frame')!=0:raise ValueError('Expected static frame0')
@@ -106,6 +111,9 @@ def main():
         if (coverage_state.frame_index != 0 or coverage_state.spatial_paths is None
                 or not torch.equal(coverage_state.xyz,raw['xyz'].cpu())):
             raise ValueError('Coverage reference must have identical post-opacity frame0 positions')
+    view,count=base._cam00(dm,0,torch.device('cuda'))
+    if count!=1 or tuple(view.image.shape)!=expected_shape:
+        raise ValueError(f'Wrong evaluation camera or image size: expected {expected_shape}')
     alpha=model.get_opacity.detach().clone().requires_grad_(True)
     module.renderer.gaussians=RawView(raw,config.module.sh_degree,model,alpha)
     dm.current_frame=0
@@ -160,8 +168,7 @@ def main():
             selected_rows_replaced=int((~global_mask[coverage_selected]).sum()))
         selected = coverage_selected
     remove=torch.ones(old_count,dtype=torch.bool,device='cuda');remove[selected]=False
-    view,count=base._cam00(dm,0,torch.device('cuda'))
-    if count!=1 or tuple(view.image.shape)!=(3,1008,1345):raise ValueError('Wrong evaluation camera')
+    view,_=base._cam00(dm,0,torch.device('cuda'))
 
     @torch.no_grad()
     def evaluate():
@@ -192,7 +199,7 @@ def main():
         retained_attribute_sha=reference_digest(actual),optimizer_rows_verified=True,
         coverage=coverage_report,
         score_quantiles=torch.quantile(scores.cpu(),torch.tensor([0.,.1,.5,.9,1.],dtype=torch.float64)).tolist(),
-        scope='Native training-camera image-Jacobian energy estimated by Rademacher VJP, not exact joint deletion cost. No GT pixels in per-point scores. cam00 evaluates model selection only, not independent generalization. Recover with static fitting, then validate dynamic30/300 before claims.')
+        scope='Native training-camera image-Jacobian energy estimated by Rademacher VJP, not exact joint deletion cost. No GT pixels in per-point scores. cam00 evaluates model selection only, not independent generalization. Retained attributes are unchanged; validate dynamic30/300 before dynamic claims.')
     paths[1].write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2),flush=True)
 

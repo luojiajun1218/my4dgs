@@ -19,11 +19,14 @@ from dataclasses import asdict
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import patch
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from pipeline.model import rigid_tree_codec as M, sparse_integer_codec as S
+from pipeline.model import sparse_integer_codec as layout
 from pipeline.model.birth_quantization import (
     QuantizedNewGaussianView,
     RAW_ATTRIBUTES,
@@ -31,6 +34,7 @@ from pipeline.model.birth_quantization import (
     materialize_quantized_gaussians,
     model_raw,
 )
+from pipeline.model.frame_plan_birth import nearest_old_references
 from pipeline.model.gaussian import GaussianModel
 from pipeline.model.legacy_opacity_codec import (
     HEADER,
@@ -38,7 +42,7 @@ from pipeline.model.legacy_opacity_codec import (
     decode_opacity_delta,
     opacity_reference_hash,
 )
-from pipeline.model.rigid_residual_tree import RigidTreeConfig
+from pipeline.model.rigid_residual_tree import RigidTreeConfig, quaternion_multiply, rotation_vector_quaternion
 from pipeline.model.rigid_tree_birth_codec import export_birth_attributes
 from pipeline.model.rigid_tree_codec import DecodedState, decode_motion
 from pipeline.model.sparse_updates import (
@@ -58,6 +62,8 @@ from pipeline.trainer import Trainer
 from scripts import benchmark_rigid_residual_tree as benchmark
 from scripts.benchmark_rigid_residual_tree import _decode_frame
 from scripts.replay_rigid_tree import decode_frame, replay
+from tests import test_spatial_motion as spatial_tests
+
 
 # ----- test_rigid_tree_compression -----
 ROOT = Path(__file__).resolve().parents[1]
@@ -521,16 +527,30 @@ class FakeNativeGaussians:
             setattr(self, name, torch.nn.Parameter(value.detach()[~mask].clone()))
 
 
-def fake_module(config, gaussians, frame):
+def fake_module(config, gaussians, frame, num_init_steps=15000):
     holder = SimpleNamespace(config=config, gaussians=gaussians,
         renderer=SimpleNamespace(gaussians=None), current_frame=frame,
-        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=15000)),
+        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=num_init_steps)),
         _freeze_base=lambda: [getattr(gaussians, name).requires_grad_(False)
                               for name in module.RAW_ATTRIBUTES])
     return holder
 
 
 class NativeReferencePruningTests(unittest.TestCase):
+    def test_native_bootstrap_requires_exact_fixed_15000_step_protocol(self):
+        config = module.ModuleConfig(initial_opacity_threshold=.015)
+        native = FakeNativeGaussians()
+        configured_11k = fake_module(
+            config, native, frame=0, num_init_steps=11_000)
+        with self.assertRaisesRegex(ValueError, 'exactly 15000 steps'):
+            module.Module.on_load_checkpoint(configured_11k,
+                dict(global_step=11_000, gaussians=native.capture()))
+
+        configured_15k = fake_module(config, native, frame=0)
+        with self.assertRaisesRegex(ValueError, '15000-step'):
+            module.Module.on_load_checkpoint(configured_15k,
+                dict(global_step=14_999, gaussians=native.capture()))
+
     def test_threshold_validation_and_full_delete_guard(self):
         for bad in (-.01, 1., float('nan'), float('inf'), True, '0.015'):
             with self.subTest(threshold=bad), self.assertRaisesRegex(
@@ -572,7 +592,10 @@ class NativeReferencePruningTests(unittest.TestCase):
                 motion_committed=False, reference_count=2, report=None,
                 birth_control={}), births=None)
         restored = FakeNativeGaussians()
-        resume = fake_module(config, restored, frame=1)
+        # The fixed bootstrap protocol must not make historical rigid-tree
+        # checkpoints unreadable: their native first-frame step is no longer
+        # consulted once the encoded dynamic state exists.
+        resume = fake_module(config, restored, frame=1, num_init_steps=11_000)
         module.Module.on_load_checkpoint(resume, own)
         self.assertEqual(restored.prune_calls, 0)
         self.assertEqual(len(restored._xyz), 2)
@@ -893,14 +916,14 @@ class Rows:
             setattr(self, attr, getattr(self, attr)[~remove].clone())
 
 
-def reference_raw():
+def reference_raw(rest=3):
     xyz = torch.cartesian_prod(*[torch.tensor([-1., 1.])] * 3)
     ids = torch.arange(len(xyz), dtype=torch.float32)
     return dict(xyz=xyz, rotation=torch.tensor([[1., 0., 0., 0.]] * len(xyz)),
         logscale=ids[:, None].expand(-1, 3).clone() * .03,
         opacity=torch.logit(torch.tensor([[.005]] + [[.7]] * (len(xyz) - 1))),
         sh_dc=ids[:, None, None].expand(-1, 1, 3).clone() * .1,
-        sh_rest=ids[:, None, None].expand(-1, 3, 3).clone() * .01)
+        sh_rest=ids[:, None, None].expand(-1, rest, 3).clone() * .01)
 
 
 def motion_model(raw):
@@ -1749,5 +1772,235 @@ class SequenceAggregationTests(unittest.TestCase):
                                                      manifest['reference'])
 
 
-if __name__ == '__main__':
+class SurvivorCompositionTests(unittest.TestCase):
+    @staticmethod
+    def encode_birth(prior, rows, sources, xyz, rotation):
+        region = torch.zeros(len(prior.parents), 3, dtype=torch.int16)
+        point = torch.zeros(len(rows), 3, dtype=torch.int16)
+        packet = codec.encode_motion(prior, 1, 2., rows, prior.owner[rows], prior.parents,
+            region, region, point, point, sources, xyz, rotation, .001, .001,
+            gs_translation_step_extent=.001, gs_rotation_step_rad=.001,
+            spatial_open=prior.spatial_open, birth_pose_steps=(.001, .001))
+        return codec.decode_motion(packet, prior)
+
+    def test_newborn_wire_preserves_real_hemisphere_crossing_bits(self):
+        # Real Sear frame29 source bits and quantized offset. Decoding must not
+        # silently flip the newborn quaternion after adding these symbols.
+        raw = reference_raw()
+        motion = motion_model(raw)
+        prior = motion.frame_reference_state
+        source = torch.tensor([1049086535, 1060256257, -1093275528, -1090183663],
+                              dtype=torch.int32).view(torch.float32)
+        prior.rotation[2] = source
+        identity = rotation_vector_quaternion(source.new_zeros(1, 3))
+        predictor = F.normalize(quaternion_multiply(identity, source[None]), dim=-1)[0]
+        symbols = torch.tensor([249., -1086., -283., 824.])
+        actual = predictor + symbols * .001
+        self.assertLess(float((actual * predictor).sum()), 0.)
+        rows = torch.arange(len(prior.xyz))
+        decoded = self.encode_birth(prior, rows, torch.tensor([2]),
+                                    prior.xyz[2:3].clone(), actual[None])
+        self.assertTrue(torch.equal(decoded.rotation[-1].view(torch.int32), actual.view(torch.int32)))
+
+    def test_deleted_parent_reanchors_opposite_hemisphere_and_decodes(self):
+        target = F.normalize(torch.tensor([.5, -.4, -.7, .3]), dim=0)
+        raw = reference_raw()
+        raw['rotation'][:] = -target
+        motion = motion_model(raw)
+        prior = motion.frame_reference_state
+        rows = torch.tensor([0, 1, 3, 4, 5, 6, 7])  # Delete the old source row 2.
+        reference = {name: value[rows].clone() for name, value in raw.items()}
+        newborn = {name: raw[name][0:1].clone() for name in RAW_FIELDS}
+        newborn['rotation'] = target[None].detach()
+        sources = nearest_old_references(newborn, reference, 2.)
+        self.assertEqual(sources.tolist(), [0])
+        model = Rows(newborn)
+        model._rotation.requires_grad_()
+        view = QuantizedNewGaussianView(model, BirthConfig(), 2., reference, sources)
+        quantized = view.raw_value('rotation')
+        self.assertGreater(float((quantized.detach()[0] * target).sum().abs()), .999)
+        self.assertLess(float((quantized.detach()[0] * target).sum()), 0.)
+        gradient, = torch.autograd.grad(quantized.sum(), model._rotation)
+        self.assertTrue(bool(torch.isfinite(gradient).all()) and bool(gradient.ne(0).any()))
+        decoded = self.encode_birth(prior, rows, sources, view.raw_value('xyz').detach(),
+                                    quantized.detach())
+        self.assertTrue(torch.equal(decoded.rotation[-1].view(torch.int32),
+                                    quantized.detach()[0].view(torch.int32)))
+
+    def test_nonspatial_matches_wire_with_survivors_and_owner_edits(self):
+        prior,args=packet_fixture(16)
+        rows=torch.tensor([0,2,4,6,8,10,12,14])
+        owner=prior.owner[rows].clone();owner[0]=0
+        parents=prior.parents
+        rt,rr=args[6:8];gt,gr=args[8:10]
+        metadata=(1.234567890123,.000123456789,.00123456789)
+        steps=dict(gs_translation_step_extent=.0000123456789,gs_rotation_step_rad=.000987654321)
+        inputs=(prior,1,metadata[0],rows,owner,parents,rt,rr,gt[rows],gr[rows],
+            torch.empty(0,dtype=torch.long),torch.empty(0,3),torch.empty(0,4),*metadata[1:])
+        decoded=codec.decode_motion(codec.encode_motion(*inputs,**steps),prior)
+        xyz,q=codec.compose_decoded_survivors(prior,metadata[0],rows,owner,parents,
+            rt,rr,gt[rows],gr[rows],*metadata[1:],**steps)
+        self.assertTrue(torch.equal(xyz,decoded.xyz));self.assertTrue(torch.equal(q,decoded.rotation))
+
+    def test_spatial_relative_offsets_match_wire_and_never_recurse(self):
+        for relative in (False,True):
+            with self.subTest(relative=relative):
+                model=spatial_tests.SpatialGatedMotionTests().model(repetitions=2)
+                prior=model.codec_previous_state
+                # Nonunit raw quaternions detect unwanted normalization.
+                prior.rotation=prior.rotation*1.00123
+                rows=torch.arange(len(prior.xyz))[1:]
+                owner=prior.owner[rows];parents=prior.parents;opened=prior.spatial_open
+                g=torch.Generator().manual_seed(37)
+                rt=torch.randint(-20,21,(len(parents),3),generator=g,dtype=torch.int16);rt[0]=0
+                rr=torch.randint(-20,21,rt.shape,generator=g,dtype=torch.int16);rr[0]=0
+                gt=torch.randint(-30,31,(len(rows),3),generator=g,dtype=torch.int16)
+                gr=torch.randint(-30,31,gt.shape,generator=g,dtype=torch.int16)
+                extent=1.234567890123;step=.000123456789;rstep=.00123456789
+                options=dict(gs_translation_step_extent=.0000123456789,gs_rotation_step_rad=.000987654321,
+                    spatial_open=opened,spatial_relative=relative)
+                xyz,q=codec.compose_decoded_survivors(prior,extent,rows,owner,parents,rt,rr,gt,gr,step,rstep,**options)
+                sources=torch.tensor([0,len(rows)-1]);birth_xyz=xyz[sources]+.0001
+                birth_q=torch.nn.functional.normalize(q[sources],dim=-1)+.001
+                inputs=(prior,1,extent,rows,owner,parents,rt,rr,gt,gr,sources,birth_xyz,birth_q,step,rstep)
+                with patch.object(codec,'decode_motion',side_effect=AssertionError('encoder must not decode')):
+                    packet=codec.encode_motion(*inputs,birth_pose_steps=(.00001,.001),compression='auto',**options)
+                decoded=codec.decode_motion(packet,prior)
+                self.assertTrue(torch.equal(xyz,decoded.xyz[:len(rows)]))
+                self.assertTrue(torch.equal(q,decoded.rotation[:len(rows)]))
+                expected_xyz=xyz[sources]+torch.round((birth_xyz-xyz[sources])/.00001)*.00001
+                predictor=torch.nn.functional.normalize(q[sources],dim=-1)
+                expected_q=predictor+torch.round((birth_q-predictor)/.001)*.001
+                self.assertTrue(torch.equal(expected_xyz,decoded.xyz[len(rows):]))
+                self.assertTrue(torch.equal(expected_q,decoded.rotation[len(rows):]))
+
+    def test_motion_convenience_method_does_not_mutate_or_encode(self):
+        model=spatial_tests.SpatialGatedMotionTests().model(repetitions=2)
+        before=model.codec_previous_state.digest()
+        with patch.object(codec,'encode_motion',side_effect=AssertionError('pure composition')):
+            xyz,q=model.decoded_survivor_pose()
+        self.assertEqual(before,model.codec_previous_state.digest())
+        rt,rr,gt,gr=model._values(hard=True)
+        empty=torch.empty(0,dtype=torch.long)
+        packet=codec.encode_motion(model.frame_reference_state,model.frame_index,model.extent,
+            model.previous_rows,model.owner,model.parents,rt,rr,gt,gr,empty,torch.empty(0,3),torch.empty(0,4),
+            model.config.motion_xyz_step_extent,model.config.motion_rotation_step_rad,
+            gs_translation_step_extent=model.config.gs_xyz_step_extent,gs_rotation_step_rad=model.config.gs_rotation_step_rad,
+            spatial_open=model.opened,spatial_relative=model.relative_regions)
+        decoded=codec.decode_motion(packet,model.frame_reference_state)
+        self.assertTrue(torch.equal(xyz,decoded.xyz));self.assertTrue(torch.equal(q,decoded.rotation))
+
+
+class BulkSparseDecodeTests(unittest.TestCase):
+    def test_bulk_varints_match_scalar_canonical_reader_and_leave_trailers(self):
+        rng=np.random.default_rng(728)
+        values=np.r_[np.array([0,1,127,128,16383,16384,65535,65536,2**28,2**32-1],dtype=np.uint64),
+                     rng.integers(0,2**32,size=10001,dtype=np.uint64)]
+        encoded=layout.encode_unsigned_values(values)
+        for count in (0,1,9,10,len(values)):
+            with self.subTest(count=count):
+                scalar=layout._Reader(encoded+b'trailer');bulk=layout._Reader(encoded+b'trailer')
+                expected=[scalar.integer() for _ in range(count)]
+                actual=layout._read_unsigned_values(bulk,count)
+                self.assertEqual(actual.tolist(),expected)
+                self.assertEqual(bulk.cursor,scalar.cursor)
+                self.assertEqual(bytes(bulk.take(bulk.remaining)),bytes(scalar.take(scalar.remaining)))
+
+    def test_bulk_rejects_the_scalar_readers_malformed_and_noncanonical_words(self):
+        examples=[(b'\x80\x00',1),(b'\x81\x00',1),(b'\x80'*5+b'\x01',1),
+                  (b'\xff'*4+b'\x10',1),(b'\x80',1),(b'\x00',2),(b'\x00\x81\x00',2)]
+        for data,count in examples:
+            with self.subTest(data=data,count=count):
+                scalar=layout._Reader(data)
+                with self.assertRaises(ValueError):
+                    for _ in range(count):scalar.integer()
+                with self.assertRaises(ValueError):
+                    layout._read_unsigned_values(layout._Reader(data),count)
+
+    def test_large_mixed_sparse_blocks_reconstruct_exact_bytes_and_integer_arrays(self):
+        rng=np.random.default_rng(7421)
+        for count in (0,1,10003):
+            t=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
+            r=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
+            t[rng.random(count)<.7]=0;r[rng.random(count)<.85]=0
+            raw=bytearray();codec._sparse_write(raw,t,r)
+            reader=layout._Reader(raw)
+            planar=layout._encode_sparse(reader,count)
+            reconstructed=layout._decode_sparse(layout._Reader(planar),count)
+            self.assertEqual(bytes(raw),reconstructed)
+            decoded_t,decoded_r=codec._sparse_read(codec._Reader(reconstructed),count,delta_rows=True)
+            torch.testing.assert_close(decoded_t,torch.from_numpy(t),rtol=0,atol=0)
+            torch.testing.assert_close(decoded_r,torch.from_numpy(r),rtol=0,atol=0)
+
+    def test_gap_validation_preserves_survivor_and_deletion_boundaries(self):
+        for values,limit,deletion,valid in [([1,1,1],3,False,True),([0,0,0],3,True,True),
+                ([1,2,1],3,False,False),([0],3,False,False),([0,0,1],3,True,False)]:
+            data=layout.encode_unsigned_values(values);reader=layout._Reader(data)
+            if valid:self.assertEqual(reader.gaps(len(values),limit,deletion=deletion),data)
+            else:
+                with self.assertRaises(ValueError):reader.gaps(len(values),limit,deletion=deletion)
+
+    def test_spatial_decode_does_not_compute_unused_rigid_pivots(self):
+        model=spatial_tests.JointImageRateTests().model()
+        payload=spatial_tests.JointImageRateTests.packet(model)
+        with patch.object(codec,'region_pivots',side_effect=AssertionError('unused spatial pivots')):
+            decoded=codec.decode_motion(payload,model.frame_reference_state)
+        xyz,q=model.materialized_pose()
+        torch.testing.assert_close(decoded.xyz,xyz,rtol=0,atol=0)
+        torch.testing.assert_close(decoded.rotation,q,rtol=0,atol=0)
+
+    def test_retained_planar_arrays_match_raw_parser_and_preserve_section_cursor(self):
+        rng=np.random.default_rng(8102)
+        for count in (0,1,12003):
+            t=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
+            r=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
+            t[rng.random(count)<.6]=0;r[rng.random(count)<.9]=0
+            raw=bytearray();codec._sparse_write(raw,t,r)
+            planar=layout._encode_sparse(layout._Reader(raw),count)
+            retained=[]
+            self.assertEqual(bytes(raw),layout._decode_sparse(layout._Reader(planar),count,decoded=retained))
+            sections={0:(len(raw),count,*retained[0])}
+            reader=codec._Reader(raw+b'trailer')
+            actual=codec._sparse_read(reader,count,delta_rows=True,sparse_sections=sections)
+            self.assertFalse(sections)
+            self.assertEqual(bytes(reader.take(7)),b'trailer')
+            for value,expected in zip(actual,(t,r)):
+                torch.testing.assert_close(value,torch.from_numpy(expected),rtol=0,atol=0)
+
+    def test_retained_sections_cannot_bypass_zero_block_validation(self):
+        for flag in (1,2,3):
+            raw=b'\x01\x01'+bytes([flag])+b'\0'*(6*(bool(flag&1)+bool(flag&2)))
+            planar=layout._encode_sparse(layout._Reader(raw),1)
+            with self.assertRaisesRegex(ValueError,'Redundant zero'):
+                codec._sparse_read(codec._Reader(raw),1,delta_rows=True)
+            with self.assertRaisesRegex(ValueError,'Redundant zero'):
+                layout._decode_sparse(layout._Reader(planar),1,decoded=[])
+
+    def test_retaining_an_empty_section_does_not_allocate_untrusted_population_size(self):
+        retained=[]
+        with patch.object(layout.np,'zeros',side_effect=AssertionError('dense allocation before state check')):
+            self.assertEqual(layout._decode_sparse(layout._Reader(b'\0'),2**32-1,decoded=retained),b'\0')
+        self.assertTrue(all(value.size==0 for value in retained[0]))
+
+    def test_whole_packet_uses_retained_sections_and_checks_original_checksum(self):
+        model=spatial_tests.JointImageRateTests().model()
+        raw=codec.uncompressed_motion_packet(spatial_tests.JointImageRateTests.packet(model))
+        planar=layout.pack_layout(layout.encode_motion_layout(raw),len(raw),layout.MOTION_MAGICS)
+        expected=codec.decode_motion(raw,model.frame_reference_state)
+        original=codec._sparse_read
+        def checked(reader,count,**kwargs):
+            self.assertIn(reader.cursor,kwargs['sparse_sections'])
+            return original(reader,count,**kwargs)
+        with patch.object(codec,'_sparse_read',side_effect=checked) as read:
+            actual=codec.decode_motion(planar,model.frame_reference_state)
+        self.assertEqual(read.call_count,2)
+        self.assertEqual(actual.digest(),expected.digest())
+        damaged=raw[:-1]+bytes([raw[-1]^1])
+        packet=layout.pack_layout(layout.encode_motion_layout(damaged),len(damaged),layout.MOTION_MAGICS)
+        with patch.object(codec,'_compose_decoded_pose',side_effect=AssertionError('must validate first')), \
+                self.assertRaisesRegex(ValueError,'checksum'):
+            codec.decode_motion(packet,model.frame_reference_state)
+
+
+if __name__ == "__main__":
     unittest.main()

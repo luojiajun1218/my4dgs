@@ -29,6 +29,13 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
     if flags.FLAGS.config:
         args = oc.merge(oc.load(flags.FLAGS.config), args)
 
+    # Removed production policies must not silently survive as libgs extras.
+    birth = oc.select(args, "module.birth", default={}) or {}
+    removed = sorted(key for key in birth if key.startswith("tail_commit_"))
+    if removed:
+        raise ValueError(f"Removed ABCD/periodic attribute policies: {removed}. "
+                         "Remove these keys and start a new experiment from the shared first frame.")
+
     # libgs retains valid strings after trying to call typing.Optional itself.
     # Silence only these known Path/str conversion notices, not other warnings.
     with warnings.catch_warnings():

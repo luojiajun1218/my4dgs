@@ -19,7 +19,8 @@ from libgs.pipeline import Trainer as BaseTrainer
 from libgs.pipeline import TrainerConfig as BaseTrainerConfig
 
 from .data import PairedFetcher
-from .model.birth_quantization import RAW_FIELDS, model_raw
+from .model.birth_quantization import RAW_FIELDS, model_raw, reference_digest
+from .model.residual_birth import RawView
 from .module import restore_retired_reference, uses_residual_birth,uses_early_replacement
 from libgs.metric import psnr
 
@@ -35,6 +36,11 @@ class TrainerConfig(BaseTrainerConfig):
     stage_image_camera: Optional[str] = None
     motion_views_per_step: int = 1
     birth_views_per_step: int = 1
+    # Kept for loading checkpoints from before population-window retirement.
+    population_window_size: int = 0
+    population_window_joint_steps: int = 10
+    population_window_views_per_step: int = 1
+    population_window_selection_views: int = 4
 
 
 def step_phase(step, motion_steps, gate_start, freeze, refit_steps):
@@ -86,6 +92,11 @@ class Trainer(BaseTrainer):
             raise ValueError('Hard per-frame training budget is 300 total steps including motion, birth and refit')
 
     def setup(self, module, ckpt_path=None):
+        if (getattr(getattr(module.config, 'birth', None), 'frame_training_plan', False) and
+                self.config.stage_image_camera not in (None, 'cam00.png')):
+            raise ValueError('Frame-plan stage diagnostics require heldout cam00.png')
+        if self.config.population_window_size:
+            raise ValueError('Population-window training is retired; historical packets remain decodable')
         if (isinstance(self.config.motion_views_per_step, bool) or
                 not isinstance(self.config.motion_views_per_step, int) or
                 self.config.motion_views_per_step < 1):
@@ -130,6 +141,9 @@ class Trainer(BaseTrainer):
                 saved_trainer = {**saved_trainer, 'stage_image_camera': None}
             if isinstance(saved_trainer, dict):
                 saved_trainer = {'birth_views_per_step': 1, 'motion_views_per_step': 1, **saved_trainer}
+                for name in ('population_window_size', 'population_window_joint_steps',
+                             'population_window_views_per_step', 'population_window_selection_views'):
+                    saved_trainer.setdefault(name, getattr(TrainerConfig(), name))
             if extension_plan is None and (
                     ckpt.get('rigid_tree_data_config') != asdict(self.datamodule.config) or
                     saved_trainer != asdict(self.config)):
@@ -145,11 +159,13 @@ class Trainer(BaseTrainer):
         self._resume_rng = ckpt.get('rng_state')
         if ckpt.get('rigid_tree_version') is None:
             self._write_reference(frame_index=0)
+            tail = ('regional attribute repair' if self.module.config.full_update.regional_repair
+                    else 'birth')
             logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
-                         '%d motion + %d birth steps',
+                         '%d motion + %d %s steps',
                          self.module.config.rigid_tree.spatial_gate.max_depth,
                          self.module.config.rigid_tree.motion_steps,
-                         self.module.config.rigid_tree.birth_steps)
+                         self.module.config.rigid_tree.birth_steps, tail)
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():
@@ -322,6 +338,9 @@ class Trainer(BaseTrainer):
                 package['birth_camera_index'] = camera
             if loss.requires_grad:
                 (loss / count).backward()
+            if (index == 0 and count > 1 and step in (201, 250, 300) and
+                    getattr(getattr(self.module.config, 'full_update', None), 'regional_repair', False)):
+                self.module._plan_record_regional_image_gradients(step, viewpoint)
             loss_value = loss_value + loss.detach() / count
             for name, value in values.items():
                 metrics[name] = metrics.get(name, 0.) + value / count
@@ -329,7 +348,8 @@ class Trainer(BaseTrainer):
                 # Keep only evidence needed after backward, not full images.
                 package = {name: package[name] for name in
                     ('visibility_filter', 'motion_contribution_filter', 'viewspace_points',
-                     'radii','birth_feature_probe','birth_camera_index','birth_branch','birth_image_loss','birth_psnr')
+                     'radii','birth_feature_probe','birth_camera_index','birth_branch','birth_image_loss','birth_psnr',
+                     'regional_error_evidence')
                     if name in package}
             packages.append(package)
         metrics['gs'] = values['gs']
@@ -520,6 +540,8 @@ class Trainer(BaseTrainer):
                     if getattr(progress_bar, 'total', self.num_steps) != self.num_steps:
                         progress_bar.total = self.num_steps
                     if (self.config.stage_image_camera is not None and
+                            not getattr(getattr(self.module.config, 'birth', None),
+                                        'frame_training_plan', False) and
                             step == self.module.motion_steps):
                         handoff = getattr(getattr(self.module.config, 'birth', None),
                                           'source_handoff', False)
@@ -607,6 +629,10 @@ class Trainer(BaseTrainer):
             if step <= 150: return 'fixed_gate_residual'
             if step <= 180: return 'joint_gate_residual'
             if step <= 200: return 'fixed_gate_motion'
+            if getattr(self.module.config.birth, 'keep_incumbent_fixed_after_motion', False):
+                return 'newborn_fixed_incumbent'
+            tail = self.module.config.rigid_tree.spatial_gate.final_joint_refine_steps
+            if tail and step >= 301-tail: return 'final_joint_refine'
             return 'newborn_old_alpha'
         if uses_early_replacement(self.module.config) and step>70:
             return 'early_joint' if step<=200 else 'early_fixed_population'
@@ -619,6 +645,12 @@ class Trainer(BaseTrainer):
     def record_birth_comparison(self):
         """Same final fitted state, rendered with and without newborn GS."""
         if self.config.stage_image_camera is None:
+            return
+        if getattr(getattr(self.module.config, 'birth', None), 'frame_training_plan', False):
+            self._record_stage_image(self.module.total_steps, self._stage_viewpoint,
+                                     label='birth_off', old_only=True)
+            self._record_stage_image(self.module.total_steps, self._stage_viewpoint,
+                                     label='birth_on', old_only=False)
             return
         if uses_residual_birth(self.module.config):
             self._record_stage_image(self.module.total_steps, self._stage_viewpoint,
@@ -635,10 +667,80 @@ class Trainer(BaseTrainer):
                                  label='birth_on', old_only=False)
 
     @torch.no_grad()
-    def _record_stage_image(self, step, viewpoint=None, label=None, old_only=False):
+    def snapshot_frame_plan_reference(self):
+        """Keep the preceding decoded population for optional independent replay."""
+        self.module._plan_diagnostic_reference = None
+        if (self.config.stage_image_camera is None and not
+                getattr(getattr(self.module.config, 'birth', None), 'regional_postfit_admission', False)):
+            return
+        started = time.perf_counter()
+        try:
+            self.module._plan_diagnostic_reference = {
+                name: value.detach().cpu().clone()
+                for name, value in model_raw(self.module.gaussians).items()}
+        finally:
+            self._frame_diagnostic_seconds += time.perf_counter() - started
+
+    @torch.no_grad()
+    def record_frame_plan_stage(self, step, stage, *, old_only=False, old_pose=None):
+        if self.config.stage_image_camera is not None:
+            self._record_stage_image(step, self._stage_viewpoint, label=f'plan_{stage}',
+                                     old_only=old_only, old_pose=old_pose)
+
+    @torch.no_grad()
+    def record_frame_plan_decoded(self):
+        """Render the actual independently decoded packet, including all updates."""
+        if self.config.stage_image_camera is None:
+            return
+        started = time.perf_counter()
+        rng = self._capture_rng()
+        try:
+            # The same decoder is used for offline sequential stream verification.
+            # Its command-line module adds the repository root to sys.path;
+            # restore the process search path after loading it.
+            path = list(sys.path)
+            try:
+                from scripts.replay_rigid_tree import decode_frame, replay
+            finally:
+                sys.path[:] = path
+            prior = self.module.motion.frame_reference_state
+            raw = getattr(self.module, '_plan_diagnostic_reference', None)
+            if raw is None:
+                # Older mid-frame checkpoints predate the optional snapshot.
+                previous, raw = replay(self.output_dir / 'frame_storage' / 'rigid_tree',
+                                       self.decoder_reference_path, self.current_frame - 1)
+                if previous.digest() != prior.digest():
+                    raise ValueError('Diagnostic replay reference differs from the training reference')
+            directory = self.output_dir / 'frame_storage' / 'rigid_tree'
+            decoded, raw = decode_frame(directory, self.current_frame, prior, raw)
+            manifest = json.loads((directory / f'frame_{self.current_frame:03d}.json').read_text())
+            metadata = dict(
+                decoded_state_matches_manifest=decoded.digest().hex() == manifest['decoded_state_sha256'],
+                decoded_raw_matches_manifest=reference_digest(raw) == manifest['raw_state_sha256'],
+                population_old_count=int(manifest['old_count']),
+                population_birth_count=int(manifest['birth_count']))
+        finally:
+            self._restore_rng(rng)
+            self._frame_diagnostic_seconds += time.perf_counter() - started
+        self._record_stage_image(self.module.total_steps, self._stage_viewpoint,
+                                 label='plan_decoded', raw=raw, metadata=metadata)
+
+    @torch.no_grad()
+    def _record_stage_image(self, step, viewpoint=None, label=None, old_only=False,
+                            raw=None, metadata=None, old_pose=None):
         """One fixed heldout view; no gradients, selection, or RNG side effects."""
         started = time.perf_counter()
         rng = self._capture_rng()
+        renderer = self.module.renderer
+        previous_model = renderer.gaussians
+        missing = object()
+        previous_collection = getattr(renderer, 'collect_contributions', missing)
+        previous_contributions = getattr(renderer, 'last_contributions', missing)
+        render_cache = getattr(self.module.gaussians, '_render_cache', missing)
+        previous_cache = render_cache.copy() if render_cache is not missing else None
+        fields = ('rigid_xyz', 'rigid_rotation', 'rigid_opacity', 'rigid_alpha',
+                  'rigid_sh_dc', 'rigid_logscale')
+        previous_fields = {name: getattr(self.module.gaussians, name, missing) for name in fields}
         try:
             if viewpoint is None:
                 loader = self.datamodule.test_dataloader()
@@ -662,20 +764,74 @@ class Trainer(BaseTrainer):
                     if shutdown is not None:
                         shutdown()
             self._stage_viewpoint = viewpoint
-            rendered = self.module.forward(viewpoint, old_only=old_only)['render'].clamp(0, 1)
+            if raw is None and old_pose is None:
+                rendered = self.module.forward(viewpoint, old_only=old_only)['render'].clamp(0, 1)
+            else:
+                if old_pose is not None:
+                    if raw is not None or not old_only:
+                        raise ValueError('A diagnostic pose override requires the old-only population')
+                    current = model_raw(self.module.gaussians)
+                    xyz, rotation = old_pose
+                    if (xyz.shape != current['xyz'].shape or
+                            rotation.shape != current['rotation'].shape):
+                        raise ValueError('Diagnostic pose lost the incumbent row layout')
+                    current['xyz'], current['rotation'] = xyz, rotation
+                    feature = getattr(self.module, 'feature_dc_update', None)
+                    if feature is not None:
+                        current['sh_dc'] = feature(training=False)
+                    scale = getattr(self.module, 'logscale_update', None)
+                    if scale is not None and scale.ready:
+                        current['logscale'] = scale.current_logscale(current['logscale'])
+                    opacity = getattr(self.module, 'opacity_update', None)
+                    alpha = opacity.alphas() if opacity is not None else None
+                else:
+                    current = {name: value.to(self.device) for name, value in raw.items()}
+                    alpha = None
+                renderer.gaussians = RawView(current, self.module.gaussians.active_sh_degree,
+                                             self.module.gaussians, alpha)
+                if previous_collection is not missing:
+                    renderer.collect_contributions = False
+                rendered = renderer(viewpoint, self.module.background)['render'].clamp(0, 1)
             difference = rendered - viewpoint.image
+            old_count = len(self.module.gaussians._xyz)
+            birth_count = (len(self.module.births._xyz) if
+                           getattr(self.module, 'motion_committed', False) and
+                           not getattr(self.module, 'frame_finalized', False) else 0)
             record = dict(step=int(step), phase=label, camera=str(viewpoint.path),
                           mse=float(difference.square().mean()),
                           psnr=float(psnr(rendered, viewpoint.image)), old_only=old_only,
+                          representation='decoded_stream' if raw is not None else 'training_quantized',
+                          pose='pre_tail' if old_pose is not None else 'current',
+                          population_old_count=old_count, population_birth_count=birth_count,
                           shared_prestructure_active=bool(getattr(getattr(self.module, 'motion', None),
                                                                  'shared_prestructure_active', False)),
                           participates_in_training_or_selection=False)
+            if metadata:
+                record.update(metadata)
             records = self.module.stage_image_metrics
             records[:] = [item for item in records
                           if (item['step'], item['phase']) != (step, record['phase'])]
             records.append(record)
             return viewpoint
         finally:
+            renderer.gaussians = previous_model
+            if previous_collection is not missing:
+                renderer.collect_contributions = previous_collection
+            if previous_contributions is not missing:
+                renderer.last_contributions = previous_contributions
+            elif hasattr(renderer, 'last_contributions'):
+                delattr(renderer, 'last_contributions')
+            for name, value in previous_fields.items():
+                if value is not missing:
+                    setattr(self.module.gaussians, name, value)
+                elif hasattr(self.module.gaussians, name):
+                    delattr(self.module.gaussians, name)
+            if render_cache is not missing:
+                render_cache.clear()
+                render_cache.update(previous_cache)
+                self.module.gaussians._render_cache = render_cache
+            elif hasattr(self.module.gaussians, '_render_cache'):
+                delattr(self.module.gaussians, '_render_cache')
             self._restore_rng(rng)
             self._frame_diagnostic_seconds += time.perf_counter() - started
 

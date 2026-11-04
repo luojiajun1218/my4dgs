@@ -91,6 +91,10 @@ class DecodedState:
     # Packet-local previous row IDs, before appending births. Not part of the
     # materialized state digest: the state alone determines the next frame.
     survivor_rows: torch.Tensor | None = None
+    # Packet-local current old-row IDs carrying a transmitted point-translation
+    # residual. Attribute side streams may reuse this support without changing
+    # the geometry-state digest used to link consecutive motion packets.
+    gs_translation_rows: torch.Tensor | None = None
 
     def capture(self):
         return dict(xyz=self.xyz, rotation=self.rotation, owner=self.owner,
@@ -99,6 +103,7 @@ class DecodedState:
                     spatial_paths=self.spatial_paths, spatial_open=self.spatial_open,
                     spatial_centers=self.spatial_centers,
                     survivor_rows=self.survivor_rows,
+                    gs_translation_rows=self.gs_translation_rows,
                     **{name: getattr(self, name) for name in SPATIAL_ROUTING_FIELDS})
 
     @classmethod
@@ -107,7 +112,7 @@ class DecodedState:
         # states are CPU codec data. Preserve every tensor's saved dtype.
         fields = ('xyz', 'rotation', 'owner', 'parents', 'birth_sources',
                   'spatial_paths', 'spatial_open', 'spatial_centers',
-                  'survivor_rows', *SPATIAL_ROUTING_FIELDS)
+                  'survivor_rows', 'gs_translation_rows', *SPATIAL_ROUTING_FIELDS)
         restored = {name: (None if packet.get(name) is None else
                            torch.as_tensor(packet[name]).detach().cpu().contiguous())
                     for name in fields}
@@ -844,4 +849,5 @@ def decode_motion(payload, prior_state):
                         torch.tensor(sources, dtype=torch.long), paths, opened,
                         prior_state.spatial_centers,
                         survivor_rows=rows,
+                        gs_translation_rows=gt.ne(0).any(-1).nonzero(as_tuple=True)[0],
                         **{name: getattr(prior_state, name) for name in SPATIAL_ROUTING_FIELDS})

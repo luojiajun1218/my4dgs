@@ -1,0 +1,78 @@
+{
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/flame_steak_1028/fs_cov150_300/20261028T133500_9a96a2",
+  "frames": [
+    {
+      "frame": 29,
+      "original_RGB8_exact": true,
+      "metrics_RGB8": {
+        "full": 34.373872188408036,
+        "shared_only": 34.35422142507174,
+        "residual_only": 34.457648155744664,
+        "no_old_position_update": 34.43593464157823
+      },
+      "highlight_regions": {
+        "hand": 520,
+        "fire": 248,
+        "background": 43
+      },
+      "highlight_depths": {
+        "hand": 3,
+        "fire": 3,
+        "background": 2
+      },
+      "raw_sha": "66eea439d3c732d6aa4cfd5f14ca219c50b8e12fab7d03a3e9870e3ea1c3085e",
+      "checkpoint_sha": "abb59d71fb538e8fb42e7e89c25d7dea2fb9f0b860cf51cc109e4cd0f5537aca"
+    },
+    {
+      "frame": 149,
+      "original_RGB8_exact": true,
+      "metrics_RGB8": {
+        "full": 34.61726971786711,
+        "shared_only": 34.598436809670226,
+        "residual_only": 34.53742966909305,
+        "no_old_position_update": 34.51709903346827
+      },
+      "highlight_regions": {
+        "hand": 520,
+        "fire": 32,
+        "background": 43
+      },
+      "highlight_depths": {
+        "hand": 3,
+        "fire": 2,
+        "background": 2
+      },
+      "raw_sha": "a38825f69656aab0c58171018815bd45ef5c27217ddc74b0ac94e4a94c5bf5d6",
+      "checkpoint_sha": "ffd1ff03b5888f3936236fe424590cd3051f6028e13b723fa9fd70c5857528b7"
+    },
+    {
+      "frame": 269,
+      "original_RGB8_exact": true,
+      "metrics_RGB8": {
+        "full": 33.540674999508894,
+        "shared_only": 33.47960503327559,
+        "residual_only": 33.48947500384044,
+        "no_old_position_update": 33.411642946219274
+      },
+      "highlight_regions": {
+        "hand": 60,
+        "fire": 1954,
+        "background": 43
+      },
+      "highlight_depths": {
+        "hand": 2,
+        "fire": 4,
+        "background": 2
+      },
+      "raw_sha": "ead17732135690b4258a412e870bdc432de71f5eda1f9856eaa30e764c00a039",
+      "checkpoint_sha": "c29db7c1444eda28544b6ba9e5809a906bf90d858c20a02d019d12e658c81a17"
+    }
+  ],
+  "scope": "Render read-only photo-based figure evidence; no training or FPS timing.\n\nRegion masks use the native GS compositor, including all scene occluders.\nPosition interventions change this frame's surviving-old XYZ only; births and\nall other current attributes stay fixed. These are frozen render diagnostics.\n",
+  "no_training": true,
+  "no_FPS_claim": true,
+  "region_contributions": "Native sum of T*alpha per selected original encoded owner; other GS remain occluders. Coarse/fine are depth classes containing multiple regions.",
+  "frozen_interventions": "Surviving-old XYZ only. Current birth poses, all opacities, scale, SH and rotation held fixed. Not retrained methods.",
+  "candidate_partitions": "Saved reference spatial paths at depth2/depth4 on identical fitted geometry, native color rendering only; not trained fixed-granularity comparisons.",
+  "candidate_partition_paths": "Current decoded spatial_paths, exactly equal to saved training spatial_paths; previous-frame paths not reused."
+}

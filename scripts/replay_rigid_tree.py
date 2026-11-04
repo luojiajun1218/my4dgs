@@ -39,6 +39,9 @@ def apply_stream_opacity_update(directory, frame, current, old_count, manifest=N
 
 def decode_frame(directory: Path, frame: int, state, raw):
     """Materialize survivors first, then decode births using surviving sources."""
+    manifest_path = directory / f'frame_{frame:03d}.json'
+    if (directory / 'population_window.json').exists() and not manifest_path.is_file():
+        raise ValueError('Population-window frame has not been committed by a manifest')
     motion_file = directory / f'motion_{frame:03d}.bin'
     decoded = codec.decode_motion(motion_file.read_bytes(), state)
     rows = decoded.survivor_rows
@@ -52,7 +55,6 @@ def decode_frame(directory: Path, frame: int, state, raw):
     current['xyz'] = decoded.xyz[:old_count]
     current['rotation'] = decoded.rotation[:old_count]
     import json
-    manifest_path = directory / f'frame_{frame:03d}.json'
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     timing = manifest.get('opacity_update_timing', 'after_births')
     if timing not in ('before_births', 'after_births'):
@@ -70,6 +72,31 @@ def decode_frame(directory: Path, frame: int, state, raw):
             owner=decoded.owner[:old_count], node_count=len(decoded.parents))
     elif (directory / f'shdc_{frame:03d}.bin').exists():
         raise ValueError('Unexpected DC feature packet absent from frame manifest')
+    logscale_name = manifest.get('logscale_update')
+    if logscale_name is not None:
+        from pipeline.model.sparse_logscale import decode_logscale_delta
+        if (logscale_name != f'logscale_{frame:03d}.bin' or
+                manifest.get('logscale_update_timing', 'before_births') != 'before_births'):
+            raise ValueError('Log-scale packet must precede newborn attribute prediction')
+        if decoded.gs_translation_rows is None:
+            raise ValueError('Motion decoder lost point-translation support')
+        current['logscale'] = decode_logscale_delta(
+            (directory / logscale_name).read_bytes(), current['logscale'],
+            allowed_rows=decoded.gs_translation_rows, frame_index=frame).logscale
+    elif (directory / f'logscale_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected log-scale packet absent from frame manifest')
+    full_name = manifest.get('full_attribute_update')
+    if full_name is not None:
+        from pipeline.model.full_attribute_update import decode_full_attribute_delta
+        if (manifest.get('full_update') is not True or
+                full_name != f'fullattr_{frame:03d}.bin' or
+                manifest.get('full_attribute_update_timing') != 'after_regional_dc_before_births'):
+            raise ValueError('Full attributes must follow regional DC and precede newborn prediction')
+        reference = {name: current[name] for name in ('logscale', 'sh_dc', 'sh_rest')}
+        current.update(decode_full_attribute_delta((directory / full_name).read_bytes(),
+                                                   reference, frame_index=frame))
+    elif (directory / f'fullattr_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected full attribute packet absent from frame manifest')
     birth_file = directory / f'birth_{frame:03d}.bin'
     if birth_count:
         newborn = birth_codec.decode_birth_attributes(

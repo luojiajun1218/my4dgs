@@ -22,7 +22,8 @@ from libgs.metric import psnr,ssim
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkpoint',type=Path,required=True)
-    parser.add_argument('--render-config',type=Path,default=ROOT/'config/fs_units_300.yaml')
+    parser.add_argument('--render-config',type=Path,required=True,
+        help='Rendering configuration for the checkpoint dataset and resolution')
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--opacity-threshold',type=float,default=.0075)
     args=parser.parse_args()

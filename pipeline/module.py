@@ -1,6 +1,6 @@
 """Spatial gate motion, GS residuals, and quantized newborn Gaussians."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import math
 from pathlib import Path
@@ -20,130 +20,39 @@ from .model.gaussian import BirthGaussianModel, GaussianModel
 from .model.rigid_tree_birth_codec import export_birth_attributes
 from .model.birth_quantization import (RAW_ATTRIBUTES, RAW_FIELDS,
     QuantizedNewGaussianView, materialize_quantized_gaussians, model_raw,
-    reference_digest, family_quantization_diagnostics, patch_old_state,LiveReplacementView)
+    reference_digest)
 from .model.rigid_residual_tree import (RigidTreeConfig,
     quaternion_angle_error, quaternion_rotate,
     saved_config_with_default_motion_lr)
 from .model.contribution_renderer import ContributionRenderer
-from .model.spatial_gated_motion import SpatialGatedMotion
+from .model.full_attribute_update import (FullUpdateConfig, FullAttributeUpdate,
+    FullUpdateSpatialGatedMotion, FIELDS as FULL_ATTRIBUTE_FIELDS)
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
 from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpdate
-from .model.residual_birth import (ResidualBirthConfig, BirthTransaction,
-    SubsetView, propose as propose_residual_births, constrain_candidates,
-    admit as admit_residual_births, fitting_errors, refine_transaction, RawView,
-    selected_population, CommitTrial, encode_trial as encode_birth_trial,
-    validation_errors as birth_validation_errors, qualify_crossfit_novel,nearest_sources)
+from .model.sparse_logscale import (LogScaleUpdateConfig,
+    MotionSupportLogScaleUpdate)
+from .model.residual_birth import ResidualBirthConfig, BirthTransaction, RawView
 from .early_replacement import EarlyReplacementController
-from .frame_plan import FramePlanController, fitting_old_motion
+from .frame_plan import (FramePlanController, fitting_old_motion, regional_attribute_repair_active,
+                         effective_final_joint_refine_steps)
 
 
 BIRTH_ALLOCATION = 'clone_small_v1'
-RESIDUAL_BIRTH_ALLOCATION = 'quick_source_residual_300_v12'
-SHADOW_BIRTH_ALLOCATION = 'shadow_source_residual_300_v13'
-PERSISTENT_BIRTH_ALLOCATION = 'persistent_anchored_bank_300_v14'
-EARLY_BIRTH_ALLOCATION = 'early_source_replacement_300_v15'
 
 
 def uses_residual_birth(config):
     return getattr(getattr(config, 'birth', None), 'mechanism', 'clone') == 'residual_transaction'
 
 
-def uses_intrinsic_birth(config):
-    return uses_residual_birth(config) and getattr(config.birth, 'radiance_mode', 'free') in (
-        'inherited_intrinsic', 'conservative_detail')
-
-
-def uses_conservative_birth(config):
-    return uses_residual_birth(config) and getattr(config.birth, 'radiance_mode', 'free') == 'conservative_detail'
-
-
-def uses_surface_patch(config):
-    return uses_residual_birth(config) and getattr(config.birth, 'radiance_mode', 'free') == 'surface_patch'
-
-
-def uses_reincarnation(config):
-    return uses_residual_birth(config) and getattr(config.birth, 'radiance_mode', 'free') == 'support_reincarnation'
-
-
-def uses_dual_predictive(config):
-    return uses_residual_birth(config) and getattr(config.birth,'radiance_mode','free') in ('dual_predictive_reincarnation','source_residual')
-
-
-def uses_source_residual(config):
-    return uses_residual_birth(config) and getattr(config.birth,'radiance_mode','free') == 'source_residual'
-
-
-def uses_quick_source(config):
-    return uses_residual_birth(config) and getattr(config.birth,'radiance_mode','free') in ('quick_source_residual','shadow_source_residual')
-
-
-def uses_shadow_source(config):
-    return uses_residual_birth(config) and getattr(config.birth,'radiance_mode','free') == 'shadow_source_residual'
-
-
-def uses_persistent_birth(config):
-    return uses_residual_birth(config) and getattr(config.birth,'radiance_mode','free') == 'persistent_anchored_newborn'
-
-
 def uses_early_replacement(config):
-    return uses_residual_birth(config) and getattr(config.birth,'radiance_mode','free') in ('early_source_replacement','adaptive_residual_birth')
+    return (uses_residual_birth(config) and
+            getattr(config.birth, 'radiance_mode', 'free') == 'adaptive_residual_birth')
 
 
 def birth_allocation(config):
     if getattr(config.birth,'frame_training_plan',False):
         return 'frame_training_plan_v1'
-    return ('adaptive_residual_birth_300_v16' if getattr(config.birth,'radiance_mode','free')=='adaptive_residual_birth' else
-            EARLY_BIRTH_ALLOCATION if uses_early_replacement(config) else
-            PERSISTENT_BIRTH_ALLOCATION if uses_persistent_birth(config) else
-            SHADOW_BIRTH_ALLOCATION if uses_shadow_source(config) else
-            RESIDUAL_BIRTH_ALLOCATION if uses_residual_birth(config) else BIRTH_ALLOCATION)
-
-
-def freeze_birth_radiance(model, config):
-    """Preserve appearance parameter identity while geometry fits independently."""
-    if uses_intrinsic_birth(config):
-        for name in ('_features_dc', '_features_rest'):
-            parameter = getattr(model, name)
-            parameter.requires_grad_(False)
-            parameter.grad = None
-        if hasattr(model, 'family_contrast'):
-            model.family_contrast.requires_grad_(False)
-            model.family_contrast.grad = None
-
-
-def set_family_training_stage(model, terminal):
-    """Details receive a full probation cohort before mass can return to mother."""
-    if hasattr(model, 'family_gate_logit'):
-        model.family_gate_logit.requires_grad_(bool(terminal))
-        model.family_gate_logit.grad = None
-
-
-def birth_model_factory(sh_degree, capture=None, family_state=None, patch_state=None, reincarnation_state=None, predictive_model=False, source_residual=False, quick_source=False, shadow_source=False, persistent=False):
-    if persistent or (isinstance(capture,dict) and 'persistent_newborn' in capture):
-        from .model.persistent_newborn_model import PersistentNewbornModel
-        return PersistentNewbornModel(sh_degree)
-    if shadow_source or (isinstance(capture,dict) and 'shadow_source_residual' in capture):
-        from .model.shadow_source_residual_model import ShadowSourceResidualModel
-        return ShadowSourceResidualModel(sh_degree)
-    if quick_source or (isinstance(capture,dict) and 'quick_source_residual' in capture):
-        from .model.quick_source_residual_model import QuickSourceResidualModel
-        return QuickSourceResidualModel(sh_degree)
-    if source_residual or (isinstance(capture,dict) and 'source_residual' in capture):
-        from .model.source_residual_model import SourceResidualModel
-        return SourceResidualModel(sh_degree)
-    if predictive_model or (isinstance(capture,dict) and 'predictive_reincarnation' in capture):
-        from .model.predictive_reincarnation_model import PredictiveReincarnationModel
-        return PredictiveReincarnationModel(sh_degree)
-    if reincarnation_state is not None or (isinstance(capture, dict) and 'reincarnation' in capture):
-        from .model.reincarnation_model import ReincarnationModel
-        return ReincarnationModel(sh_degree)
-    if patch_state is not None or (isinstance(capture, dict) and 'patch' in capture):
-        from .model.surface_patch_model import SurfacePatchModel
-        return SurfacePatchModel(sh_degree)
-    if family_state is not None or isinstance(capture, dict):
-        from .model.conservative_family import ConservativeFamilyModel
-        return ConservativeFamilyModel(sh_degree)
-    return BirthGaussianModel(sh_degree)
+    return 'adaptive_residual_birth_300_v16' if uses_early_replacement(config) else BIRTH_ALLOCATION
 
 
 @dataclass
@@ -195,6 +104,19 @@ class BirthConfig:
     storage_warmup_steps: int = 20
     storage_ramp_steps: int = 70
     frame_training_plan: bool = False
+    keep_incumbent_fixed_after_motion: bool = False
+    keep_incumbent_alpha_after_motion: bool = False
+    regional_color_birth: bool = False
+    regional_alpha_repair: bool = False
+    regional_color_depth: int = 5
+    regional_color_l1_threshold: float = .03
+    regional_color_min_support: float = 32.
+    regional_color_min_views: int = 2
+    regional_color_reference_layout: Optional[str] = None
+    regional_postfit_admission: bool = False
+    # Allows population experiments to keep the motion/gate rate objective
+    # while fitting incumbent opacity without a byte-price objective.
+    population_rate_exempt: bool = False
     residual_support_init: bool = False
     joint_old_opacity: bool = False
     population_loss_weight: float = 0.0
@@ -209,11 +131,41 @@ class BirthConfig:
     def validate(self, motion_steps):
         if self.mechanism not in ('clone', 'residual_transaction'):
             raise ValueError('Unknown birth mechanism')
-        if self.radiance_mode not in ('free','inherited_intrinsic','conservative_detail','surface_patch','support_reincarnation','dual_predictive_reincarnation','source_residual','quick_source_residual','shadow_source_residual','persistent_anchored_newborn','early_source_replacement','adaptive_residual_birth'):
+        if self.radiance_mode not in ('free', 'conservative_detail', 'adaptive_residual_birth'):
             raise ValueError('Unknown newborn radiance mode')
+        if self.mechanism == 'residual_transaction' and self.radiance_mode != 'adaptive_residual_birth':
+            raise ValueError('Retired residual birth training modes are replay-only')
         self.residual.validate()
-        for name in ('storage_loss_enabled','survival_aware_storage','residual_support_init','residual_colour_init','joint_old_opacity'):
+        for name in ('storage_loss_enabled','survival_aware_storage','population_rate_exempt',
+                     'keep_incumbent_fixed_after_motion','keep_incumbent_alpha_after_motion',
+                     'regional_color_birth','regional_alpha_repair','regional_postfit_admission',
+                     'residual_support_init','residual_colour_init','joint_old_opacity'):
             if not isinstance(getattr(self,name),bool):raise ValueError(f'birth.{name} must be boolean')
+        if self.keep_incumbent_fixed_after_motion and not self.frame_training_plan:
+            raise ValueError('Fixed incumbent after motion requires the frame training plan')
+        if self.keep_incumbent_alpha_after_motion and not self.frame_training_plan:
+            raise ValueError('Post-motion old alpha requires the frame training plan')
+        if self.regional_alpha_repair and not (self.frame_training_plan and
+                self.regional_color_birth and self.keep_incumbent_alpha_after_motion):
+            raise ValueError('Regional alpha repair requires the frame plan, regional color birth and post-motion old alpha')
+        if self.regional_color_birth:
+            if (not self.frame_training_plan or not self.residual_support_init or
+                    self.regional_postfit_admission or self.regional_color_depth != 5):
+                raise ValueError('Regional color births require the frame plan, support initialization, depth 5 and no postfit admission')
+            if (isinstance(self.regional_color_min_views, bool) or
+                    not isinstance(self.regional_color_min_views, int) or self.regional_color_min_views < 1):
+                raise ValueError('regional_color_min_views must be a positive integer')
+            for name in ('regional_color_l1_threshold', 'regional_color_min_support'):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'{name} must be finite and positive')
+            if self.regional_color_reference_layout is not None and not isinstance(self.regional_color_reference_layout, str):
+                raise ValueError('regional_color_reference_layout must be a path or null')
+        if self.regional_postfit_admission and not (
+                self.frame_training_plan and self.keep_incumbent_fixed_after_motion):
+            raise ValueError('Regional post-fit admission requires the frame plan with a fixed incumbent')
+        if self.population_rate_exempt and not self.frame_training_plan:
+            raise ValueError('Population rate exemption currently requires the frame training plan')
         if self.survival_aware_storage and not (self.frame_training_plan and self.storage_loss_enabled):
             raise ValueError('Survival-aware storage requires the frame plan with newborn storage enabled')
         if self.residual_support_init and not self.frame_training_plan:
@@ -240,8 +192,6 @@ class BirthConfig:
             raise ValueError('Unified population pressure requires joint_old_opacity')
         if self.population_loss_weight and self.opacity_threshold<=0:
             raise ValueError('Unified population pressure requires a positive opacity threshold')
-        if self.radiance_mode == 'support_reincarnation' and self.residual.max_cohorts != 2:
-            raise ValueError('Independent geometry cross-fitting requires two complete exploration cohorts')
         if not isinstance(self.source_covariance_init, bool):
             raise ValueError('source_covariance_init must be boolean')
         if not isinstance(self.replace_low_opacity, bool):
@@ -335,6 +285,8 @@ class ModuleConfig(BaseModuleConfig):
     birth: BirthConfig = field(default_factory=BirthConfig)
     opacity_update: OpacityUpdateConfig = field(default_factory=OpacityUpdateConfig)
     feature_dc_update: FeatureDCUpdateConfig = field(default_factory=FeatureDCUpdateConfig)
+    logscale_update: LogScaleUpdateConfig = field(default_factory=LogScaleUpdateConfig)
+    full_update: FullUpdateConfig = field(default_factory=FullUpdateConfig)
 
 
 MOTION_IMAGE_SCHEDULE = 'bootstrap_aligned_v1'
@@ -525,6 +477,41 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         cfg.birth.validate(cfg.rigid_tree.motion_steps)
         cfg.opacity_update.validate()
         cfg.feature_dc_update.validate()
+        cfg.logscale_update.validate()
+        cfg.full_update.validate()
+        if cfg.full_update.enabled and not cfg.full_update.regional_repair:
+            raise ValueError('Periodic full-update training is retired; historical packets remain decodable')
+        if cfg.full_update.enabled and (
+                not cfg.birth.frame_training_plan or cfg.logscale_update.enabled or
+                not cfg.opacity_update.enabled or
+                cfg.rigid_tree.spatial_gate.training_schedule != 'joint' or
+                cfg.rigid_tree.spatial_gate.hierarchical_private or
+                cfg.rigid_tree.spatial_gate.private_full_motion):
+            raise ValueError('Full updates require the joint frame plan, unrestricted point residuals, old opacity and no separate logscale update')
+        if cfg.full_update.regional_repair:
+            birth = cfg.birth
+            if (cfg.feature_dc_update.enabled or birth.replace_low_opacity or
+                    birth.regional_color_birth or birth.regional_alpha_repair or
+                    birth.regional_postfit_admission or not birth.joint_old_opacity or
+                    cfg.rigid_tree.spatial_gate.final_joint_refine_steps or
+                    cfg.rigid_tree.spatial_gate.max_depth != 5):
+                raise ValueError('Regional attribute repair requires fixed population, no shared colour and the D5 frame plan')
+            if (isinstance(birth.regional_color_min_views, bool) or
+                    not isinstance(birth.regional_color_min_views, int) or birth.regional_color_min_views < 2):
+                raise ValueError('Regional attribute repair requires at least two reliable training views')
+            for name in ('regional_color_l1_threshold', 'regional_color_min_support'):
+                value = getattr(birth, name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'{name} must be finite and positive')
+            if birth.regional_color_min_support < 32:
+                raise ValueError('Regional attribute repair needs at least 32 effective pixels per view')
+        if cfg.logscale_update.enabled and (
+                not getattr(cfg.birth, 'frame_training_plan', False) or
+                effective_final_joint_refine_steps(self) or
+                cfg.logscale_update.selection_steps + cfg.logscale_update.refit_steps !=
+                cfg.rigid_tree.birth_steps):
+            raise ValueError('Log-scale updates require the fixed frame plan and exactly one '
+                             'selection/refit fit over the birth stage')
         if cfg.opacity_update.amplitude_refit_steps >= cfg.rigid_tree.motion_steps:
             raise ValueError('Opacity amplitude refitting must leave selection steps')
         if cfg.opacity_update.enabled and cfg.birth.replace_low_opacity:
@@ -535,8 +522,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 not cfg.effective_motion_observations):
             raise ValueError('Residual transactions require frozen old alpha, actual visibility, '
                              'new orientation fitting and no destructive source handoff')
-        if cfg.feature_dc_update.enabled and uses_residual_birth(cfg) and cfg.birth.radiance_mode != 'adaptive_residual_birth':
-            raise ValueError('Shared colors support ordinary clone and adaptive residual births')
         if cfg.birth.source_handoff and (not cfg.opacity_update.enabled or
                 cfg.opacity_update.mode != 'alpha' or
                 not cfg.opacity_update.joint_with_birth or
@@ -560,10 +545,13 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.births = BirthGaussianModel(cfg.sh_degree)
         renderer_type = ContributionRenderer if cfg.effective_motion_observations else Renderer
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
-        self.motion = SpatialGatedMotion(cfg.rigid_tree)
+        self.motion = FullUpdateSpatialGatedMotion(cfg.rigid_tree)
+        self.full_attribute_update = None
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
         self.feature_dc_update = (QuantizedFeatureDCUpdate(cfg.feature_dc_update, motion=self.motion)
                                   if cfg.feature_dc_update.enabled else None)
+        self.logscale_update = (MotionSupportLogScaleUpdate(cfg.logscale_update)
+                                if cfg.logscale_update.enabled else None)
         self.frame_prepared = False
         self.frame_finalized = False
         self.motion_committed = False
@@ -583,14 +571,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self._transaction_views = None
         self.retired_reference = None
         self.stage_image_metrics = []
-        self.persistent_bank_state = None
-        self.persistent_uid_layout = {}
-        self.persistent_specs = {}
-        self.persistent_candidate_specs = {}
-        self.persistent_pretrain_state = None
-        self.persistent_birth_optimizer_steps = 0
-        self.persistent_training_population_count = 0
-        self.persistent_initialized = False
         self.early_initialized=False
         self.early_birth_updates=0
         self.early_shared_steps=0
@@ -619,6 +599,58 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         for attr in RAW_ATTRIBUTES:
             getattr(self.gaussians, attr).requires_grad_(False)
 
+    @property
+    def full_update_active(self):
+        cfg = getattr(self.config, 'full_update', None)
+        return bool(cfg is not None and cfg.enabled and cfg.regional_repair and self.current_frame > 0)
+
+    def _configure_full_update_motion(self, frame):
+        cfg = getattr(self.config, 'full_update', None)
+        active = bool(cfg is not None and cfg.enabled and cfg.regional_repair and frame > 0)
+        # Copy per-frame policy; the configured flag and checkpoint contract do not change.
+        self.motion.config = (replace(self.config.rigid_tree, rotation_updates=True)
+                              if active else self.config.rigid_tree)
+        self.motion.regional_repair = active
+        self.motion.original_rotation_updates = self.config.rigid_tree.rotation_updates
+
+    def full_update_prepare_step(self, step):
+        if self.full_update_active and self.full_attribute_update is not None:
+            trainable = step > self.motion_steps
+            for parameter in self.full_attribute_update.parameters.values():
+                parameter.requires_grad_(trainable)
+                if not trainable:
+                    parameter.grad = None
+            args = self.config.gaussian
+            rates = dict(logscale=args.scaling_lr, sh_dc=args.feature_lr,
+                         sh_rest=args.feature_lr / 20.)
+            # These three parameters first become trainable at step 201.
+            # Their own 100-step schedule must not inherit a completed motion clock.
+            progress = min(max((step - 201) / 99., 0.), 1.)
+            factor = self.config.rigid_tree.motion_lr_final_ratio ** progress
+            for group in self.motion.optimizer.param_groups:
+                name = group.get('name', '')
+                if name.startswith('early_full_'):
+                    group['lr'] = rates[name[len('early_full_'):]] * factor
+
+    def full_update_after_step(self, step):
+        if self.full_update_active and self.full_attribute_update is not None:
+            if step <= self.motion_steps:
+                return
+            window = self.config.rigid_tree.motion_fit_window_steps
+            self.full_attribute_update.after_step(self.motion.optimizer, self._rate_byte_price(step),
+                proximal=(window is None or step % window == 0 or step == self.total_steps))
+
+    @torch.no_grad()
+    def full_update_finish_pose_attributes(self):
+        if not self.full_update_active:
+            return
+        xyz, rotation = self.motion.decoded_survivor_pose()
+        self.gaussians.apply_selected_motion(xyz.to(self.device), rotation.to(self.device))
+
+    def full_update_reference(self, *, canonical=False):
+        return dict(logscale=self.gaussians._scaling, sh_dc=self.gaussians._features_dc,
+                    sh_rest=self.gaussians._features_rest)
+
     def on_save_checkpoint(self, ckpt):
         if getattr(self.config.birth,'frame_training_plan',False) and self.frame_prepared:
             self._plan_record_phase_time()
@@ -642,6 +674,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             reference_count=self.reference_count, report=self.frame_report,
             birth_control=self.birth_control)
         ckpt['rigid_tree_frame']['stage_image_metrics'] = self.stage_image_metrics
+        if (getattr(self.config.birth, 'frame_training_plan', False) and
+                self.frame_prepared and not self.frame_finalized):
+            ckpt['frame_plan_diagnostic_reference'] = getattr(
+                self, '_plan_diagnostic_reference', None)
         ckpt['rigid_tree_retired_reference'] = self.retired_reference
         opacity_update = getattr(self, 'opacity_update', None)
         ckpt['quantized_opacity_update'] = opacity_update.capture() if opacity_update is not None else None
@@ -651,6 +687,14 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                                      if self.births.source_rows is not None else None)
         feature_update = getattr(self, 'feature_dc_update', None)
         ckpt['quantized_feature_dc_update'] = feature_update.capture() if feature_update is not None else None
+        logscale_update = getattr(self, 'logscale_update', None)
+        ckpt['quantized_logscale_update'] = (logscale_update.capture(self.motion.optimizer)
+            if logscale_update is not None and logscale_update.ready else None)
+        full = getattr(self, 'full_attribute_update', None)
+        if getattr(self, 'full_update_active', False) and self.frame_prepared and not self.frame_finalized:
+            if full is None:
+                raise ValueError('Keyframe checkpoint lost full attributes')
+            ckpt['full_attribute_update'] = full.capture(self.motion.optimizer)
         ckpt['birth_handoff_sources'] = (self.birth_handoff_sources.detach().cpu()
             if self.birth_handoff_sources is not None else None)
         transaction = getattr(self, 'birth_transaction', None)
@@ -664,24 +708,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         ckpt['birth_appearance_gradient'] = (
             self.birth_appearance_gradient.detach().cpu()
             if self.birth_appearance_gradient is not None else None)
-        if uses_dual_predictive(self.config):
-            ckpt['dual_birth_state'] = self._capture_dual_checkpoint()
-        if uses_quick_source(self.config):
-            ckpt['quick_birth_state'] = dict(phase=getattr(self,'quick_birth_phase',1),
-                optimizer_steps=getattr(self,'quick_birth_optimizer_steps',0),
-                initialized=getattr(self,'quick_birth_initialized',False))
-            if uses_shadow_source(self.config):
-                ckpt['shadow_initialized_state'] = BirthTransaction.tensor_tree(
-                    getattr(self,'shadow_initialized_state',None),'cpu')
-        if uses_persistent_birth(self.config):
-            ckpt['persistent_newborn_bank'] = BirthTransaction.tensor_tree(dict(
-                state=getattr(self,'persistent_bank_state',None),
-                layout=getattr(self,'persistent_uid_layout',{}),specs=getattr(self,'persistent_specs',{}),
-                candidate_specs=getattr(self,'persistent_candidate_specs',{}),
-                pretrain=getattr(self,'persistent_pretrain_state',None)), 'cpu')
-            ckpt['persistent_birth_state'] = dict(optimizer_steps=getattr(self,'persistent_birth_optimizer_steps',0),
-                training_population_count=getattr(self,'persistent_training_population_count',0),
-                initialized=getattr(self,'persistent_initialized',False))
         if uses_early_replacement(self.config):
             self._early_sync_opacity_state()
             ckpt['quantized_opacity_update']=self.opacity_update.capture()
@@ -692,16 +718,35 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 pinned_rows=self.early_pinned_rows,pinned_values=self.early_pinned_values,
                 focus_weights=self.early_focus_weights,
                 plan_used_quota=getattr(self,'_plan_used_quota',0),
-                plan_events=getattr(self,'_plan_events',[])),'cpu')
+                plan_events=getattr(self,'_plan_events',[]),
+                plan_admission_camera_names=getattr(self,'_plan_admission_camera_names',None)),'cpu')
+        regional_alpha = getattr(self, '_plan_regional_alpha_state', None)
+        if (getattr(self.config.birth, 'regional_alpha_repair', False) and
+                not getattr(self, 'full_update_active', False) and self.frame_prepared and
+                not self.frame_finalized and regional_alpha is not None):
+            ckpt['regional_alpha_repair_state'] = BirthTransaction.tensor_tree(regional_alpha, 'cpu')
+        regional_attributes = getattr(self, '_plan_regional_attribute_state', None)
+        if (self.full_update_active and self.config.full_update.regional_repair and
+                self.frame_prepared and not self.frame_finalized and regional_attributes is not None):
+            ckpt['regional_attribute_repair_state'] = BirthTransaction.tensor_tree(regional_attributes, 'cpu')
 
     def on_load_checkpoint(self, ckpt):
+        self._plan_regional_alpha_state = None
+        self._plan_regional_attribute_state = None
         self._rate_budget_state=ckpt.get('rate_budget_controller')
+        diagnostic_reference = ckpt.get('frame_plan_diagnostic_reference')
+        self._plan_diagnostic_reference = (None if diagnostic_reference is None else
+            {name: value.detach().cpu().clone() for name, value in diagnostic_reference.items()})
         self.gaussians.restore(ckpt['gaussians'], self.config.gaussian)
         self.renderer.gaussians = self.gaussians
         version = ckpt.get('rigid_tree_version')
         if version is None:
-            if self.current_frame != 0 or ckpt['global_step'] != self.trainer.config.num_init_steps:
-                raise ValueError('Only a completed native first-frame checkpoint can bootstrap this method')
+            if self.trainer.config.num_init_steps != 15_000:
+                raise ValueError(
+                    'Native first-frame training protocol requires exactly 15000 steps')
+            if self.current_frame != 0 or ckpt['global_step'] != 15_000:
+                raise ValueError(
+                    'Only a completed 15000-step native first-frame checkpoint can bootstrap this method')
             self.initial_reference = prune_native_initial_gaussians(
                 self.gaussians, self.config.initial_opacity_threshold)
             self.reference_count = self.initial_reference['retained_count']
@@ -739,6 +784,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             saved_config['opacity_update'] = {**asdict(OpacityUpdateConfig()), **saved_config['opacity_update']}
             saved_config['feature_dc_update'] = {
                 **asdict(FeatureDCUpdateConfig()), **saved_config.get('feature_dc_update', {})}
+            saved_config['logscale_update'] = {
+                **asdict(LogScaleUpdateConfig()), **saved_config.get('logscale_update', {})}
+            saved_config['full_update'] = {
+                **asdict(FullUpdateConfig()), **saved_config.get('full_update', {})}
             opacity = saved_config.pop('old_opacity', {})
             if opacity.get('enabled', False) or ckpt.get('old_opacity_delta') is not None:
                 raise ValueError('Opacity-correction checkpoints are replay-only')
@@ -786,55 +835,31 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.selected_birth_state = terminal.get('selected')
         self._transaction_views = None
         if self.frame_prepared:
+            Module._configure_full_update_motion(self, ckpt['rigid_tree_motion']['frame_index'])
             self.motion.restore(ckpt['rigid_tree_motion'])
             if self.config.opacity_update.enabled:
                 self.opacity_update.restore(ckpt.get('quantized_opacity_update'), self.device)
             if self.config.feature_dc_update.enabled:
                 self.feature_dc_update.restore(ckpt.get('quantized_feature_dc_update'), self.device)
+            if self.config.logscale_update.enabled:
+                self.logscale_update.restore(ckpt.get('quantized_logscale_update'), self.device,
+                                             self.motion.optimizer)
             if self.motion_committed:
                 for parameter in self.motion.parameters():
                     parameter.requires_grad_(False)
                 self.motion.optimizer.zero_grad(set_to_none=True)
+            self.full_attribute_update = None
+            if getattr(self, 'full_update_active', False) and not self.frame_finalized:
+                self.full_attribute_update = FullAttributeUpdate(self.config.full_update)
+                self.full_attribute_update.restore(ckpt.get('full_attribute_update'),
+                    self.motion.optimizer, self.device, len(self.gaussians._xyz))
         if ckpt['births'] is not None and not uses_early_replacement(self.config):
-            self.births = birth_model_factory(self.config.sh_degree, capture=ckpt['births'])
+            self.births = BirthGaussianModel(self.config.sh_degree)
             self.births.restore(ckpt['births'], self.config.gaussian_stage2)
             source = ckpt['birth_source_rows']
             if source is None or len(source) != len(self.births._xyz):
                 raise ValueError('Birth checkpoint lost source lineage')
             self.births.source_rows = source.to(self.device)
-            freeze_birth_radiance(self.births, self.config)
-            if not uses_quick_source(self.config):
-                set_family_training_stage(self.births,getattr(self,'birth_terminal',False))
-            if hasattr(self.births, 'patch_retention'):
-                self._set_patch_stage()
-            if hasattr(self.births,'reincarnation_state') and not uses_dual_predictive(self.config) and not uses_quick_source(self.config):
-                self.births.set_training_stage(getattr(self, 'birth_terminal', False))
-        if uses_dual_predictive(self.config):
-            self._restore_dual_checkpoint(ckpt.get('dual_birth_state'))
-        if uses_quick_source(self.config):
-            quick = ckpt.get('quick_birth_state') or {}
-            self.quick_birth_phase = quick.get('phase',1)
-            self.quick_birth_optimizer_steps = quick.get('optimizer_steps',0)
-            self.quick_birth_initialized = quick.get('initialized',False)
-            self.shadow_initialized_state = BirthTransaction.tensor_tree(ckpt.get('shadow_initialized_state'),'cpu')
-            if self.motion_committed and not self.frame_finalized:
-                if not self.quick_birth_initialized or self.birth_end_step!=300:
-                    raise ValueError('Quick checkpoint lost its one-time initialization/300-step schedule')
-                self.births.set_training_stage(self.quick_birth_phase)
-        if uses_persistent_birth(self.config):
-            bank=ckpt.get('persistent_newborn_bank') or {}
-            self.persistent_bank_state=bank.get('state')
-            self.persistent_uid_layout=dict(bank.get('layout',{}))
-            self.persistent_specs=dict(bank.get('specs',{}))
-            self.persistent_candidate_specs=dict(bank.get('candidate_specs',{}))
-            self.persistent_pretrain_state=bank.get('pretrain')
-            progress=ckpt.get('persistent_birth_state') or {}
-            self.persistent_birth_optimizer_steps=progress.get('optimizer_steps',0)
-            self.persistent_training_population_count=progress.get('training_population_count',0)
-            self.persistent_initialized=progress.get('initialized',False)
-            if self.motion_committed and not self.frame_finalized and not self.persistent_initialized:
-                raise ValueError('Persistent bank checkpoint lost its prepared single birth stage')
-            self._validate_persistent_layout()
         if uses_early_replacement(self.config):
             state=BirthTransaction.tensor_tree(ckpt.get('early_replacement_state') or {},self.device)
             self.early_initialized=state.get('initialized',False)
@@ -846,43 +871,61 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.early_focus_weights=state.get('focus_weights',{})
             self._plan_used_quota=state.get('plan_used_quota',0)
             self._plan_events=state.get('plan_events',[])
+            self._plan_admission_camera_names=state.get('plan_admission_camera_names')
+            if (getattr(self.config.birth, 'regional_postfit_admission', False) and
+                    self.frame_prepared and not self.frame_finalized and
+                    self.early_shared_steps >= 200 and not self._plan_admission_camera_names):
+                raise ValueError('Post-fit admission checkpoint lost its held-out training cameras')
             if self.frame_prepared:
                 self._early_attach_opacity()
+            if (self.full_update_active and self.config.full_update.regional_repair and
+                    self.frame_prepared and not self.frame_finalized and self.early_shared_steps >= 200):
+                saved = ckpt.get('regional_attribute_repair_state')
+                if saved is None:
+                    raise ValueError('Regional attribute checkpoint lost its step-200 selection')
+                self._plan_regional_attribute_state = BirthTransaction.tensor_tree(saved, self.device)
+                self._plan_validate_regional_attribute_state(self._plan_regional_attribute_state)
+            if (getattr(self.config.birth, 'regional_alpha_repair', False) and
+                    not getattr(self, 'full_update_active', False) and self.frame_prepared and
+                    not self.frame_finalized and self.early_shared_steps >= 200):
+                saved_alpha = ckpt.get('regional_alpha_repair_state')
+                if saved_alpha is None:
+                    raise ValueError('Regional alpha checkpoint lost its step-200 state')
+                self._plan_regional_alpha_state = BirthTransaction.tensor_tree(saved_alpha, self.device)
+                self._plan_validate_regional_alpha_state(self._plan_regional_alpha_state)
             if ckpt['births'] is not None:
-                from .model.early_replacement_model import EarlyReplacementModel
-                if self.config.birth.radiance_mode=='adaptive_residual_birth':
-                    from .model.adaptive_birth_model import AdaptiveBirthModel
-                    EarlyReplacementModel=AdaptiveBirthModel
                 if getattr(self.config.birth,'frame_training_plan',False):
                     from .model.frame_plan_birth import FramePlanBirthModel
                     self.births=FramePlanBirthModel(self.config.sh_degree,self.device).restore(
                         ckpt['births'],self.motion.optimizer,self.config.gaussian_stage2,self.device)
                 else:
-                    self.births=EarlyReplacementModel(self.config.sh_degree)
+                    from .model.adaptive_birth_model import AdaptiveBirthModel
+                    self.births=AdaptiveBirthModel(self.config.sh_degree)
                     self.births.restore(ckpt['births'],self.motion.optimizer,self.config.gaussian_stage2)
                 self.births.source_rows=ckpt['birth_source_rows'].to(self.device)
                 if not getattr(self.config.birth,'frame_training_plan',False):
                     self.births._opacity.requires_grad_(self.motion_committed or self.config.birth.radiance_mode=='adaptive_residual_birth')
+            if (self.full_update_active and self.config.full_update.regional_repair and
+                    self.full_attribute_update is not None and self.early_shared_steps >= self.motion_steps):
+                self.full_update_prepare_step(self.early_shared_steps + 1)
+                self.motion.prepare_plan_step(self.early_shared_steps + 1)
             if self.motion_committed and fitting_old_motion(self):
-                self.motion.prepare_plan_step(self.motion.last_step)
+                if not (self.full_update_active and self.config.full_update.regional_repair):
+                    self.motion.prepare_plan_step(self.motion.last_step)
 
     def prepare_frame(self):
         if self.frame_prepared:
             return
         if self.current_frame < 1:
             raise ValueError('Rigid motion starts after the shared first frame')
-        if uses_quick_source(self.config):
-            if self.motion_steps!=200 or self.config.rigid_tree.birth_steps!=100 or self.config.opacity_update.joint_with_birth:
-                raise ValueError('Quick training requires exactly motion200 + single-model birth100 and no old-alpha birth refit')
-        if uses_persistent_birth(self.config):
-            if (self.motion_steps!=200 or self.config.rigid_tree.birth_steps!=100 or
-                    self.config.opacity_update.joint_with_birth or not self.config.birth.anchor_sfm_path):
-                raise ValueError('Persistent births require motion200 + birth100, fixed existing old-alpha phase and train-SfM anchors')
-            self._validate_persistent_layout()
         if uses_early_replacement(self.config) and (
                 self.motion_steps!=200 or self.config.rigid_tree.birth_steps!=100 or
                 self.config.rigid_tree.spatial_gate.freeze_step!=(180 if getattr(self.config.birth,'frame_training_plan',False) else 70)):
             raise ValueError('Early replacement requires unchanged gate70, motion200 and global300 schedule')
+        if getattr(self.config.birth, 'frame_training_plan', False):
+            snapshot = getattr(self.trainer, 'snapshot_frame_plan_reference', None)
+            if snapshot is not None:
+                snapshot()
         self.retired_reference = None
         retirement = dict(previous_count=len(self.gaussians._xyz), retired_count=0)
         previous_birth_sources = self.motion.pending_birth_sources
@@ -901,6 +944,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             previous_rows = torch.arange(len(xyz), device=xyz.device)
         if getattr(self.config.birth,'frame_training_plan',False):
             self._plan_setup_rate_budget()
+        Module._configure_full_update_motion(self, self.current_frame)
         self.motion.setup(xyz, rotation, self.datamodule.cameras_extent,
                           frame_index=self.current_frame, previous_rows=previous_rows)
         self.frame_prepared = True
@@ -933,30 +977,45 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.early_selected=None;self.early_pinned_rows=None;self.early_pinned_values=None
         self.early_focus_weights={}
         self._plan_used_quota=0;self._plan_events=[]
+        self._plan_admission_camera_names=None
+        self._plan_regional_alpha_state=None
+        self._plan_regional_attribute_state=None
+        self._plan_error_owner=None
         self._plan_phase_started=None;self._plan_timed_phase=None
         self.birth_control = dict(clone_added=0, split_added=0, pruned=0,
                                   source_tracked=True, retirement=retirement,
                                   previous_birth_count=previous_birth_count)
         self.stage_image_metrics = []
         self._freeze_base()
+        logscale_update = getattr(self, 'logscale_update', None)
+        if logscale_update is not None:
+            logscale_update.reset()
         if self.opacity_update is not None:
             self.opacity_update.setup(self.gaussians._opacity)
         if self.feature_dc_update is not None:
             self.feature_dc_update.setup(self.gaussians._features_dc)
         if uses_early_replacement(self.config):
             self._early_attach_opacity()
+        self.full_attribute_update = None
+        if getattr(self, 'full_update_active', False):
+            self.full_attribute_update = FullAttributeUpdate(self.config.full_update)
+            args = self.config.gaussian
+            self.full_attribute_update.setup(self.full_update_reference(), self.motion.optimizer,
+                (args.scaling_lr, args.feature_lr, args.feature_lr / 20.))
 
     def pre_training_step(self):
         if getattr(self.config.birth,'frame_training_plan',False):
+            supported_colour = not self.config.feature_dc_update.enabled
             if (not self.config.rigid_tree.spatial_gate.frame_training_plan or
                     self.config.birth.radiance_mode != 'adaptive_residual_birth' or
                     self.config.rigid_tree.amplitude_refit_steps or
                     self.config.opacity_update.amplitude_refit_steps or
-                    self.config.feature_dc_update.enabled or
+                    not supported_colour or
                     not self.config.birth.rotation_updates or
                     not self.config.birth.joint_old_opacity or self.config.lambda_dssim != .2 or
                     self.config.photometric_loss != 'l1' or self.config.birth.photometric_loss != 'l1'):
-                raise ValueError('Frame plan needs its gate schedule, independent residuals, no shared colour, new rotation and L1/DSSIM')
+                raise ValueError('Frame plan needs its gate schedule, independent residuals, '
+                    'no shared colour, new rotation and L1/DSSIM')
         self.prepare_frame()
         if not self.motion_committed and self.opacity_update is not None:
             self.opacity_update.prepare_step(self.trainer.global_step, self.motion_steps)
@@ -966,11 +1025,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if self.motion_committed and len(self.births._xyz):
             birth_step = self.trainer.global_step - (self.birth_cohort_start
                 if uses_residual_birth(self.config) else self.motion_steps)
-            models = ([value['model'] for value in self.birth_branches.values()]
-                      if uses_dual_predictive(self.config) and self.birth_branches else [self.births])
-            for model in models:
-                set_birth_learning_rates(model,self.config.gaussian_stage2,birth_step,
-                    self.config.rigid_tree.birth_steps,self.config.birth.lr_final_ratio)
+            set_birth_learning_rates(self.births,self.config.gaussian_stage2,birth_step,
+                self.config.rigid_tree.birth_steps,self.config.birth.lr_final_ratio)
 
     def begin_next_frame(self):
         if not self.frame_finalized:
@@ -984,65 +1040,48 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def make_birth_view(self, reference=None, viewpoint=None, training=False):
         if not len(self.births._xyz):
             return None
+        implicit_reference = reference is None
+        if implicit_reference and getattr(self, 'full_update_active', False) and not self.frame_finalized:
+            reference = self._adaptive_reference()
         transaction = getattr(self, 'birth_transaction', None)
         if reference is None:
-            if hasattr(self.births, 'raw_old_alpha'):
-                reference, _, _ = self._surface_old_reference()
-            else:
-                reference = (transaction.fixed_reference if transaction is not None and
-                             transaction.fixed_reference is not None else
-                             ({name:getattr(self.gaussians,attr).detach() for name,attr in zip(RAW_FIELDS,RAW_ATTRIBUTES)}
-                              if self.config.birth.radiance_mode=='adaptive_residual_birth' else model_raw(self.gaussians)))
+            reference = (transaction.fixed_reference if transaction is not None and
+                         transaction.fixed_reference is not None else
+                         ({name:getattr(self.gaussians,attr).detach() for name,attr in zip(RAW_FIELDS,RAW_ATTRIBUTES)}
+                          if self.config.birth.radiance_mode=='adaptive_residual_birth' else model_raw(self.gaussians)))
         feature_update = getattr(self, 'feature_dc_update', None)
-        if feature_update is not None and not self.frame_finalized:
+        if (feature_update is not None and not self.frame_finalized and
+                not getattr(self, 'full_update_active', False)):
             reference = dict(reference)
             reference['sh_dc'] = feature_update().detach()
-        result = QuantizedNewGaussianView(self.births, self.config.birth,
+        logscale_update = getattr(self, 'logscale_update', None)
+        if (implicit_reference and logscale_update is not None and
+                logscale_update.ready and not self.frame_finalized):
+            reference = dict(reference)
+            reference['logscale'] = logscale_update.canonical_logscale(
+                reference['logscale'])
+        return QuantizedNewGaussianView(self.births, self.config.birth,
             self.datamodule.cameras_extent, reference,
             source_rows=self.births.source_rows)
-        if uses_reincarnation(self.config):
-            novel = self.births.novel_mask
-            if training and not self.birth_terminal:
-                crossfit = transaction.crossfit_state
-                branch = crossfit.get('training_branch', 'A')
-                names = crossfit['camera_groups'][branch]
-                active = viewpoint is not None and Path(viewpoint.path).name in names
-                scale = result.get_xyz.new_ones(len(novel))
-                scale[novel] = len(transaction.fit_names)/len(names) if active else 0.
-                result.row_gradient_scale = scale
-            if self.birth_terminal:
-                result.locked_geometry_rows = novel
-        return result
-
-    def _surface_old_reference(self):
-        transaction = self.birth_transaction
-        logits, alpha, _ = patch_old_state(self)
-        if transaction.fixed_reference is not None:
-            keep = transaction.fixed_keep
-            reference = dict(transaction.fixed_reference)
-        else:
-            keep = torch.arange(len(self.gaussians._xyz), device=self.device)
-            reference = dict(transaction.old_render_reference or model_raw(self.gaussians))
-        reference['opacity'] = logits[keep]
-        return reference, alpha[keep], keep
 
     def forward(self, viewpoint, training=False, old_only=False, proposal_only=False,
-                predictor_only=False):
+                predictor_only=False, collect_error_stats=False):
         auxiliary = proposal_only or predictor_only
         if (proposal_only and predictor_only) or (auxiliary and (
                 not training or not self.frame_prepared or self.motion_committed)):
             raise ValueError('Auxiliary render is only available during motion training')
-        if uses_dual_predictive(self.config) and training and self.motion_committed and not self.frame_finalized and not old_only:
-            self._activate_dual_for_view(viewpoint)
         old_model = self.renderer.gaussians
         effective = getattr(self.config, 'effective_motion_observations', False)
         previous_collection = getattr(self.renderer, 'collect_contributions', False)
+        previous_error_collection = getattr(self.renderer, 'collect_error_stats', False)
         early_pose=None
         birth_view=None
         if effective:
             self.renderer.collect_contributions = bool(training and not auxiliary and self.frame_prepared and
                 (not self.motion_committed or (uses_residual_birth(self.config) and
                   not self.frame_finalized)))
+        if collect_error_stats:
+            self.renderer.collect_error_stats = True
         try:
             if fitting_old_motion(self):
                 xyz, rotation = (self.motion.predictor_pose() if predictor_only else
@@ -1069,47 +1108,45 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                     self.gaussians.rigid_alpha = self.opacity_update.alphas()
                 else:
                     self.gaussians.rigid_opacity = self.opacity_update()
+            logscale_update = getattr(self, 'logscale_update', None)
+            if (logscale_update is not None and logscale_update.ready and
+                    not self.frame_finalized):
+                self.gaussians.rigid_logscale = logscale_update.current_logscale(
+                    self.gaussians._scaling)
             if (getattr(self, 'feature_dc_update', None) is not None and self.frame_prepared and
                     not self.frame_finalized and
                     (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
-                self.gaussians.rigid_sh_dc = self.feature_dc_update(training=training)
+                self.gaussians.rigid_sh_dc = self.feature_dc_update()
                 if auxiliary:
                     self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
+            full = getattr(self, 'full_attribute_update', None)
+            if getattr(self, 'full_update_active', False) and full is not None and not self.frame_finalized:
+                dc = getattr(self.gaussians, 'rigid_sh_dc', None)
+                if dc is None:
+                    dc = self.gaussians._features_dc
+                values = full.apply(dict(logscale=self.gaussians._scaling,
+                    sh_dc=dc, sh_rest=self.gaussians._features_rest))
+                if auxiliary:
+                    values = {name: value.detach() for name, value in values.items()}
+                self.gaussians.rigid_logscale = values['logscale']
+                self.gaussians.rigid_sh_dc = values['sh_dc']
+                self.gaussians.rigid_sh_rest = values['sh_rest']
             if (uses_early_replacement(self.config) and getattr(self,'early_initialized',False) and
                     not self.motion_committed and not old_only):
                 xyz=self.gaussians.rigid_xyz
                 q=self.gaussians.rigid_rotation
                 self.births.bind_source_pose(xyz,q,detach=False)
                 early_pose=(xyz,q)
-                if self.config.birth.radiance_mode=='adaptive_residual_birth':
-                    birth_view=self.make_birth_view(reference=self._adaptive_reference())
-                    self.renderer.gaussians=(MergedGaussianModel([self.gaussians,birth_view])
-                        if birth_view is not None else self.gaussians)
-                else:self.renderer.gaussians=LiveReplacementView(self.gaussians,self.births)
+                birth_view=self.make_birth_view(reference=self._adaptive_reference())
+                self.renderer.gaussians=(MergedGaussianModel([self.gaussians,birth_view])
+                    if birth_view is not None else self.gaussians)
             if self.motion_committed and not self.frame_finalized and not old_only:
-                patch = hasattr(self.births, 'raw_old_alpha')
-                if patch:
-                    patch_reference, patch_alpha, _ = self._surface_old_reference()
-                    birth_view = self.make_birth_view(reference=patch_reference)
-                else:
-                    birth_view = (self.make_birth_view(reference=self._adaptive_reference())
-                                  if self.config.birth.joint_old_opacity else
-                                  self.make_birth_view(viewpoint=viewpoint, training=training)
-                                  if uses_reincarnation(self.config) else self.make_birth_view())
+                birth_view = (self.make_birth_view(reference=self._adaptive_reference())
+                              if self.config.birth.joint_old_opacity else self.make_birth_view())
                 old_view = self.gaussians
                 transaction = getattr(self, 'birth_transaction', None)
-                if patch:
-                    old_view = RawView(patch_reference, self.config.sh_degree, self.gaussians, patch_alpha)
-                elif transaction is not None and transaction.fixed_reference is not None:
+                if transaction is not None and transaction.fixed_reference is not None:
                     old_view = RawView(transaction.fixed_reference, self.config.sh_degree, self.gaussians)
-                elif (transaction is not None and birth_view is not None and
-                      self.config.birth.radiance_mode!='adaptive_residual_birth'):
-                    keep = torch.ones(len(self.gaussians._xyz), dtype=torch.bool, device=self.device)
-                    parents = transaction.replacements
-                    if hasattr(self.births,'shadow_entity_mask'):
-                        parents = parents[self.births.shadow_entity_mask()]
-                    keep[parents[parents >= 0]] = False
-                    old_view = SubsetView(self.gaussians, keep)
                 if birth_view is not None:
                     self.renderer.gaussians = MergedGaussianModel([old_view, birth_view])
                 else:
@@ -1127,8 +1164,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             if (training and not auxiliary and self.config.birth.storage_loss_enabled and
                     self.config.birth.radiance_mode=='adaptive_residual_birth'):
                 package['_adaptive_birth_rate_view']=birth_view
-            if uses_dual_predictive(self.config) and training and self.motion_committed:
-                package['birth_branch'] = self.birth_active_branch
             if probe is not None:
                 package['birth_feature_probe'] = probe
             return package
@@ -1140,12 +1175,17 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.gaussians.rigid_opacity = None
             self.gaussians.rigid_alpha = None
             self.gaussians.rigid_sh_dc = None
+            self.gaussians.rigid_sh_rest = None
+            self.gaussians.rigid_logscale = None
             self.renderer.gaussians = old_model
             if effective:
                 self.renderer.collect_contributions = previous_collection
+            if collect_error_stats:
+                self.renderer.collect_error_stats = previous_error_collection
 
     def training_step(self, viewpoint, step, regularization_weight=1.):
-        package = self.forward(viewpoint, training=True)
+        collect = step == 200 and regional_attribute_repair_active(self)
+        package = self.forward(viewpoint, training=True, collect_error_stats=collect)
         adaptive_rate_view=package.pop('_adaptive_birth_rate_view',None)
         image = package['render']
         factor = motion_image_factor(step, self.motion_steps,
@@ -1157,6 +1197,24 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             metric = self.config.birth.photometric_loss
         image_loss = motion_photometric_loss(image, viewpoint.image,
                                              self.config.lambda_dssim, factor, metric=metric)
+        if collect:
+            stats = package.pop('regional_error_stats', None)
+            if stats is None:
+                raise ValueError('Step-200 renderer did not return native regional error statistics')
+            error_map = (image.detach()-viewpoint.image.detach()).abs().mean(0)
+            numerator, denominator = stats.accumulate(error_map)
+            count = len(self.gaussians._xyz)
+            if (numerator.shape != (count,) or denominator.shape != (count,) or
+                    numerator.requires_grad or denominator.requires_grad):
+                raise ValueError('Step-200 regional evidence must match the old-GS layout')
+            if self._plan_error_owner is None:
+                self._plan_error_owner = self.motion.owner.detach().clone()
+            elif not torch.equal(self._plan_error_owner, self.motion.owner):
+                raise ValueError('Step-200 gate owners changed between training views')
+            package['regional_error_evidence'] = dict(camera=Path(str(viewpoint.path)).name,
+                numerator=numerator.detach(), denominator=denominator.detach(),
+                total_pixel_l1_sum=error_map.sum(dtype=torch.float64).detach(),
+                image_pixel_count=error_map.numel())
         loss = image_loss
         # Leave scalar diagnostics on device until all views have finished.
         # Converting each one to float would synchronize CUDA before backward.
@@ -1165,9 +1223,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                        gs=len(self.gaussians._xyz) +
                        (len(self.births._xyz) if self.motion_committed else 0))
         if uses_early_replacement(self.config) and self.early_initialized:
-            metrics['gs']=(len(self.gaussians._xyz)+len(self.births.parent_rows)
-                if self.config.birth.radiance_mode=='adaptive_residual_birth' else len(self.birth_transaction.fixed_keep)+len(self.births.parent_rows)
-                if self.motion_committed else len(self.gaussians._xyz)+(len(self.births.parent_rows) if self.config.birth.radiance_mode=='adaptive_residual_birth' else 0))
+            metrics['gs']=len(self.gaussians._xyz)+len(self.births.parent_rows)
             error=(image-viewpoint.image).square().mean(0)
             weight=self.early_focus_weights.get(Path(viewpoint.path).name)
             metrics['early_batch_mse']=error.mean().detach()
@@ -1192,11 +1248,13 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if fitting_old_motion(self) and regularization_weight:
             loss = loss + regularization_weight * self.motion.regularization_loss(step)
         if (regularization_weight and getattr(self, 'opacity_update', None) is not None and
-                (not getattr(self.config.birth,'frame_training_plan',False) or step >= 101) and
+                (not getattr(self.config.birth,'frame_training_plan',False) or step >= 101 or
+                 (getattr(self, 'full_update_active', False) and
+                  not self.config.full_update.regional_repair)) and
                 (not self.motion_committed or
                  (not self.frame_finalized and (self.config.opacity_update.joint_with_birth or
                                                self.config.birth.joint_old_opacity)))):
-            terms = self.opacity_update.rate_terms(self._rate_byte_price(step),
+            terms = self.opacity_update.rate_terms(self._opacity_rate_price(step),
                 width=self.config.rigid_tree.sparse_rate_width_bins)
             loss = loss + regularization_weight * terms['loss']
         if (regularization_weight and getattr(self, 'feature_dc_update', None) is not None and
@@ -1204,6 +1262,16 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                  (not self.frame_finalized and self.config.feature_dc_update.joint_with_birth))):
             terms = self.feature_dc_update.rate_terms(self._rate_byte_price(step),
                 width=self.config.rigid_tree.sparse_rate_width_bins)
+            loss = loss + regularization_weight * terms['loss']
+        logscale_update = getattr(self, 'logscale_update', None)
+        if (regularization_weight and logscale_update is not None and
+                logscale_update.ready and not self.frame_finalized):
+            terms = logscale_update.rate_terms(self._rate_byte_price(step))
+            loss = loss + regularization_weight * terms['loss']
+        full = getattr(self, 'full_attribute_update', None)
+        if (regularization_weight and getattr(self, 'full_update_active', False) and full is not None and
+                full.config.storage_loss_enabled and not self.frame_finalized):
+            terms = full.rate_terms(self._rate_byte_price(step))
             loss = loss + regularization_weight * terms['loss']
         if (self.motion_committed and regularization_weight and len(self.births._xyz) and
                 self.config.birth.alpha_sparsity_weight):
@@ -1223,11 +1291,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             penalty,population_metrics=self._adaptive_population_regularization(step)
             loss=loss+regularization_weight*penalty
             metrics.update({name:value*regularization_weight for name,value in population_metrics.items()})
-        if uses_dual_predictive(self.config) and self.motion_committed and not self.frame_finalized:
-            package['birth_image_loss'] = image_loss.detach()
-            package['birth_psnr'] = metrics['psnr']
-            groups = self.birth_transaction.crossfit_state['camera_groups']
-            loss = loss*(len(self.birth_transaction.fit_names)/len(groups[self.birth_active_branch]))
         return loss, metrics, package
 
     def _rate_byte_price(self, step):
@@ -1235,6 +1298,11 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         ramp = min(max((step - cfg.rate_warmup_steps) / cfg.rate_ramp_steps, 0.), 1.)
         weight=getattr(self.motion,'effective_rate_loss_weight',cfg.rate_loss_weight)
         return weight * ramp / self.motion.rate_normalization_bytes
+
+    def _opacity_rate_price(self, step):
+        if getattr(self.config.birth, 'population_rate_exempt', False):
+            return 0.
+        return self._rate_byte_price(step)
 
     @torch.no_grad()
     def _step_feature_dc(self, step):
@@ -1310,1153 +1378,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def transaction_training_view(self, step, index, count):
         views = self.transaction_camera_views()
         names = self.birth_transaction.fit_names
-        if (uses_reincarnation(self.config) or uses_dual_predictive(self.config)) and not self.birth_terminal:
-            groups = self.birth_transaction.crossfit_state['camera_groups']
-            # Three-view updates always include both complementary groups,
-            # while each of the twenty P cameras has identical frequency.
-            a, b = groups['A'], groups['B']
-            names = tuple(item for pair in zip(a, b) for item in pair)
         camera = ((step-self.motion_steps-1)*count+index) % len(names)
         name = names[camera]
         return views[name], self.birth_transaction.fit_names.index(name)
 
-    @torch.no_grad()
-    def _begin_residual_births(self):
-        views = self.transaction_camera_views()
-        transaction = propose_residual_births(self, self.config.birth.residual,
-            list(views.values()), self._transaction_fit_names,
-            self._transaction_validation_names)
-        self.birth_cohort = 0
-        self.birth_cohort_start = self.trainer.global_step
-        self.birth_end_step = self.birth_cohort_start+self.config.rigid_tree.birth_steps
-        self.coarse_birth_snapshot = []
-        self._install_birth_transaction(transaction)
-        if uses_surface_patch(self.config) or uses_reincarnation(self.config) or uses_dual_predictive(self.config) or uses_quick_source(self.config):
-            baseline = encode_birth_trial(self, torch.zeros(len(self.births._xyz), dtype=torch.bool, device=self.device),
-                                          torch.zeros(len(self.gaussians._xyz), dtype=torch.bool, device=self.device))
-            self.birth_transaction.old_render_reference = baseline.raw
-        self.birth_control.update(proposal_count=len(transaction.sources),
-            spatial_proposals=transaction.proposed_spatial,
-            repair_proposals=transaction.proposed_repairs,
-            region_support=transaction.region_diagnostics,
-            selection_camera_scope='all_standard_training_cameras',
-            source_mutated_before_acceptance=False)
-        if uses_reincarnation(self.config) or uses_dual_predictive(self.config):
-            self.birth_control['native_support_initialization'] = self._check_reincarnation_initialization(views)
-        if hasattr(self.births, 'patch_rows'):
-            self.birth_control['initial_patch_exposure'] = self._patch_training_diagnostics()
-        self._freeze_base()
-        fitting = [views[name] for name in transaction.fit_names]
-        self.birth_control['fitting_camera_names'] = list(transaction.fit_names)
-        self.birth_control['fitting_baseline_mse'] = fitting_errors(self, fitting, True).tolist()
-        self.birth_control['fitting_initial_proposal_mse'] = fitting_errors(self, fitting, False).tolist()
-        if uses_dual_predictive(self.config):
-            self._begin_dual_branches()
-        if uses_shadow_source(self.config):
-            self._initialize_shadow_births(views)
-        elif uses_quick_source(self.config):
-            self._initialize_quick_births(views)
-
-    @torch.no_grad()
-    def _check_reincarnation_initialization(self,views):
-        """Measure native clone equivalence, including depth-tie ordering effects."""
-        mask = self.birth_transaction.replacements>=0
-        deleted = torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device)
-        deleted[self.birth_transaction.replacements[mask]]=True
-        trial = encode_birth_trial(self,mask,deleted)
-        baseline = self.birth_transaction.old_render_reference
-        previous = self.renderer.gaussians
-        collect = self.renderer.collect_contributions
-        self.renderer.collect_contributions = False
-        per_view = []
-        try:
-            for name,view in views.items():
-                self.renderer.gaussians = RawView(baseline,self.config.sh_degree,self.gaussians)
-                before = self.renderer(view,self.background)['render']
-                self.renderer.gaussians = RawView(trial.raw,self.config.sh_degree,self.gaussians)
-                after = self.renderer(view,self.background)['render']
-                per_view.append(dict(camera=name,max_abs_difference=float((after-before).abs().max()),
-                    mse_difference=float((after-before).square().mean()),bitwise_equal=bool(torch.equal(after,before))))
-        finally:
-            self.renderer.gaussians,self.renderer.collect_contributions=previous,collect
-        return dict(per_view=per_view,all_native_bitwise_equal=all(x['bitwise_equal'] for x in per_view),
-            max_abs_difference=max(x['max_abs_difference'] for x in per_view),
-            semantics='P-only actual codec replacement versus original motion scene; equal-depth stable sort may change order',
-            independent_novel_excluded=True,incumbent_mutated=False)
-
-    def _install_birth_transaction(self, transaction):
-        """Every topology generation starts a fresh optimizer for the whole pool."""
-        self.birth_transaction = transaction
-        if getattr(transaction,'persistent_state',None) is not None:
-            self.births=birth_model_factory(self.config.sh_degree,persistent=True)
-            self.births.restore(BirthTransaction.tensor_tree(transaction.persistent_state,self.device),
-                                self.config.gaussian_stage2)
-            self.births.source_rows=transaction.sources.clone()
-            return
-        self.births = birth_model_factory(self.config.sh_degree, family_state=transaction.family_state,
-                                          patch_state=transaction.patch_state,
-                                          reincarnation_state=transaction.reincarnation_state,
-                                          predictive_model=transaction.predictive_model,
-                                          source_residual=transaction.predictive_model and uses_source_residual(self.config),
-                                          quick_source=transaction.predictive_model and uses_quick_source(self.config),
-                                          shadow_source=transaction.predictive_model and uses_shadow_source(self.config))
-        for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-            setattr(self.births, attr, torch.nn.Parameter(transaction.raw[name].clone()))
-        if transaction.family_state is not None:
-            self.births.install_family_state(transaction.family_state)
-        if transaction.patch_state is not None:
-            self.births.install_patch_state(transaction.patch_state)
-            self._set_patch_stage()
-        if transaction.reincarnation_state is not None:
-            self.births.install_reincarnation_state(transaction.reincarnation_state)
-            if not uses_dual_predictive(self.config) and not uses_quick_source(self.config):
-                self.births.set_training_stage(getattr(self,'birth_terminal',False))
-        freeze_birth_radiance(self.births, self.config)
-        if not uses_dual_predictive(self.config) and not uses_quick_source(self.config):
-            set_family_training_stage(self.births,getattr(self,'birth_terminal',False))
-        self.births.active_sh_degree = self.gaussians.active_sh_degree
-        self.births.spatial_lr_scale = self.gaussians.spatial_lr_scale
-        self.births.source_rows = transaction.sources.clone()
-        self.births.max_radii2D = self.gaussians._xyz.new_zeros(len(transaction.sources))
-        if len(transaction.sources) and not getattr(self,'_quick_finalizing',False):
-            self.births.initialize_incremental_optimizer(self.config.gaussian_stage2)
-
-    def _restore_birth_pool(self, snapshot):
-        self.birth_transaction = BirthTransaction.restore(snapshot['transaction'], self.device)
-        self.births = birth_model_factory(self.config.sh_degree, capture=snapshot['model'])
-        self.births.restore(BirthTransaction.tensor_tree(snapshot['model'], self.device),
-                            self.config.gaussian_stage2)
-        self.births.source_rows = self.birth_transaction.sources.clone()
-        freeze_birth_radiance(self.births, self.config)
-        if not uses_dual_predictive(self.config) and not uses_quick_source(self.config):
-            set_family_training_stage(self.births,getattr(self,'birth_terminal',False))
-        if hasattr(self.births, 'patch_retention'):
-            self._set_patch_stage()
-        if hasattr(self.births,'reincarnation_state') and not uses_dual_predictive(self.config) and not uses_quick_source(self.config):
-            self.births.set_training_stage(getattr(self, 'birth_terminal', False))
-
-    def _validate_persistent_layout(self):
-        layout=getattr(self,'persistent_uid_layout',{})
-        if (any(not isinstance(uid,str) or isinstance(row,bool) or not isinstance(row,int) or
-                row<0 or row>=len(self.gaussians._xyz) for uid,row in layout.items()) or
-                len(set(layout.values()))!=len(layout) or
-                set(layout)!=set(getattr(self,'persistent_specs',{})) or
-                (layout and getattr(self,'persistent_bank_state',None) is None)):
-            raise ValueError('Persistent UID bank must map uniquely onto actual committed Gaussian rows')
-
-    @torch.no_grad()
-    def _begin_persistent_births(self):
-        """Bind one persistent UID pool to current motion, then add train-track geometry."""
-        from .model.persistent_newborn_model import PersistentNewbornModel
-        from .model.tracked_surface_proposal import propose_tracked_surface_births
-        if self.trainer.global_step!=200 or len(self.transaction_camera_views())!=20:
-            raise ValueError('Persistent anchor births start at motion200 with all20 standard training cameras')
-        self._validate_persistent_layout()
-        views=self.transaction_camera_views();names=tuple(views)
-        base=model_raw(self.gaussians)
-        active=dict(self.persistent_uid_layout)
-        capacity=self.config.birth.residual.max_candidates
-        if len(active)>self.config.birth.residual.max_gaussians:
-            raise ValueError('Persistent UID bank exceeds the actual scene population cap')
-        residuals={name:(self.forward(view,old_only=True)['render'].clamp(0,1)-view.image)
-                   for name,view in views.items()}
-        proposal,geometry_report=propose_tracked_surface_births(self.current_frame,views,
-            self.config.birth.anchor_sfm_path,capacity,active_uids=tuple(active),residuals=residuals,
-            image_root=Path(self.datamodule.config.root)/'frames')
-        if not isinstance(geometry_report,dict):raise ValueError('Geometry proposal must provide its actual support evidence')
-        by_uid={spec['uid']:spec for spec in proposal}
-        if len(by_uid)!=len(proposal):raise ValueError('Tracked geometry proposed duplicate persistent identities')
-        def convert_raw(raw):
-            return {name:torch.as_tensor(raw[name],device=self.device,dtype=base[name].dtype).clone() for name in RAW_FIELDS}
-        # The persistent bank may be much larger than this frame's train pool.
-        # Reliable current bindings and fresh anchors compete by the same SSE.
-        ranked=[]
-        for uid,spec in by_uid.items():
-            score=float(spec['score'])
-            if not math.isfinite(score) or score<0:raise ValueError('Anchor support scores must be finite current residual SSE')
-            if bool(spec.get('binding_only',False))!=(uid in active):
-                raise ValueError('Tracked anchor ownership disagrees with the actual UID bank')
-            if score>0:ranked.append(spec)
-        scheduled=sorted(ranked,key=lambda spec:(-float(spec['score']),spec['uid']))[:capacity]
-        specs=[];rows=[]
-        for spec in scheduled:
-            uid=spec['uid']
-            if uid not in active:
-                specs.append({**spec,'raw':convert_raw(spec['raw'])});rows.append(-1)
-        fresh=len(specs)
-        for spec in scheduled:
-            uid=spec['uid']
-            if uid not in active:continue
-            row=active[uid]
-            raw={name:value[row].clone() for name,value in base.items()}
-            # Material and Adam are continued. A trusted current track may
-            # bind geometry; it cannot reset learned radiance to its seed.
-            geometry=convert_raw(spec['raw'])
-            for name in ('xyz','rotation','logscale'):raw[name]=geometry[name]
-            specs.append({**self.persistent_specs[uid],'uid':uid,'raw':raw,'score':float(spec['score'])});rows.append(row)
-        model=PersistentNewbornModel(self.config.sh_degree).install(specs,
-            uids=[spec['uid'] for spec in specs],previous_state=self.persistent_bank_state,
-            old_rows=torch.tensor(rows,device=self.device,dtype=torch.long),
-            frame_index=self.current_frame,device=self.device,dtype=base['xyz'].dtype)
-        if specs:
-            # Previous moments/priors survive, but material starts from exactly
-            # the physical population actually decoded before this birth stage.
-            model.rebind(model.uids,{name:torch.stack([spec['raw'][name] for spec in specs]) for name in RAW_FIELDS},
-                         old_rows=torch.tensor(rows,device=self.device,dtype=torch.long),frame_index=self.current_frame)
-        model.active_sh_degree=self.gaussians.active_sh_degree
-        model.spatial_lr_scale=self.gaussians.spatial_lr_scale
-        model.training_setup(self.config.gaussian_stage2)
-        raw=model_raw(model);n=len(rows)
-        sources=nearest_sources(raw['xyz'],base['xyz'])
-        model.source_rows=sources.clone()
-        scores=raw['xyz'].new_tensor([float(spec.get('score',spec.get('residual_mass',1.))) for spec in specs])
-        self.births=model
-        self.birth_transaction=BirthTransaction(raw,sources,torch.tensor(rows,device=self.device,dtype=torch.long),scores,
-            raw['xyz'].clone(),raw['rotation'].clone(),raw['logscale'].exp(),
-            torch.zeros(n,device=self.device,dtype=torch.int64),names,names,fresh,n-fresh,
-            group_ids=torch.arange(n,device=self.device),region_diagnostics=geometry_report,
-            persistent_state=model.capture())
-        baseline=encode_birth_trial(self,torch.zeros(n,device=self.device,dtype=torch.bool),
-                                     torch.zeros(len(base['xyz']),device=self.device,dtype=torch.bool))
-        self.birth_transaction.old_render_reference=baseline.raw
-        baseline_errors=birth_validation_errors(self,list(views.values()),baseline.raw)
-        if n:
-            deleted=torch.zeros(len(base['xyz']),device=self.device,dtype=torch.bool)
-            oldrows=self.birth_transaction.replacements;deleted[oldrows[oldrows>=0]]=True
-            canonical=encode_birth_trial(self,torch.ones(n,device=self.device,dtype=torch.bool),deleted)
-            physical={name:value[len(canonical.keep):].clone() for name,value in canonical.raw.items()}
-            model.rebind(model.uids,physical,old_rows=oldrows,frame_index=self.current_frame)
-            replay=encode_birth_trial(self,torch.ones(n,device=self.device,dtype=torch.bool),deleted)
-            if not all(torch.equal(canonical.raw[name],replay.raw[name]) for name in RAW_FIELDS):
-                raise ValueError('Persistent SGD geometry is not fixed at its actual pose-codec canonical value')
-        self.persistent_pretrain_state=model.bank_state()
-        self.persistent_candidate_specs={spec['uid']:spec for spec in specs}
-        self.persistent_training_population_count=n;self.persistent_birth_optimizer_steps=0
-        self.persistent_initialized=True
-        self.birth_cohort=0;self.birth_cohort_start=200;self.birth_end_step=300 if n else 200
-        self.birth_terminal=False;self.coarse_birth_snapshot=[]
-        self.birth_control.update(proposal_count=n,spatial_proposals=fresh,repair_proposals=n-fresh,
-            selection_camera_scope='all_standard_training_cameras',source_mutated_before_acceptance=False,
-            persistent_birth=dict(active_bank_count=len(active),scheduled_active_count=n-fresh,
-                inactive_bank_count=len(active)-(n-fresh),fresh_count=fresh,training_population_count=n,
-                geometry=geometry_report,baseline_all20_mse=baseline_errors.tolist(),
-                initial_all20_mse=fitting_errors(self,list(views.values()),False).tolist(),
-                model_count=1,optimizer_count=1,initializer_optimizer_updates=0,post_admission_optimizer_updates=0,
-                total_steps=self.birth_end_step,SGD_initial_pose_codec_replay_exact=True))
-        if not n:
-            self._finish_persistent_births()
-            recorder=getattr(self.trainer,'record_birth_comparison',None)
-            if recorder is not None:recorder()
-            self.finalize_frame()
-
-    @torch.no_grad()
-    def _persistent_optimizer_update_done(self,step):
-        if step-200!=self.persistent_birth_optimizer_steps+1 or not 201<=step<=300:
-            raise ValueError('Persistent bank permits one optimizer update per birth iteration, at most100')
-        self.persistent_birth_optimizer_steps+=1
-
-    @torch.no_grad()
-    def _finish_persistent_births(self):
-        end=self.total_steps
-        if (end not in (200,300) or self.trainer.global_step!=end or
-                self.persistent_birth_optimizer_steps!=end-200 or
-                bool(self.persistent_training_population_count)!=(end==300)):
-            raise ValueError('Persistent completion must match its actual single-model 200+0/100 ledger')
-        views=list(self.transaction_camera_views().values());bank=self.births;tx=self.birth_transaction
-        _,report=admit_residual_births(self,self.config.birth.residual,views,views,
-            fitting_views=views,capture_prefixes=True,atomic_lineage=True)
-        chosen=None;chosen_model=None;chosen_tx=None
-        for witness in reversed(self._birth_admission_witnesses):
-            self.births,self.birth_transaction=bank,tx
-            original=CommitTrial.restore(witness['trial'],self.device)
-            selected=selected_population(self,original)
-            self._install_birth_transaction(selected)
-            replay=encode_birth_trial(self,torch.ones(len(self.births._xyz),device=self.device,dtype=torch.bool),
-                                       selected.provisional_deleted)
-            if (all(torch.equal(original.raw[name],replay.raw[name]) for name in RAW_FIELDS) and
-                    replay.complete_bytes<=report['complete_byte_budget']):
-                chosen=replay;chosen_model=self.births;chosen_tx=self.birth_transaction;break
-        if chosen is None:raise ValueError('Persistent incumbent failed its actual-codec physical replay')
-        # Build the next encoder bank from the *actual* committed population.
-        selected_uids={bank.uids[int(row)] for row in original.candidates}
-        inverse=torch.full((len(self.gaussians._xyz),),-1,device=self.device,dtype=torch.long)
-        inverse[chosen.keep]=torch.arange(len(chosen.keep),device=self.device)
-        layout={};committed={};live=[];rejected=[]
-        newrow={uid:len(chosen.keep)+index for index,uid in enumerate(chosen_model.uids)}
-        old_reference=tx.old_render_reference
-        for index,uid in enumerate(bank.uids):
-            parent=int(tx.replacements[index])
-            if uid in selected_uids:
-                row=newrow[uid];physical={name:value[row] for name,value in chosen.raw.items()}
-            elif parent>=0 and int(inverse[parent])>=0:
-                row=int(inverse[parent]);physical={name:value[parent] for name,value in old_reference.items()}
-                rejected.append(uid)
-            else:continue
-            live.append(uid);layout[uid]=row;committed[uid]=physical
-        bank.rollback_uids(rejected,self.persistent_pretrain_state)
-        bank.commit(live,old_rows=torch.tensor([layout[uid] for uid in live],device=self.device,dtype=torch.long))
-        physical={name:torch.stack([committed[uid][name] for uid in live]) if live else
-                  old_reference[name][:0] for name in RAW_FIELDS}
-        bank.rebind(live,physical,old_rows=torch.tensor([layout[uid] for uid in live],device=self.device,dtype=torch.long),
-                    frame_index=self.current_frame)
-        updated=bank.bank_state()
-        # Inactive bank identities were never part of the train pool. Their
-        # original rows and Adam state survive; only actual decoded deaths or
-        # accepted 1:1 updates alter this mapping.
-        all_layout={uid:int(inverse[parent]) for uid,parent in self.persistent_uid_layout.items()
-                    if int(inverse[parent])>=0}
-        all_layout.update(layout)
-        all_uids=sorted(all_layout,key=lambda uid:all_layout[uid])
-        physical_all={name:value[torch.tensor([all_layout[uid] for uid in all_uids],
-                      device=value.device,dtype=torch.long)].detach().cpu() for name,value in chosen.raw.items()}
-        self.persistent_bank_state=type(bank).merge_bank_states(self.persistent_bank_state,updated,
-            all_uids,physical_all,[all_layout[uid] for uid in all_uids],frame_index=self.current_frame)
-        self.persistent_uid_layout=all_layout
-        metadata={**self.persistent_specs,**self.persistent_candidate_specs}
-        self.persistent_specs={uid:metadata[uid] for uid in all_uids}
-        self.births,self.birth_transaction=chosen_model,chosen_tx
-        committed_errors=birth_validation_errors(self,views,chosen.raw)
-        self._commit_population_trial(chosen)
-        self._birth_admission_witnesses=None
-        self.birth_control['birth_transaction']=report
-        self.birth_control['persistent_birth'].update(committed_all20_mse=committed_errors.tolist(),
-            live_bank_count=len(all_uids),trained_bank_retained=len(live),accepted_wire_updates=len(chosen.candidates),
-            accepted_fresh=sum(int(tx.replacements[int(row)])<0 for row in original.candidates),
-            accepted_active=sum(int(tx.replacements[int(row)])>=0 for row in original.candidates),
-            active_unchanged_or_rejected=len(rejected),
-            birth_optimizer_updates=self.persistent_birth_optimizer_steps,total_steps=end,
-            physical_codec_replay_exact=True,actual_training_steps=dict(motion=200,birth=end-200,total=end),
-            semantics='one persistent UID pool; rejected updates retain original row; no repeated coverage or extra refit')
-
-    @torch.no_grad()
-    def _initialize_quick_births(self,views):
-        from .model.child_dc_initializer import initialize_child_dc_once
-        if self.quick_birth_initialized:
-            raise ValueError('Quick child DC initialization may run only once per frame')
-        if self.trainer.global_step!=200 or self.total_steps!=300 or getattr(self,'birth_branches',None) is not None or len(views)!=20:
-            raise ValueError('Quick births require a single model at step200 with fixed total300')
-        self.births.set_training_stage(1)
-        mask = torch.ones(len(self.births._xyz),dtype=torch.bool,device=self.device)
-        deleted = torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device)
-        parents = self.birth_transaction.replacements[mask];deleted[parents[parents>=0]]=True
-        reference = None
-        def validate_scene():
-            nonlocal reference
-            trial = encode_birth_trial(self,mask,deleted)
-            if reference is None:
-                reference = trial
-            elif not torch.equal(trial.keep,reference.keep) or not torch.equal(trial.sources,reference.sources):
-                raise ValueError('One-shot initializer changed its actual codec population/source mapping')
-            errors = birth_validation_errors(self,list(views.values()),trial.raw)
-            return dict(mse=float(errors.mean()),per_view_mse=errors.tolist(),codec_bytes=trial.complete_bytes)
-        report = initialize_child_dc_once(self,views,validate_scene=validate_scene)
-        self.quick_birth_initialized = True
-        self.birth_control['quick_initializer'] = report
-        self.birth_control['quick_schedule'] = dict(model_count=1,birth_optimizer_count=1,
-            training_camera_scope='all20',motion_steps=200,birth_steps=100,total_steps=300,
-            protected_global_steps=[201,250],competition_global_steps=[251,300],
-            common_fit_steps=0,MVS_candidates=0,post_validation_SGD_steps=0)
-
-    @torch.no_grad()
-    def _initialize_shadow_births(self,views):
-        """Birth is an accepted finite-density scene change, never a dense trial pool."""
-        from .model.shadow_birth_initializer import propose_shadow_family
-        if (self.quick_birth_initialized or self.trainer.global_step!=200 or
-                self.total_steps!=300 or len(views)!=20 or getattr(self,'birth_branches',None) is not None):
-            raise ValueError('Shadow initialization requires one uninitialized all20 model at step200')
-        model,tx=self.births,self.birth_transaction
-        model.set_training_stage(1)
-        accepted=torch.zeros(len(model._xyz),dtype=torch.bool,device=self.device)
-        deleted=torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device)
-        best=encode_birth_trial(self,accepted,deleted)
-        errors=birth_validation_errors(self,list(views.values()),best.raw)
-        baseline=errors.clone()
-        config=self.config.birth.residual
-        available=(config.birth_budget_bytes if self.current_frame==1 else
-                   min(config.birth_budget_bytes,max(2048,config.target_frame_bytes-best.complete_bytes)))
-        budget=best.complete_bytes+available
-        records=[]
-        roots=sorted(range(len(model.reincarnation_groups)),
-                     key=lambda root:float(tx.scores[model.reincarnation_groups[root]].sum()),reverse=True)
-        for root in roots:
-            rows=model.reincarnation_groups[root]
-            if len(rows)!=3:
-                continue
-            initial_dc=model._features_dc[rows[1:]].detach().clone()
-            mask=accepted.clone();mask[rows]=True
-            trial_deleted=deleted.clone()
-            parents=tx.replacements[mask];trial_deleted[parents[parents>=0]]=True
-            cache={}
-            def density_trial(rho):
-                # The zero endpoint is the exact already accepted codec scene;
-                # it does not append a duplicate mother or reorder a depth tie.
-                if float(rho)==0.:
-                    model.clear_shadow_probe()
-                    return best
-                model.set_shadow_probe(root,float(rho))
-                key=(float(rho),model._features_dc._version)
-                if key not in cache:
-                    cache[key]=encode_birth_trial(self,mask,trial_deleted)
-                return cache[key]
-            def probe_scene():
-                trial=density_trial(1.)
-                selected=mask.nonzero(as_tuple=True)[0]
-                local=torch.searchsorted(selected,rows[1:])
-                return trial.raw,local+len(trial.keep)
-            def render_density(view,rho):
-                trial=density_trial(rho)
-                previous=self.renderer.gaussians
-                collect=self.renderer.collect_contributions
-                try:
-                    self.renderer.collect_contributions=False
-                    self.renderer.gaussians=RawView(trial.raw,self.config.sh_degree,self.gaussians)
-                    return self.renderer(view,self.background)['render']
-                finally:
-                    self.renderer.gaussians=previous
-                    self.renderer.collect_contributions=collect
-            model.set_shadow_probe(root,1.)
-            try:
-                proposal=propose_shadow_family(self,views,root,render_density,probe_scene)
-                rho=float(proposal['rho'])
-                trial=density_trial(rho) if math.isfinite(rho) and 0.<rho<=1. else None
-                candidate_errors=(birth_validation_errors(self,list(views.values()),trial.raw)
-                                  if trial is not None else None)
-                legal=bool(trial is not None and trial.complete_bytes<=budget and
-                    len(trial.raw['xyz'])<=config.max_gaussians and
-                    torch.isfinite(candidate_errors).all() and candidate_errors.mean()<errors.mean())
-                records.append(dict(root=root,parent=int(tx.replacements[rows[0]]),rho=rho,
-                    accepted=legal,before_mean_mse=float(errors.mean()),
-                    candidate_mean_mse=float(candidate_errors.mean()) if candidate_errors is not None else None,
-                    codec_bytes=trial.complete_bytes if trial is not None else None,proposal=proposal))
-                if legal:
-                    model.accept_shadow_family(root,rho)
-                    accepted,best,errors,deleted=mask,trial,candidate_errors,trial_deleted
-                else:
-                    model._features_dc[rows[1:]]=initial_dc
-                    model._clear_reincarnation_cache()
-            finally:
-                model.clear_shadow_probe()
-        self.quick_birth_initialized=True
-        self.birth_control['shadow_initializer']=dict(method='sequential native-responsibility source families',
-            baseline_mse=baseline.tolist(),initialized_mse=errors.tolist(),codec_bytes=best.complete_bytes,
-            complete_byte_budget=budget,accepted_families=sum(item['accepted'] for item in records),
-            accepted_points=int(accepted.sum()),families=records,optimizer_steps=0,SGD_steps=0,
-            hidden_gradient_loops=False,training_camera_scope='all20',unaccepted_children='transparent')
-        self.birth_control['quick_schedule']=dict(model_count=1,birth_optimizer_count=1,
-            training_camera_scope='all20',motion_steps=200,birth_steps=100 if bool(accepted.any()) else 0,
-            total_steps=300 if bool(accepted.any()) else 200,protected_global_steps=[201,250],
-            competition_global_steps=[251,300],common_fit_steps=0,MVS_candidates=0,post_validation_SGD_steps=0)
-        # Remove every rejected shadow before SGD, and train with the exact
-        # decoded surviving predictor of the accepted real-codec population.
-        selected=selected_population(self,best)
-        self._install_birth_transaction(selected)
-        replay=encode_birth_trial(self,torch.ones(len(self.births._xyz),dtype=torch.bool,device=self.device),
-                                  selected.provisional_deleted)
-        if not all(torch.equal(replay.raw[name],best.raw[name]) for name in RAW_FIELDS):
-            raise ValueError('Shadow SGD population does not replay its accepted initialization')
-        self.birth_control['shadow_initializer']['SGD_initial_codec_replay_exact']=True
-        # One trajectory's accepted starting point, not a second trained model.
-        self.shadow_initialized_state=dict(pool=self._capture_birth_pool(),trial=replay.capture(),
-            mse=errors.tolist(),budget=budget)
-        if not bool(accepted.any()):
-            self.birth_end_step=200
-            self.birth_control['quick_schedule']['early_stop']='no beneficial finite-density family'
-            self._finish_shadow_births()
-            recorder=getattr(self.trainer,'record_birth_comparison',None)
-            if recorder is not None:recorder()
-            self.finalize_frame()
-
-    @torch.no_grad()
-    def _finish_shadow_births(self):
-        end=self.total_steps
-        if end not in (200,300) or self.trainer.global_step!=end or self.quick_birth_optimizer_steps!=end-200:
-            raise ValueError('Shadow completion permits only motion200 or motion200 + single birth100')
-        views=list(self.transaction_camera_views().values())
-        # SGD used a fixed surviving predictor. Final per-family withdrawal
-        # must restore the actual original mother, not leave a fixed-ref hole.
-        tx=self.birth_transaction
-        if tx.fixed_reference is not None:
-            tx.sources=tx.fixed_keep[tx.sources]
-            self.births.source_rows=tx.sources.clone()
-            tx.fixed_reference=None;tx.fixed_keep=None;tx.provisional_deleted=None
-        _,report=admit_residual_births(self,self.config.birth.residual,views,views,
-            fitting_views=views,capture_prefixes=True,atomic_lineage=True)
-        full_model,full_transaction=self.births,self.birth_transaction
-        initial=self.shadow_initialized_state
-        witnesses=[dict(pool=None,trial=item['trial'],kind='trained_prefix')
-                   for item in reversed(self._birth_admission_witnesses)]
-        witnesses.append(dict(pool=initial['pool'],trial=initial['trial'],kind='accepted_initialization'))
-        baseline=self.gaussians._xyz.new_tensor(report['validation_baseline_mse']).mean()
-        best_value=float('inf');chosen=None;chosen_state=None;chosen_kind=None;chosen_errors=None;checks=[]
-        legal_trained=False
-        self._quick_finalizing=True
-        try:
-            for witness in witnesses:
-                if witness['kind']=='trained_prefix' and legal_trained:
-                    continue
-                if witness['pool'] is None:
-                    self.births,self.birth_transaction=full_model,full_transaction
-                else:
-                    self._restore_birth_pool(witness['pool'])
-                original=CommitTrial.restore(witness['trial'],self.device)
-                transaction=selected_population(self,original)
-                self._install_birth_transaction(transaction)
-                replay=encode_birth_trial(self,torch.ones(len(self.births._xyz),dtype=torch.bool,device=self.device),
-                                           transaction.provisional_deleted)
-                exact=all(torch.equal(replay.raw[name],original.raw[name]) for name in RAW_FIELDS)
-                errors=birth_validation_errors(self,views,replay.raw)
-                value=float(errors.mean())
-                legal=bool(exact and torch.isfinite(errors).all() and errors.mean()<=baseline+1.e-10 and
-                    replay.complete_bytes<=initial['budget'])
-                checks.append(dict(kind=witness['kind'],candidate_count=len(replay.candidates),
-                    exact_codec_replay=exact,mse=value,codec_bytes=replay.complete_bytes,accepted=legal))
-                if legal and witness['kind']=='trained_prefix':legal_trained=True
-                if legal and value<best_value:
-                    chosen=replay;chosen_state=self._capture_birth_pool();best_value=value
-                    chosen_kind=witness['kind'];chosen_errors=errors.tolist()
-            if chosen is None:
-                raise ValueError('Shadow incumbent and accepted initialization both failed exact codec replay')
-            self._restore_birth_pool(chosen_state)
-            self._commit_population_trial(chosen)
-        finally:
-            self._quick_finalizing=False
-        self._birth_admission_witnesses=None
-        report['pre_rollback_admission_mse']=report['validation_committed_mse']
-        report['validation_committed_mse']=chosen_errors
-        report['retirement_committed_mse']=chosen_errors
-        report['accepted']=len(chosen.candidates)
-        report['trial_complete_bytes']=chosen.complete_bytes
-        self.birth_control['birth_transaction']=report
-        self.birth_control['quick_committed']=dict(candidate_count=len(chosen.candidates),
-            actual_training_steps=dict(motion=200,birth_iterations=end-200,
-                birth_optimizer_updates=self.quick_birth_optimizer_steps,total=end),
-            replay_checks=checks,post_admission_SGD_steps=0,
-            selected_trajectory_state=chosen_kind,committed_mse=chosen_errors,
-            selection_objective='per-source-family all20 mean MSE and actual codec bytes',
-            material='single shadow-born trajectory with accepted initialization rollback')
-
-    @torch.no_grad()
-    def _quick_optimizer_update_done(self,step):
-        expected = step-self.motion_steps
-        if not 1<=expected<=100 or self.quick_birth_optimizer_steps!=expected-1:
-            raise ValueError('Quick births permit exactly one optimizer update in each of the 100 birth steps')
-        self.quick_birth_optimizer_steps += 1
-        if step==250:
-            self.births.set_training_stage(2)
-            # Same single Adam instance; newly released parent-alpha rows must
-            # not inherit a 50-step bias correction from already-trained rows.
-            self.births.optimizer.state.clear()
-            self.quick_birth_phase = 2
-            self.birth_control['quick_schedule']['competition_optimizer_state_reset_at'] = 250
-
-    @torch.no_grad()
-    def _finish_quick_births(self):
-        if self.trainer.global_step!=300 or self.total_steps!=300 or getattr(self,'birth_branches',None) is not None:
-            raise ValueError('Quick final admission must follow exactly motion200 + birth100 in one model')
-        trained_count = len(self.births._xyz)
-        if trained_count and self.quick_birth_optimizer_steps!=100:
-            raise ValueError('Quick model did not receive its complete, bounded 100 optimizer updates')
-        views = list(self.transaction_camera_views().values())
-        _,report = admit_residual_births(self,self.config.birth.residual,views,views,
-            fitting_views=views,capture_prefixes=True)
-        full_model,full_transaction = self.births,self.birth_transaction
-        baseline = self.gaussians._xyz.new_tensor(report['validation_baseline_mse'])
-        candidates = self._birth_admission_witnesses
-        chosen = None
-        self._quick_finalizing = True
-        replay_checks = []
-        try:
-            for witness in reversed(candidates):
-                self.births,self.birth_transaction = full_model,full_transaction
-                original = CommitTrial.restore(witness['trial'],self.device)
-                transaction = selected_population(self,original)
-                self._install_birth_transaction(transaction)
-                replay = encode_birth_trial(self,torch.ones(len(self.births._xyz),dtype=torch.bool,device=self.device),
-                                            transaction.provisional_deleted)
-                exact = all(torch.equal(replay.raw[name],original.raw[name]) for name in RAW_FIELDS)
-                errors = birth_validation_errors(self,views,replay.raw)
-                legal = bool(exact and replay.complete_bytes<=report['complete_byte_budget'] and
-                             errors.mean()<=baseline.mean()+1.e-10)
-                replay_checks.append(dict(candidate_count=len(original.candidates),exact_codec_replay=exact,
-                    mse=float(errors.mean()),codec_bytes=replay.complete_bytes,accepted=legal))
-                if legal:
-                    chosen = replay
-                    break
-            if chosen is None:
-                raise ValueError('Even the unmodified quick incumbent failed actual-codec prefix replay')
-            # replay candidates are already 0..selected_count-1 against the
-            # fixed decoded surviving predictor. Only now physically retire.
-            self._commit_population_trial(chosen)
-        finally:
-            self._quick_finalizing = False
-        self._birth_admission_witnesses = None
-        self.birth_control['birth_transaction'] = report
-        self.birth_control['quick_committed'] = dict(candidate_count=len(chosen.candidates),
-            actual_training_steps=dict(motion=200,birth_iterations=100,birth_optimizer_updates=self.quick_birth_optimizer_steps,total=300),
-            replay_checks=replay_checks,post_admission_SGD_steps=0,selection_objective='all20 mean MSE and actual codec bytes',
-            material='single trained theta0 mother plus child D; no branch or global colour calibration')
-
-    def _capture_birth_pool(self):
-        return dict(model=BirthTransaction.tensor_tree(self.births.capture(),'cpu'),
-                    transaction=self.birth_transaction.capture(),cohort=self.birth_cohort)
-
-    def _activate_dual_branch(self,branch):
-        packet = self.birth_branches[branch]
-        self.births,self.birth_transaction = packet['model'],packet['transaction']
-        self.birth_active_branch = branch
-
-    def _activate_dual_for_view(self,view):
-        name = Path(view.path).name
-        groups = self.birth_transaction.crossfit_state['camera_groups']
-        branches = [key for key,names in groups.items() if name in names]
-        if len(branches)!=1:
-            raise ValueError('Dual birth training requires one standard own-group camera')
-        self._activate_dual_branch(branches[0])
-
-    def _begin_dual_branches(self):
-        initial = self.birth_transaction.capture()
-        a = dict(model=self.births,transaction=self.birth_transaction)
-        self._install_birth_transaction(BirthTransaction.restore(initial,self.device))
-        self.birth_branches = dict(A=a,B=dict(model=self.births,transaction=self.birth_transaction))
-        self.dual_coarse_branches = {}
-        self.dual_training_totals = {}
-        self._activate_dual_branch('A')
-        self.birth_control['dual_protocol'] = dict(camera_groups=self.birth_transaction.crossfit_state['camera_groups'],
-            phases=['native_parent_radiance_N_inactive','residual_details_and_N_parent_frozen',
-                    'mature_details_and_alpha_competition_N_geometry_fixed'],
-            endpoint_scope='P_whole_family_only_N_current_constant',
-            initialization_scope='shared all20 MVS proposal; conditional cross-calibration, not unseen initialization holdout')
-        if uses_source_residual(self.config):
-            self.birth_control['dual_protocol']['material_lineage'] = ('stage0 common is optional C; '
-                'fine parent fixed at original source theta0, children independently learn D from theta0; '
-                'final fine endpoints prior/common/detail/full, coarse retains DC/SH/full')
-
-    def _capture_dual_checkpoint(self):
-        if self.frame_finalized or not getattr(self,'birth_branches',None):
-            return None
-        active = self.birth_active_branch
-        branches = {}
-        for branch in ('A','B'):
-            self._activate_dual_branch(branch)
-            branches[branch] = self._capture_birth_pool()
-        self._activate_dual_branch(active)
-        return dict(active=active,branches=branches,coarse=self.dual_coarse_branches,
-                    training_totals=BirthTransaction.tensor_tree(self.dual_training_totals,'cpu'))
-
-    def _restore_dual_checkpoint(self,state):
-        self.birth_branches = None
-        self.dual_coarse_branches = None
-        self.dual_training_totals = None
-        if state is None:
-            if self.motion_committed and not self.frame_finalized:
-                raise ValueError('Dual birth resume lost its independent model/optimizer branches')
-            return
-        branches = {}
-        for name,packet in state['branches'].items():
-            self._restore_birth_pool(packet)
-            branches[name] = dict(model=self.births,transaction=self.birth_transaction)
-        if set(branches)!=set(('A','B')):
-            raise ValueError('Dual birth resume requires both complete branches')
-        self.birth_branches = branches
-        self.dual_coarse_branches = state['coarse']
-        self.dual_training_totals = BirthTransaction.tensor_tree(state['training_totals'],self.device)
-        self._activate_dual_branch(state['active'])
-
-    @torch.no_grad()
-    def _post_dual_birth_step(self,packages,step):
-        for branch in ('A','B'):
-            self._activate_dual_branch(branch)
-            items = [item for item in packages if item.get('birth_branch')==branch]
-            if not items:
-                continue
-            if branch not in self.dual_training_totals:
-                self.dual_training_totals[branch] = dict(views=0,loss=self.gaussians._xyz.new_zeros(()),
-                    psnr=self.gaussians._xyz.new_zeros(()),observed=self.gaussians._xyz.new_zeros(3),
-                    initial_observed=None,last_observed=None)
-            totals = self.dual_training_totals[branch]
-            count = len(self.births._xyz)
-            detail = self.births.detail_mask
-            novel = self.births.novel_mask
-            for item in items:
-                totals['views'] += 1
-                totals['loss'] += item['birth_image_loss']
-                totals['psnr'] += item['birth_psnr']
-                if count:
-                    visible = item['visibility_filter'][-count:]
-                    self.births.max_radii2D[visible] = torch.maximum(self.births.max_radii2D[visible],item['radii'][-count:][visible])
-                    observed = item['motion_contribution_filter'][-count:]
-                    self.birth_transaction.observations[observed] |= 1<<item['birth_camera_index']
-                    sample = torch.stack((observed[~(detail|novel)].sum(),observed[detail].sum(),observed[novel].sum()))
-                    totals['observed'] += sample
-                    if totals['initial_observed'] is None:
-                        totals['initial_observed'] = sample.clone()
-                    totals['last_observed'] = sample.clone()
-            if count:
-                self.births.optimizer.step()
-                self.births.optimizer.zero_grad(set_to_none=True)
-                self.births.project_parameters()
-                if self.birth_cohort>0:
-                    rows = (detail|novel if self.birth_cohort==1 else detail).nonzero(as_tuple=True)[0]
-                    floor = math.sqrt(3)*.5*self.config.rigid_tree.gs_xyz_step_extent*self.datamodule.cameras_extent
-                    constrain_candidates(self.births,self.birth_transaction,floor,rows=rows)
-        if step!=self.total_steps:
-            return
-        stage = dict(index=self.birth_cohort,start_step=self.birth_cohort_start,end_step=step,branches={},
-                     optimizer_reset='independent whole-pool Adam at each stage boundary')
-        for branch in ('A','B'):
-            totals = self.dual_training_totals.get(branch)
-            if totals:
-                stage['branches'][branch] = dict(own_view_count=totals['views'],
-                    mean_image_loss=float(totals['loss']/max(1,totals['views'])),
-                    mean_psnr=float(totals['psnr']/max(1,totals['views'])),
-                    native_observed_parent_detail_N_point_views=totals['observed'].tolist(),
-                    initial_native_observed_parent_detail_N=(totals['initial_observed'].tolist() if totals['initial_observed'] is not None else [0,0,0]),
-                    mature_native_observed_parent_detail_N=(totals['last_observed'].tolist() if totals['last_observed'] is not None else [0,0,0]),
-                    semantics='native actual contribution bits during existing training renders, not projected footprint area')
-        self.birth_control.setdefault('dual_cohorts',[]).append(stage)
-        if self.birth_cohort<2:
-            self._advance_dual_stage(step)
-            return
-        self._finish_dual_births()
-        recorder = getattr(self.trainer,'record_birth_comparison',None)
-        if recorder is not None:
-            recorder()
-        self.finalize_frame()
-
-    @torch.no_grad()
-    def _advance_dual_stage(self,step):
-        from .model.residual_birth import _reincarnation_transaction,_copy_novel_raw
-        next_branches = {}
-        for branch in ('A','B'):
-            self._activate_dual_branch(branch)
-            if self.birth_cohort==0:
-                self.dual_coarse_branches[branch] = self._capture_birth_pool()
-                transaction = self.birth_transaction
-                roots = [i for i,spec in enumerate(transaction.reincarnation_specs) if spec.get('split_eligible',False)]
-                roots = roots[:max(0,(self.config.birth.residual.max_candidates-len(self.births._xyz))//2)]
-                alpha = self.config.birth.initial_alpha
-                model = self.births.install_details_from_coarse(roots,detail_alpha=.1 if alpha is None else alpha)
-                _copy_novel_raw(model,transaction.crossfit_state['novel_initial_raw'])
-                model.set_training_stage(1)
-                state = dict(transaction.crossfit_state);state['eligible']=True
-                refined = _reincarnation_transaction(self,model,transaction.reincarnation_specs,transaction,
-                    state,dict(transaction.region_diagnostics),previous=transaction)
-                refined.predictive_model = True
-                self._install_birth_transaction(refined)
-            else:
-                self.births.set_training_stage(2)
-                self.births.initialize_incremental_optimizer(self.config.gaussian_stage2)
-            next_branches[branch] = dict(model=self.births,transaction=self.birth_transaction)
-        self.birth_branches = next_branches
-        self.birth_cohort += 1
-        self.birth_cohort_start = step
-        self.birth_end_step = step+self.config.rigid_tree.birth_steps
-        self.dual_training_totals = {}
-        self._activate_dual_branch('A')
-
-    @torch.no_grad()
-    def _calibrate_dual_population(self,branch,mask,deleted):
-        """Cross-calibrate frozen endpoints in one exact codec population."""
-        from .model.predictive_colour import calibrate_predictive_colour
-        model = self.births
-        model.freeze_predictive_endpoints()
-        views = self.transaction_camera_views()
-        names = list(views)
-        groups = self.birth_transaction.crossfit_state['camera_groups']
-        opposite = 'B' if branch=='A' else 'A'
-        calibration = {name:views[name] for name in groups[opposite]}
-        endpoint_kinds = getattr(model,'endpoint_kinds',('prior','dc','sh','full'))
-        endpoint_kinds = tuple(endpoint_kinds() if callable(endpoint_kinds) else endpoint_kinds)
-        vertices = dict(zip(endpoint_kinds,((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,1.))))
-        packets = {}
-        reference = None
-        def trial_at(weights):
-            nonlocal reference
-            key = tuple(float(x) for x in weights)
-            if key not in packets:
-                previous = (model.predictive_weights.clone() if model.predictive_weights is not None
-                            else model._xyz.new_tensor([0.,0.,1.]))
-                model.apply_predictive_weights(weights)
-                trial = encode_birth_trial(self,mask,deleted)
-                if reference is None:
-                    reference = trial
-                elif not torch.equal(trial.keep,reference.keep) or not torch.equal(trial.sources,reference.sources):
-                    raise ValueError('Colour calibration changed its population/surviving predictor')
-                for field in ('xyz','rotation','logscale','opacity'):
-                    if reference is not trial and not torch.equal(trial.raw[field],reference.raw[field]):
-                        raise ValueError('Colour calibration changed frozen geometry or alpha')
-                packets[key] = trial
-                model.apply_predictive_weights(previous)
-            return packets[key]
-        def render_endpoint(view,kind):
-            trial = trial_at(vertices[kind])
-            previous,collect = self.renderer.gaussians,self.renderer.collect_contributions
-            try:
-                self.renderer.collect_contributions = False
-                self.renderer.gaussians = RawView(trial.raw,self.config.sh_degree,self.gaussians)
-                return self.renderer(view,self.background)['render']
-            finally:
-                self.renderer.gaussians,self.renderer.collect_contributions = previous,collect
-        def validate(weights):
-            trial = trial_at(weights)
-            errors = birth_validation_errors(self,list(calibration.values()),trial.raw)
-            # Legality is separate from colour-control/incumbent improvement.
-            return dict(mse=float(errors.mean()),eligible=bool(torch.isfinite(errors).all()),
-                        codec_bytes=trial.complete_bytes,per_view_mse=errors.tolist())
-        report = calibrate_predictive_colour(calibration,render_endpoint,
-            model.apply_predictive_weights,validate,endpoint_kinds=endpoint_kinds)
-        trial = trial_at(report['weights'])
-        control = trial_at(vertices['prior'])
-        empty = torch.zeros(len(model._xyz),dtype=torch.bool,device=self.device)
-        baseline = encode_birth_trial(self,empty,torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device))
-        actual = birth_validation_errors(self,list(views.values()),trial.raw)
-        prior = birth_validation_errors(self,list(views.values()),control.raw)
-        incumbent = birth_validation_errors(self,list(views.values()),baseline.raw)
-        folds = {}
-        for key,cameras in groups.items():
-            ids = [names.index(name) for name in cameras]
-            folds[key] = dict(final_mean_mse=float(actual[ids].mean()),
-                colour_control_mean_mse=float(prior[ids].mean()),incumbent_mean_mse=float(incumbent[ids].mean()),
-                improves_incumbent=bool(actual[ids].mean()<incumbent[ids].mean()-1.e-10),
-                no_worse_than_colour_control=bool(actual[ids].mean()<=prior[ids].mean()+1.e-10))
-        report.update(source_branch=branch,calibration_cameras=list(calibration),
-            endpoint_scope='P_whole_family_only_N_current_constant',population_count=int(mask.sum()),
-            survivor_count=len(trial.keep),folds=folds,codec_bytes=trial.complete_bytes,
-            final_per_view_mse=actual.tolist(),colour_control_per_view_mse=prior.tolist(),
-            incumbent_per_view_mse=incumbent.tolist(),
-            certificate=all(x['improves_incumbent'] and x['no_worse_than_colour_control'] for x in folds.values()),
-            semantics='conditional cross-calibration/model selection; same actual codec population; no SGD follows')
-        return trial,report
-
-    @torch.no_grad()
-    def _dual_N_increment(self,trial):
-        n = self.birth_transaction.proposed_spatial
-        selected = trial.candidates
-        if not bool((selected<n).any()):
-            return dict(present=False,accepted=True)
-        mask = torch.zeros(len(self.births._xyz),dtype=torch.bool,device=self.device)
-        mask[selected] = True
-        if not bool(mask[:n].all()):
-            raise ValueError('Independent N hypothesis was split after its transfer test')
-        mask[:n] = False
-        deleted = torch.ones(len(self.gaussians._xyz),dtype=torch.bool,device=self.device);deleted[trial.keep]=False
-        without = encode_birth_trial(self,mask,deleted)
-        views = self.transaction_camera_views();names=list(views)
-        before = birth_validation_errors(self,list(views.values()),without.raw)
-        after = birth_validation_errors(self,list(views.values()),trial.raw)
-        folds = {}
-        for key,cameras in self.birth_transaction.crossfit_state['camera_groups'].items():
-            rows = [names.index(name) for name in cameras]
-            folds[key] = dict(without_N_mean_mse=float(before[rows].mean()),
-                with_N_mean_mse=float(after[rows].mean()),improves=bool(after[rows].mean()<before[rows].mean()-1.e-10))
-        return dict(present=True,accepted=all(x['improves'] for x in folds.values()),folds=folds,
-            semantics='actual N increment on identical calibrated P/old-survivor population; both standard camera groups')
-
-    @torch.no_grad()
-    def _finish_dual_births(self):
-        """Select one complete calibrated branch; no geometry or colour average."""
-        fine = {}
-        for branch in ('A','B'):
-            self._activate_dual_branch(branch)
-            fine[branch] = self._capture_birth_pool()
-        options = []
-        winner = None
-        views = self.transaction_camera_views()
-        for branch in ('A','B'):
-            for kind,snapshot in (('coarse',self.dual_coarse_branches[branch]),('residual',fine[branch])):
-                self._restore_birth_pool(snapshot)
-                self.birth_active_branch = branch
-                n = self.birth_transaction.proposed_spatial
-                self.birth_transaction.crossfit_state['eligible'] = kind=='residual'
-                full = torch.ones(len(self.births._xyz),dtype=torch.bool,device=self.device)
-                if kind=='coarse':full[:n]=False
-                deleted = torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device)
-                parents = self.birth_transaction.replacements[full];deleted[parents[parents>=0]]=True
-                _,initial = self._calibrate_dual_population(branch,full,deleted)
-                candidate,evidence = admit_residual_births(self,self.config.birth.residual,
-                    list(views.values()),list(views.values()),fitting_views=list(views.values()))
-                mask = torch.zeros(len(self.births._xyz),dtype=torch.bool,device=self.device);mask[candidate.candidates]=True
-                deleted = torch.ones(len(self.gaussians._xyz),dtype=torch.bool,device=self.device);deleted[candidate.keep]=False
-                actual,certificate = self._calibrate_dual_population(branch,mask,deleted)
-                increment = self._dual_N_increment(actual)
-                if increment['present'] and not increment['accepted']:
-                    # Remove an untransferable N population, restore its absence,
-                    # and re-prove P in the actual P-only selected structure.
-                    self.birth_transaction.crossfit_state['eligible'] = False
-                    p_only = torch.ones(len(self.births._xyz),dtype=torch.bool,device=self.device);p_only[:n]=False
-                    p_deleted = torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device)
-                    p_parents = self.birth_transaction.replacements[p_only];p_deleted[p_parents[p_parents>=0]]=True
-                    _,p_recalibration = self._calibrate_dual_population(branch,p_only,p_deleted)
-                    candidate,evidence = admit_residual_births(self,self.config.birth.residual,
-                        list(views.values()),list(views.values()),fitting_views=list(views.values()))
-                    mask.zero_();mask[candidate.candidates]=True
-                    deleted.fill_(True);deleted[candidate.keep]=False
-                    actual,certificate = self._calibrate_dual_population(branch,mask,deleted)
-                    increment = dict(rejected_N=increment,P_only_pool_recalibration=p_recalibration,
-                                     **self._dual_N_increment(actual))
-                legal = bool(certificate['certificate'] and increment['accepted'] and
-                    actual.complete_bytes<=evidence['complete_byte_budget'])
-                entry = dict(branch=branch,kind=kind,initial_pool_calibration=initial,
-                    actual_population_calibration=certificate,N_increment=increment,
-                    accepted=legal,selected_count=len(actual.candidates),codec_bytes=actual.complete_bytes,
-                    byte_budget=evidence['complete_byte_budget'],transaction=evidence)
-                options.append(entry)
-                mse = sum(certificate['final_per_view_mse'])/len(certificate['final_per_view_mse'])
-                if legal and (winner is None or mse<winner['mse']-1.e-10):
-                    winner = dict(mse=mse,branch=branch,kind=kind,trial=actual.capture(),
-                        pool=self._capture_birth_pool(),proof=certificate,evidence=evidence)
-        self.birth_control['dual_selection'] = options
-        if winner is None:
-            # Whole atomic rollback, including provisional source retirements.
-            self._restore_birth_pool(fine['A'])
-            empty = torch.zeros(len(self.births._xyz),dtype=torch.bool,device=self.device)
-            trial = encode_birth_trial(self,empty,torch.zeros(len(self.gaussians._xyz),dtype=torch.bool,device=self.device))
-            self.birth_control['dual_committed'] = dict(accepted=False,reason='no_actual_population_predictive_certificate')
-        else:
-            self._restore_birth_pool(winner['pool'])
-            trial = CommitTrial.restore(winner['trial'],self.device)
-            self.birth_control['dual_committed'] = dict(accepted=True,branch=winner['branch'],kind=winner['kind'],
-                proof=winner['proof'],codec_bytes=trial.complete_bytes,no_training_after_calibration=True)
-        transaction = selected_population(self,trial)
-        normalized = CommitTrial(trial.keep,torch.arange(len(trial.candidates),device=self.device),trial.sources,
-            trial.raw,trial.complete_bytes,trial.motion_bytes,trial.birth_bytes,trial.opacity_bytes,trial.old_symbols)
-        self._install_birth_transaction(transaction)
-        self._commit_population_trial(normalized)
-        self.birth_branches = None
-        self.dual_coarse_branches = None
-        self.dual_training_totals = None
-
-    def _set_patch_stage(self):
-        cap = 1. if self.birth_terminal else .5
-        if hasattr(self.births, 'set_retention_cap'):
-            self.births.set_retention_cap(cap)
-        else:
-            self.births.patch_retention_cap = cap
-            with torch.no_grad():
-                self.births.patch_retention.clamp_(0, cap)
-        self.births.set_radiance_views(self.transaction_camera_views())
-
-    def _calibrate_birth_radiance(self, views):
-        if not uses_intrinsic_birth(self.config):
-            return
-        from .model.birth_radiance import calibrate_intrinsic_dc
-        dc, rest = self.births._features_dc, self.births._features_rest
-        conservative = uses_conservative_birth(self.config)
-        mask = self.birth_transaction.replacements < 0 if conservative else None
-        report = calibrate_intrinsic_dc(self, views, point_mask=mask) if conservative else calibrate_intrinsic_dc(self, views)
-        if conservative:
-            families = getattr(self.births, 'family_rows', None)
-            contrast_report = None
-            if families is not None and len(families):
-                from .model.family_radiance import calibrate_family_contrast_dc
-                original_contrast = self.births.family_contrast
-                contrast_report = calibrate_family_contrast_dc(self, views)
-                if self.births.family_contrast is not original_contrast:
-                    raise ValueError('Family contrast solver must preserve its leaf Parameter')
-            report = dict(novel_intrinsic=report, family_contrast=contrast_report,
-                          repair_common_dc_fixed=True)
-        if self.births._features_dc is not dc or self.births._features_rest is not rest:
-            raise ValueError('Intrinsic calibration must preserve optimizer parameter identity')
-        freeze_birth_radiance(self.births, self.config)
-        if conservative:
-            report['quantized_family'] = family_quantization_diagnostics(self.births, self.make_birth_view())
-        self.birth_control.setdefault('radiance_calibrations', []).append(dict(
-            cohort=self.birth_cohort, step=self.trainer.global_step,
-            phase='population_refit' if self.birth_terminal else 'exploration',
-            radiance_mode=self.config.birth.radiance_mode, candidate_count=len(self.births._xyz),
-            report=report))
-
-    @torch.no_grad()
-    def _advance_birth_cohort(self):
-        views = self.transaction_camera_views()
-        if uses_reincarnation(self.config) and self.birth_cohort == 1:
-            n = self.birth_transaction.proposed_spatial
-            self.birth_transaction.crossfit_state['novel_B_raw'] = {
-                name:value[:n].clone() for name,value in model_raw(self.births).items()}
-        if uses_intrinsic_birth(self.config):
-            self._calibrate_birth_radiance(views)
-        fitting = [views[name] for name in self.birth_transaction.fit_names]
-        self.birth_control.setdefault('cohorts', []).append(dict(index=self.birth_cohort,
-            start_step=self.birth_cohort_start, end_step=self.trainer.global_step,
-            optimization_steps=self.trainer.global_step-self.birth_cohort_start,
-            candidate_count=len(self.births._xyz),
-            fitting_mse=fitting_errors(self, fitting, False).tolist()))
-        if hasattr(self.births, 'patch_rows'):
-            self.birth_control['cohorts'][-1]['patches'] = self._patch_training_diagnostics()
-        if self.birth_cohort+1 >= self.config.birth.residual.max_cohorts or not len(self.births._xyz):
-            return False
-        transaction, report = refine_transaction(self, self.config.birth.residual, views)
-        self.birth_control.setdefault('refinements', []).append(report)
-        if transaction is None:
-            return False
-        self.coarse_birth_snapshot.append(dict(
-            model=BirthTransaction.tensor_tree(self.births.capture(), 'cpu'),
-            transaction=self.birth_transaction.capture(), cohort=self.birth_cohort))
-        self._install_birth_transaction(transaction)
-        self.birth_cohort += 1
-        self.birth_cohort_start = self.trainer.global_step
-        self.birth_end_step = self.birth_cohort_start+self.config.rigid_tree.birth_steps
-        return True
-
-    def _patch_training_diagnostics(self):
-        transaction = self.birth_transaction
-        observations = sum((transaction.observations >> index)&1 for index in range(len(transaction.fit_names)))
-        return [dict(kernels=len(row), owned_old_count=len(old), retention=float(self.births.patch_retention[index]),
-            exposure_cap=float(self.births.patch_retention_cap),
-            newborns_observed=int((observations[row] > 0).sum()),
-            newborns_in_multiple_views=int((observations[row] >= 2).sum()))
-            for index,(row,old) in enumerate(zip(self.births.patch_rows,self.births.patch_old_rows))]
-
-    @torch.no_grad()
-    def _select_residual_births(self):
-        views = self.transaction_camera_views()
-        validation = [views[name] for name in self.birth_transaction.validation_names]
-        fitting = [views[name] for name in self.birth_transaction.fit_names]
-        fine_pool = self.births, self.birth_transaction
-        crossfit_state = (BirthTransaction.tensor_tree(self.birth_transaction.crossfit_state,self.device)
-                          if uses_reincarnation(self.config) else None)
-        options = list(self.coarse_birth_snapshot or [])+[None]
-        best_errors = None
-        selection = []
-        for snapshot in options:
-            if snapshot is None:
-                self.births, self.birth_transaction = fine_pool
-                cohort = self.birth_cohort
-            else:
-                self._restore_birth_pool(snapshot)
-                cohort = snapshot['cohort']
-            crossfit_report = (qualify_crossfit_novel(self,views,crossfit_state)
-                               if crossfit_state is not None else None)
-            candidate, evidence = admit_residual_births(self, self.config.birth.residual,
-                validation, list(views.values()), fitting_views=fitting)
-            if crossfit_report is not None and crossfit_report['eligible']:
-                n = self.birth_transaction.proposed_spatial
-                if bool((candidate.candidates<n).any()):
-                    mask = torch.zeros(len(self.births._xyz),dtype=torch.bool,device=self.device)
-                    mask[candidate.candidates] = True
-                    deleted = torch.ones(len(self.gaussians._xyz),dtype=torch.bool,device=self.device)
-                    deleted[candidate.keep] = False
-                    actual = qualify_crossfit_novel(self,views,crossfit_state,mask,deleted,
-                                                     preferred_branch=crossfit_report['selected_branch'])
-                    crossfit_report = dict(exploration_pool=crossfit_report,selected_population=actual)
-                    if not actual['eligible']:
-                        candidate, evidence = admit_residual_births(self,self.config.birth.residual,
-                            validation,list(views.values()),fitting_views=fitting)
-            errors = self.gaussians._xyz.new_tensor(evidence['validation_committed_mse'])
-            # Each option has independently passed incumbent coverage/rate
-            # guards. Choose the lower validation MSE among these legal scenes;
-            # do not impose another per-camera Pareto guard between options.
-            select = best_errors is None or bool(errors.mean() < best_errors.mean()-1.e-10)
-            selection.append(dict(cohort=cohort, accepted=evidence['accepted'],
-                independent_geometry=crossfit_report,
-                validation_mse=errors.tolist(), selected_at_comparison=select,
-                full_pool_fitting_mse=evidence['full_pool_fitting_mse'],
-                full_pool_validation_mse=evidence['full_pool_validation_mse'],
-                full_pool_codec_bytes=evidence.get('full_pool_codec_bytes'),
-                accepted_trial_bytes=evidence.get('trial_complete_bytes'),
-                full_pool_opacity_bytes=evidence.get('full_pool_opacity_bytes'),
-                patch_takeover=evidence.get('patch_takeover'),
-                full_pool_baseline_fitting_mse=evidence['full_pool_baseline_fitting_mse']))
-            if select:
-                best_errors = errors
-                trial, report = candidate, evidence
-                chosen_pool = self.births, self.birth_transaction
-                chosen_cohort = cohort
-        self.births, self.birth_transaction = chosen_pool
-        self.birth_control['cohort_selection'] = selection
-        self.birth_control['selected_cohort'] = chosen_cohort
-        self.birth_control['fitting_trained_proposal_mse'] = fitting_errors(self, fitting, False).tolist()
-        self.birth_control['candidate_rejected'] = len(self.births._xyz)-len(trial.candidates)
-        self.birth_control['birth_transaction'] = report
-        return trial, report
-
-    @torch.no_grad()
-    def _accept_residual_births(self):
-        """Select structure now; physically commit only after population refit."""
-        trial, report = self._select_residual_births()
-        transaction = selected_population(self, trial)
-        normalized = CommitTrial(trial.keep.clone(), torch.arange(len(trial.candidates), device=self.device),
-            trial.sources.clone(), {name: value.clone() for name, value in trial.raw.items()},
-            trial.complete_bytes, trial.motion_bytes, trial.birth_bytes, trial.opacity_bytes, trial.old_symbols)
-        self.selected_birth_state = dict(transaction=transaction.capture(),
-            trial=normalized.capture(), budget=report['complete_byte_budget'],
-            baseline_mse=report['validation_baseline_mse'], selected_mse=report['validation_committed_mse'],
-            selected_cohort=self.birth_control['selected_cohort'])
-        self._install_birth_transaction(transaction)
-        self.coarse_birth_snapshot = None
-        if not len(transaction.sources):
-            self.birth_control['population_refit'] = dict(skipped='no_selected_births',
-                selected_mse=report['validation_committed_mse'], selected_bytes=trial.complete_bytes)
-            self._commit_population_trial(normalized)
-            return False
-        self.birth_terminal = True
-        set_family_training_stage(self.births, True)
-        if hasattr(self.births, 'reincarnation_state'):
-            self.births.set_training_stage(True)
-        if hasattr(self.births, 'patch_retention'):
-            self._set_patch_stage()
-        self.birth_cohort += 1
-        self.birth_cohort_start = self.trainer.global_step
-        self.birth_end_step = self.birth_cohort_start+self.config.rigid_tree.birth_steps
-        fitting = [self.transaction_camera_views()[name] for name in transaction.fit_names]
-        self.birth_control['population_refit'] = dict(start_step=self.birth_cohort_start,
-            end_step=self.birth_end_step, candidate_count=len(transaction.sources),
-            provisional_deleted=int(transaction.provisional_deleted.sum()),
-            predictor='fixed_decoded_survivor_reference',
-            initial_forward_mse=fitting_errors(self, fitting, False).tolist(),
-            selected_mse=report['validation_committed_mse'], selected_bytes=trial.complete_bytes)
-        if hasattr(self.births, 'patch_rows'):
-            self.birth_control['population_refit']['initial_patches'] = self._patch_training_diagnostics()
-        return True
-
-    @torch.no_grad()
-    def _finish_population_refit(self):
-        transaction = self.birth_transaction
-        if uses_intrinsic_birth(self.config):
-            self._calibrate_birth_radiance(self.transaction_camera_views())
-        fitting = [self.transaction_camera_views()[name] for name in transaction.fit_names]
-        selected = CommitTrial.restore(self.selected_birth_state['trial'], self.device)
-        refitted = encode_birth_trial(self, torch.ones(len(self.births._xyz), dtype=torch.bool,
-            device=self.device), transaction.provisional_deleted)
-        errors = birth_validation_errors(self, fitting, refitted.raw)
-        original = errors.new_tensor(self.selected_birth_state['baseline_mse'])
-        selected_errors = errors.new_tensor(self.selected_birth_state['selected_mse'])
-        use_refit = bool(refitted.complete_bytes <= self.selected_birth_state['budget'] and
-            errors.mean() < original.mean()-1.e-10 and errors.mean() < selected_errors.mean()-1.e-10)
-        self.birth_control.setdefault('cohorts', []).append(dict(index=self.birth_cohort,
-            phase='population_refit', start_step=self.birth_cohort_start, end_step=self.trainer.global_step,
-            optimization_steps=self.trainer.global_step-self.birth_cohort_start,
-            candidate_count=len(self.births._xyz), full_codec_train_mse=errors.tolist()))
-        if hasattr(self.births, 'patch_rows'):
-            self.birth_control['cohorts'][-1]['patches'] = self._patch_training_diagnostics()
-        self.birth_control['population_refit'].update(refit_mse=errors.tolist(),
-            baseline_mse=original.tolist(), refit_bytes=refitted.complete_bytes,
-            byte_budget=self.selected_birth_state['budget'], accepted_refit=use_refit,
-            final_mse=(errors if use_refit else selected_errors).tolist(),
-            final_bytes=refitted.complete_bytes if use_refit else selected.complete_bytes)
-        if not use_refit:
-            restored = BirthTransaction.restore(self.selected_birth_state['transaction'], self.device)
-            self._install_birth_transaction(restored)
-        self.birth_control['fitting_trained_proposal_mse'] = fitting_errors(self, fitting, False).tolist()
-        self._commit_population_trial(refitted if use_refit else selected)
-
-    @torch.no_grad()
-    def _commit_population_trial(self, trial):
-        """The only physical old-row retirement in the birth transaction."""
-        if not torch.equal(trial.candidates, torch.arange(len(self.births._xyz), device=self.device)):
-            raise ValueError('Population commit must preserve the selected complete subtree')
-        if (not torch.equal(trial.keep, self.birth_transaction.fixed_keep) or
-                not torch.equal(trial.sources, self.birth_transaction.sources)):
-            raise ValueError('Population commit changed its fixed survivor predictor')
-        delete = torch.ones(len(self.gaussians._xyz), dtype=torch.bool, device=self.device)
-        delete[trial.keep] = False
-        if trial.old_symbols is not None:
-            self.opacity_update.delta.copy_(trial.old_symbols.to(self.opacity_update.delta)*self.opacity_update.step)
-        self._commit_opacity_and_retire(forced_remove=delete)
-        self.births.source_rows = trial.sources.to(self.device)
-        self.motion.record_final_diagnostics()
-        self.birth_control['committed_population_count'] = len(trial.candidates)
-        self.birth_control['committed_trial_bytes'] = trial.complete_bytes
 
     @torch.no_grad()
     def _pin_birth_handoff_sources(self):
@@ -2478,12 +1403,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         for parameter in self.motion.parameters():
             parameter.requires_grad_(False)
         self.motion.optimizer.zero_grad(set_to_none=True)
-        if uses_persistent_birth(self.config):
-            self._begin_persistent_births()
-            return
-        if uses_residual_birth(self.config):
-            self._begin_residual_births()
-            return
         count = len(self.gaussians._xyz)
         appearance_scores = (self.birth_appearance_gradient.norm(dim=-1)
             if self.birth_appearance_gradient is not None else None)
@@ -2612,11 +1531,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                         self.birth_appearance_gradient.add_(
                             probe.grad[:, 0, :].detach() * len(packages))
             if step == self.motion_steps:
-                rows = torch.arange(len(self.gaussians._xyz), device=self.device)
                 if getattr(self, 'opacity_update', None) is not None:
-                    rows = self._commit_opacity_and_retire(
-                        forced_remove=torch.zeros(len(rows), dtype=torch.bool, device=self.device)) \
-                        if uses_residual_birth(self.config) else self._commit_opacity_and_retire()
+                    self._commit_opacity_and_retire()
                 self.motion.record_final_diagnostics()
                 directory = self.output_dir / 'region_statistics'
                 directory.mkdir(parents=True, exist_ok=True)
@@ -2624,9 +1540,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                     json.dumps(self.motion.flat_region_diagnostics, indent=2))
                 self._begin_births()
         else:
-            if uses_dual_predictive(self.config):
-                self._post_dual_birth_step(packages,step)
-                return
             if len(self.births._xyz):
                 for item in packages:
                     visible = item['visibility_filter'][-len(self.births._xyz):]
@@ -2637,10 +1550,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                         item['viewspace_points'].grad.mul_(len(packages))
                     self.births.add_densification_stats(
                         item['viewspace_points'], visible, align='right')
-                    if uses_residual_birth(self.config):
-                        observed = item['motion_contribution_filter'][-len(self.births._xyz):]
-                        camera = item['birth_camera_index']
-                        self.birth_transaction.observations[observed] |= 1 << camera
                 birth_step = step - self.motion_steps
                 # Densification/pruning replaces Parameter tensors: apply the
                 # fitted gradient exactly once before either happens.
@@ -2648,26 +1557,11 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self.births.optimizer.zero_grad(set_to_none=True)
                 if hasattr(self.births, 'project_parameters'):
                     self.births.project_parameters()
-                    if uses_reincarnation(self.config):
-                        floor = math.sqrt(3)*.5*self.config.rigid_tree.gs_xyz_step_extent*self.datamodule.cameras_extent
-                        constrain_candidates(self.births,self.birth_transaction,floor,
-                            rows=self.births.novel_mask.nonzero(as_tuple=True)[0])
-                    if uses_quick_source(self.config):
-                        floor = math.sqrt(3)*.5*self.config.rigid_tree.gs_xyz_step_extent*self.datamodule.cameras_extent
-                        constrain_candidates(self.births,self.birth_transaction,floor,rows=self.births.detail_rows)
-                elif uses_residual_birth(self.config):
-                    # The inherited motion grid itself leaves up to sqrt(3)/2
-                    # of a cell of uncertainty along a rotated surface normal.
-                    floor = (math.sqrt(3)*.5*self.config.rigid_tree.gs_xyz_step_extent*
-                             self.datamodule.cameras_extent)
-                    constrain_candidates(self.births, self.birth_transaction, floor)
                 elif self.config.birth.source_position_limit_sigma is not None:
                     constrain_birth_positions(self.births, self.gaussians,
                         self.config.birth.source_position_limit_sigma,
                         self.config.birth.source_position_min_extent * self.datamodule.cameras_extent)
-                if uses_residual_birth(self.config):
-                    pass  # A fixed probation pool: admission owns both birth and death.
-                elif step == self.total_steps:
+                if step == self.total_steps:
                     self.birth_control['pruned'] += self._prune_terminal_births()
                 elif (birth_step % self.config.birth.densify_interval == 0 and
                         (self.config.birth.densify_until_step is None or
@@ -2681,10 +1575,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                         max_points=self.config.birth.max_new_gaussians)
                     self.birth_control['split_added'] += result['added']
                     self.birth_control['pruned'] += result['pruned']
-                if uses_quick_source(self.config):
-                    self._quick_optimizer_update_done(step)
-                if uses_persistent_birth(self.config):
-                    self._persistent_optimizer_update_done(step)
             if (getattr(self, 'opacity_update', None) is not None and
                     self.config.opacity_update.joint_with_birth):
                 birth_step = step - self.motion_steps
@@ -2705,20 +1595,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self._step_feature_dc(step)
                 self.gaussians._features_dc.copy_(self.feature_dc_update.canonical_features().to(self.device))
             if step == self.total_steps:
-                if uses_residual_birth(self.config):
-                    if uses_persistent_birth(self.config):
-                        self._finish_persistent_births()
-                    elif uses_shadow_source(self.config):
-                        self._finish_shadow_births()
-                    elif uses_quick_source(self.config):
-                        self._finish_quick_births()
-                    elif self.birth_terminal:
-                        self._finish_population_refit()
-                    else:
-                        if self._advance_birth_cohort():
-                            return
-                        if self._accept_residual_births():
-                            return
                 recorder = getattr(self.trainer, 'record_birth_comparison', None)
                 if recorder is not None:
                     recorder()
@@ -2728,14 +1604,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def finalize_frame(self):
         if self.frame_finalized:
             return
-        if uses_quick_source(self.config):
-            allowed=(200,300) if uses_shadow_source(self.config) else (300,)
-            if self.trainer.global_step!=self.total_steps or self.total_steps not in allowed:
-                raise ValueError('Quick manifest cannot be finalized outside its motion200 / total300 budget')
-        if uses_persistent_birth(self.config) and (
-                self.trainer.global_step!=self.total_steps or self.total_steps not in (200,300) or
-                self.persistent_birth_optimizer_steps!=self.total_steps-200):
-            raise ValueError('Persistent manifest must account for exactly motion200 and at most birth100')
         if uses_early_replacement(self.config) and (
                 self.trainer.global_step not in (200,300) or self.early_shared_steps!=self.trainer.global_step):
             raise ValueError('Early replacement manifest requires a truthful single shared-Adam global200/300 ledger')
@@ -2747,9 +1615,23 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.opacity_update.finish()
         if getattr(self, 'feature_dc_update', None) is not None:
             self.feature_dc_update.finish()
-        view = self.make_birth_view()
+        logscale_update = getattr(self, 'logscale_update', None)
+        if logscale_update is not None and logscale_update.ready:
+            logscale_update.finish()
+        old_raw = model_raw(self.gaussians)
+        logscale_reference = old_raw['logscale'].detach().clone()
+        if logscale_update is not None and logscale_update.ready:
+            old_raw['logscale'] = logscale_update.canonical_logscale(
+                logscale_reference)
+        full = getattr(self, 'full_attribute_update', None)
+        full_reference = None
+        if getattr(self, 'full_update_active', False) and full is not None:
+            full_reference = self.full_update_reference(canonical=True)
+            old_raw.update({name: value.to(old_raw[name]) for name, value in
+                            full.canonical(full_reference).items()})
+        view = self.make_birth_view(reference=old_raw) if full_reference is not None else self.make_birth_view()
         raw, sources = materialize_quantized_gaussians(
-            model_raw(self.gaussians), view)
+            old_raw, view)
         stream_dir = self.output_dir / 'frame_storage' / 'rigid_tree'
         stream_dir.mkdir(parents=True, exist_ok=True)
         motion_path = stream_dir / f'motion_{self.current_frame:03d}.bin'
@@ -2768,6 +1650,19 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                                     not self.config.rigid_tree.rotation_updates),
             birth_pose_steps=((self.config.birth.new_xyz_step_extent*self.datamodule.cameras_extent,self.config.birth.new_rotation_step)
                 if self.config.birth.radiance_mode=='adaptive_residual_birth' else None))
+        logscale_info = None
+        if logscale_update is not None and logscale_update.ready:
+            decoded_motion = self.motion.codec_previous_state
+            if decoded_motion.gs_translation_rows is None:
+                raise ValueError('Exported motion lost point-translation support')
+            logscale_info = logscale_update.export(
+                stream_dir / f'logscale_{self.current_frame:03d}.bin',
+                logscale_reference, frame_index=self.current_frame,
+                allowed_rows=decoded_motion.gs_translation_rows)
+            expected_logscale = logscale_update.canonical_logscale(
+                logscale_reference).to(raw['logscale'])
+            if not torch.equal(raw['logscale'][:len(expected_logscale)], expected_logscale):
+                raise ValueError('Materialized old log-scale differs from its sparse packet')
         opacity_info = None
         if self.opacity_update is not None:
             opacity_info = self.opacity_update.export(
@@ -2780,8 +1675,16 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             feature_info = self.feature_dc_update.export(
                 stream_dir / f'shdc_{self.current_frame:03d}.bin', self.current_frame)
             expected_features = self.feature_dc_update.canonical_features().to(raw['sh_dc'])
-            if not torch.equal(raw['sh_dc'][:len(expected_features)], expected_features):
+            if full_reference is None and not torch.equal(raw['sh_dc'][:len(expected_features)], expected_features):
                 raise ValueError('Materialized old DC differs from its shared color packet')
+        full_info = None
+        if full_reference is not None:
+            full_info = full.export(stream_dir / f'fullattr_{self.current_frame:03d}.bin',
+                                    full_reference, self.current_frame)
+            expected_full = full.canonical(full_reference)
+            for name in FULL_ATTRIBUTE_FIELDS:
+                if not torch.equal(raw[name][:len(expected_full[name])].cpu(), expected_full[name]):
+                    raise ValueError(f'Materialized old {name} differs from its full attribute packet')
         decoded = self.motion.codec_previous_state
         prior = self.motion.frame_reference_state
         old_count = len(self.motion.owner)
@@ -2837,14 +1740,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             raw_state_sha256=raw_digest,
             previous_count=len(prior.xyz), retired_count=retired_count,
             no_old_deletions=retired_count == 0)
-        if uses_quick_source(self.config):
-            manifest['training_step_accounting'] = dict(motion=200,birth=self.total_steps-200,total=self.total_steps,
-                birth_optimizer_updates=self.quick_birth_optimizer_steps,
-                initializer_optimizer_updates=0,post_admission_optimizer_updates=0)
-        if uses_persistent_birth(self.config):
-            manifest['training_step_accounting']=dict(motion=200,birth=self.total_steps-200,total=self.total_steps,
-                birth_optimizer_updates=self.persistent_birth_optimizer_steps,
-                initializer_optimizer_updates=0,post_admission_optimizer_updates=0)
         if uses_early_replacement(self.config):
             manifest['training_step_accounting']=dict(warm_gate=70,joint=130,final_population=self.total_steps-200,
                 global_iterations=self.total_steps,shared_adam_steps=self.early_shared_steps,motion_participation=200,
@@ -2856,17 +1751,66 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if getattr(self.config.birth,'frame_training_plan',False):
             manifest['training_step_accounting'] = dict(global_iterations=300, shared_adam_steps=self.early_shared_steps,
                 shared_gate=100, fixed_gate_residual=50, joint_gate_residual=30, final_motion=20,
-                birth_steps=[200,250], cleanup_steps=[200,250,300], old_opacity=200,
+                birth_steps=[200,250], cleanup_steps=[200,250,300],
+                old_opacity=(100 if self.config.birth.keep_incumbent_fixed_after_motion else 200),
+                old_attribute_optimizer_steps=200,
                 newborn_updates=[100,50], extra_SGD_steps=0)
-            manifest['frame_training_plan_version'] = 1
+            manifest['training_step_accounting']['motion_optimizer_steps'] = (
+                200 + effective_final_joint_refine_steps(self))
+            if self.config.birth.keep_incumbent_fixed_after_motion:
+                manifest['training_step_accounting'].update(incumbent_fixed_after_motion=True,
+                    configured_final_joint_refine_steps=(
+                        self.config.rigid_tree.spatial_gate.final_joint_refine_steps))
+            manifest['frame_training_plan_version'] = 3
             manifest['birth_cohorts'] = self.birth_control['early_replacement']['actual_birth_cohorts']
             manifest['birth_events'] = [200,250]
+            if (not getattr(self, 'full_update_active', False) and
+                    getattr(self.config.birth, 'keep_incumbent_alpha_after_motion', False)):
+                manifest['training_step_accounting']['old_opacity'] = 200
+            if self.full_update_active and self.config.full_update.regional_repair:
+                factor = self.motion._motion_lr_factor(200)
+                rates = dict(
+                    xyz=self.config.rigid_tree.gs_translation_lr * factor,
+                    rotation=self.config.rigid_tree.gs_rotation_lr * factor,
+                    opacity=self.config.opacity_update.learning_rate * (
+                        factor if self.config.opacity_update.decay_with_motion else 1.),
+                    logscale=self.config.gaussian.scaling_lr,
+                    sh_dc=self.config.gaussian.feature_lr,
+                    sh_rest=self.config.gaussian.feature_lr / 20.)
+                final_rates = {**rates, 'logscale': rates['logscale'] * factor,
+                               'sh_dc': rates['sh_dc'] * factor,
+                               'sh_rest': rates['sh_rest'] * factor}
+                manifest['birth_events'] = []
+                manifest['training_step_accounting'] = dict(
+                    global_iterations=300, shared_adam_steps=self.early_shared_steps,
+                    shared_gate=100, fixed_gate_residual=50, joint_gate_residual=30,
+                    final_motion=20, fixed_region_selected_gs_repair=100,
+                    old_opacity_all_rows_steps=100, old_opacity_regional_repair_steps=100,
+                    old_attribute_regional_repair_steps=100, birth_steps=[], cleanup_steps=[],
+                    newborn_updates=[], extra_SGD_steps=0)
+                manifest['regional_attribute_repair'] = dict(
+                    selection_step=200, selected_count=self.birth_control['regional_attribute_repair']['selected_count'],
+                    selected_fraction=self.birth_control['regional_attribute_repair']['selected_fraction'],
+                    shared_region_and_gate_frozen_after=200,
+                    diagnostic_sidecar=self.birth_control['regional_attribute_repair']['diagnostics'],
+                    motion_learning_rate_factor=factor,
+                    attribute_learning_rate_schedule='base * final_ratio ** ((step - 201) / 99)',
+                    learning_rates_step_201=rates, learning_rates_step_300=final_rates,
+                    reference='previous decoded frame', attribute_packet='shortest of FUA1/FUA2/FUA3 or absent for zero')
         if self.opacity_update is not None:
             manifest.update(opacity_update=Path(opacity_info['path']).name if opacity_info else None,
                             opacity_update_timing='before_births')
         if getattr(self, 'feature_dc_update', None) is not None:
             manifest.update(feature_dc_update=Path(feature_info['path']).name if feature_info else None,
                             feature_dc_update_timing='before_births')
+        if logscale_update is not None:
+            manifest.update(logscale_update=(Path(logscale_info['path']).name
+                                             if logscale_info else None),
+                            logscale_update_timing='before_births')
+        if full_reference is not None:
+            manifest.update(full_update=True,
+                full_attribute_update=Path(full_info['path']).name if full_info else None,
+                full_attribute_update_timing='after_regional_dc_before_births')
         manifest_path = stream_dir / f'frame_{self.current_frame:03d}.json'
         manifest_path.write_text(json.dumps(manifest, indent=2))
         self.frame_report = dict(frame=self.current_frame,
@@ -2881,6 +1825,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             previous_count=len(prior.xyz), retired_count=retired_count,
             total_count=len(raw['xyz']), motion=motion_info, birth=birth_info,
             opacity_update=opacity_info, feature_dc_update=feature_info,
+            logscale_update=logscale_info,
             motion_observation_diagnostics=dict(
                 kind=('actual_compositing' if self.config.effective_motion_observations else 'frustum'),
                 frustum_samples=self.birth_control.get('motion_frustum_samples', 0),
@@ -2891,7 +1836,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             encoded_bytes=motion_path.stat().st_size +
                 (birth_info['archive_bytes'] if birth_info else 0) +
                 (opacity_info['archive_bytes'] if opacity_info else 0) +
-                (feature_info['archive_bytes'] if feature_info else 0),
+                (feature_info['archive_bytes'] if feature_info else 0) +
+                (logscale_info['archive_bytes'] if logscale_info else 0) +
+                (full_info['archive_bytes'] if full_info else 0),
             shared_reference_bytes=self.trainer.decoder_reference_path.stat().st_size,
             materialized_sha256=raw_digest,
             decoder_reference=manifest['reference'],
@@ -2900,14 +1847,35 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             motion_rate_diagnostics={name: float(value.detach())
                                      for name, value in rate_terms.items()},
             opacity_rate_diagnostics=({name: float(value.detach()) for name, value in
-                self.opacity_update.rate_terms(self._rate_byte_price(self.motion_steps),
+                self.opacity_update.rate_terms(self._opacity_rate_price(self.motion_steps),
                     width=self.config.rigid_tree.sparse_rate_width_bins).items()}
                 if self.opacity_update is not None else None),
+            logscale_rate_diagnostics=({name: float(value.detach()) for name, value in
+                logscale_update.rate_terms(self._rate_byte_price(self.total_steps)).items()}
+                if logscale_update is not None and logscale_update.ready else None),
             flat_region_diagnostics=self.motion.flat_region_diagnostics,
             birth_control=self.birth_control,
             semantics='Spatial gate motion and quantized births; shared first frame counted once. '
-                      'Previous-row deletions are encoded in motion; optional quantized old-opacity/DC deltas; '
-                      'old scale and higher-order SH fixed.')
+                      'Previous-row deletions are encoded in motion; optional quantized old-opacity/DC and '
+                      'motion-supported sparse log-scale deltas; higher-order SH fixed.')
+        if self.full_update_active and self.config.full_update.regional_repair:
+            self.frame_report['semantics'] = ('Spatial gate motion with fixed population and selected old-GS '
+                'pose, opacity, logscale, DC and higher-order SH updates; shared first frame counted once.')
+        if full_reference is not None:
+            self.frame_report['full_attribute_update'] = full_info
+            terms = full.rate_terms(self._rate_byte_price(self.total_steps))
+            self.frame_report['full_attribute_rate_diagnostics'] = {
+                'storage_loss_enabled': full.config.storage_loss_enabled,
+                'byte_price': self._rate_byte_price(self.total_steps),
+                'raw_bytes_surrogate': float(terms['raw_bytes_surrogate']),
+                'l1_loss': float(terms['l1_loss']),
+                'loss': float(terms['loss']),
+                'actual_packet_bytes': full_info['archive_bytes'] if full_info else 0,
+                'fields': {name: {key: (int(value) if key.startswith('active_') else float(value))
+                                  for key, value in item.items()}
+                           for name, item in terms['fields'].items()}}
+            self.frame_report['semantics'] = ('Spatial gate motion and quantized births; '
+                'keyframe old log-scale, DC and higher-order SH use an additional coded delta.')
         if getattr(self.config.birth,'frame_training_plan',False):
             self.frame_report['packet_bytes'] = self.frame_report['encoded_bytes']
             self.frame_report['manifest_bytes'] = manifest_path.stat().st_size

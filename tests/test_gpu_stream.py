@@ -16,8 +16,9 @@ from tests.test_codec import (reference_raw,motion_model,appearance_fixture,
                               opacity_fixture,wrapped)
 
 
-def make_stream(directory,births=2,rotate=False,nearest=False,inherit_rotation=False,colour=False):
-    raw=reference_raw()
+def make_stream(directory,births=2,rotate=False,nearest=False,inherit_rotation=False,colour=False,
+                scale=False,rest=3):
+    raw=reference_raw(rest=rest)
     if nearest:raw['xyz'][0,0]=0.
     model=motion_model(raw);prior=model.frame_reference_state
     if nearest:
@@ -60,6 +61,18 @@ def make_stream(directory,births=2,rotate=False,nearest=False,inherit_rotation=F
         (directory/'shdc_001.bin').write_bytes(packet)
         current['sh_dc']=decode_feature_dc_delta(packet,reference,frame_index=1,
             owner=decoded.owner[:n],node_count=len(prior.parents))
+    if scale:
+        from pipeline.model.sparse_logscale import encode_logscale_delta,decode_logscale_delta
+        if scale == 'anisotropic':
+            symbols=torch.zeros(n,3,dtype=torch.int8)
+            symbols[2]=torch.tensor([7,-3,2],dtype=torch.int8)
+        else:
+            symbols=torch.zeros(n,dtype=torch.int8);symbols[2]=7
+        packet=encode_logscale_delta(current['logscale'],symbols,
+            allowed_rows=decoded.gs_translation_rows,frame_index=1,step=.005)
+        (directory/'logscale_001.bin').write_bytes(packet)
+        current['logscale']=decode_logscale_delta(packet,current['logscale'],
+            allowed_rows=decoded.gs_translation_rows,frame_index=1).logscale
     if births:
         predictor={name:current[name][sources] for name in birth.ATTRIBUTES}
         symbols={name:torch.ones_like(value) for name,value in predictor.items()}
@@ -77,17 +90,30 @@ def make_stream(directory,births=2,rotate=False,nearest=False,inherit_rotation=F
         raw_state_sha256=reference_digest(current))
     if colour:
         manifest.update(feature_dc_update='shdc_001.bin',feature_dc_update_timing='before_births')
+    if scale:
+        manifest.update(logscale_update='logscale_001.bin',logscale_update_timing='before_births')
     (directory/'frame_001.json').write_text(json.dumps(manifest))
     return prior,raw,decoded,current,manifest
 
 
 class StreamPacketTests(unittest.TestCase):
+    def test_gpu_certificate_uses_each_run_configured_image_size(self):
+        from types import SimpleNamespace
+        from scripts.benchmark_gpu_stream import _expected_image_shape
+        config=SimpleNamespace(data=SimpleNamespace(expected_image_size=[1344,1007]))
+        self.assertEqual(_expected_image_shape(config),(3,1007,1344))
+        for invalid in (None,[],[1344],[1344,0],[1344,True],[1344,1007.0]):
+            config.data.expected_image_size=invalid
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                _expected_image_shape(config)
+
     def test_inherited_rotation_offsets_and_shared_colour_replay_before_newborn_prediction(self):
         from scripts.replay_rigid_tree import decode_frame
         for births in (0,2):
             with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
                 directory=Path(folder)
-                prior,raw,expected,attributes,_=make_stream(directory,births,inherit_rotation=True,colour=True)
+                prior,raw,expected,attributes,_=make_stream(
+                    directory,births,inherit_rotation=True,colour=True,scale=True)
                 step=read_stream_step(directory,1,region_count=len(prior.parents),
                     depth=prior.spatial_paths.shape[1],rest=3)
                 self.assertTrue(step.inherit_birth_rotation)
@@ -101,8 +127,22 @@ class StreamPacketTests(unittest.TestCase):
                 self.assertEqual(state.digest(),expected.digest())
                 self.assertEqual(reference_digest(decoded),reference_digest(attributes))
 
+    def test_anisotropic_logscale_is_counted_and_replayed_before_newborn_prediction(self):
+        from scripts.replay_rigid_tree import decode_frame
+        with tempfile.TemporaryDirectory() as folder:
+            directory=Path(folder)
+            prior,raw,expected,attributes,_=make_stream(
+                directory,2,inherit_rotation=True,scale='anisotropic')
+            step=read_stream_step(directory,1,region_count=len(prior.parents),
+                                  depth=prior.spatial_paths.shape[1],rest=3)
+            self.assertIn(step.logscale_update[:4],(b'SLA1',b'ZLA1'))
+            self.assertEqual(step.stored_bytes,sum(p.stat().st_size for p in directory.iterdir()))
+            state,decoded=decode_frame(directory,1,prior,raw)
+            self.assertEqual(state.digest(),expected.digest())
+            self.assertEqual(reference_digest(decoded),reference_digest(attributes))
+
     def test_birth_symbols_and_absolute_fallback_match_original_attribute_decoder(self):
-        for rest in (0,3):
+        for rest in (0,3,15):
             base,raw,symbols,steps,predictor,sources,xyz,q=appearance_fixture(rest=rest)
             packets=[birth.encode_birth_attributes(raw,3),birth.encode_birth_symbols(raw,3,
                 symbols=symbols,steps=steps,predictor=predictor,source_rows=sources)]
@@ -163,12 +203,31 @@ class StreamPacketTests(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(),'GPU incremental stream checks')
 class GPUStreamTests(unittest.TestCase):
+    def test_sh3_birth_and_regional_colour_match_cpu_bits(self):
+        from pipeline.model.gpu_stream import GPUStream
+        with tempfile.TemporaryDirectory() as folder:
+            directory=Path(folder)
+            prior,raw,expected,attributes,_=make_stream(
+                directory,2,inherit_rotation=True,colour=True,rest=15)
+            player=GPUStream(prior,raw,capacity=32)
+            self.assertEqual((player.rest,player.sh_degree,
+                              player.view.active_sh_degree),(15,3,3))
+            step=read_stream_step(directory,1,region_count=len(prior.parents),
+                                  depth=player.depth,rest=player.rest)
+            player.advance(step)
+            actual=player.capture_raw()
+            self.assertEqual(player.capture_state(actual).digest(),expected.digest())
+            self.assertEqual(reference_digest(actual),reference_digest(attributes))
+            self.assertEqual(player.view.active_sh_degree,3)
+            player.verify_render_inputs(attributes)
+
     def test_inherited_rotation_and_regional_colour_match_cpu_bits_with_newborns(self):
         from pipeline.model.gpu_stream import GPUStream
         for births in (0,2):
             with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
                 directory=Path(folder)
-                prior,raw,expected,attributes,_=make_stream(directory,births,inherit_rotation=True,colour=True)
+                prior,raw,expected,attributes,_=make_stream(
+                    directory,births,inherit_rotation=True,colour=True,scale=True)
                 player=GPUStream(prior,raw,capacity=32)
                 step=read_stream_step(directory,1,region_count=len(prior.parents),depth=player.depth,rest=player.rest)
                 player.advance(step)
@@ -176,6 +235,21 @@ class GPUStreamTests(unittest.TestCase):
                 self.assertEqual(player.capture_state(actual).digest(),expected.digest())
                 self.assertEqual(reference_digest(actual),reference_digest(attributes))
                 player.verify_render_inputs(attributes)
+
+    def test_anisotropic_logscale_matches_cpu_bits_with_newborns(self):
+        from pipeline.model.gpu_stream import GPUStream
+        with tempfile.TemporaryDirectory() as folder:
+            directory=Path(folder)
+            prior,raw,expected,attributes,_=make_stream(
+                directory,2,inherit_rotation=True,scale='anisotropic')
+            player=GPUStream(prior,raw,capacity=32)
+            step=read_stream_step(directory,1,region_count=len(prior.parents),
+                                  depth=player.depth,rest=player.rest)
+            player.advance(step)
+            actual=player.capture_raw()
+            self.assertEqual(player.capture_state(actual).digest(),expected.digest())
+            self.assertEqual(reference_digest(actual),reference_digest(attributes))
+            player.verify_render_inputs(attributes)
 
     def test_cooperative_nearest_leaf_keeps_exact_ties_and_routes_newborns_again(self):
         from pipeline.model.gpu_stream import GPUStream

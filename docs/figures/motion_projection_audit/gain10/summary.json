@@ -1,0 +1,25 @@
+{
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/flame_steak_1028/fs_cov150_300/20261028T133500_9a96a2",
+  "frame": 149,
+  "source_frame": 148,
+  "gs_sample_count": 1042,
+  "region_arrow_count": 150,
+  "nonzero_GS_residual_count": 297,
+  "common_projected_displacement_gain": 10.0,
+  "roi": [
+    420,
+    400,
+    1050,
+    1005
+  ],
+  "grid_sampling_pixels": 18,
+  "arrow_magnitude": "Length of actual screen-coordinate displacement times a single uniform gain. No normalization, 3-D-norm substitution, per-arrow scaling, clipping, or minimum length.",
+  "actual_state_sha": "1f0265a128922a0a4d676189a918e64ea49548dd13a6a668a3c98be34fe5f3e0",
+  "raw_sha": "a38825f69656aab0c58171018815bd45ef5c27217ddc74b0ac94e4a94c5bf5d6",
+  "maximum_raw_projected_endpoint_decomposition_error": 0.0,
+  "quantization_step_world_units": 0.0003896181335449219,
+  "display_scope": "Projected model-fitted GS centre updates, not ground-truth object motion or optical flow. Full and share arrows use base positions; residual projected vectors are translated to the same base origins for comparison. The visualization filters approximate centre visibility, not exact per-GS alpha visibility.",
+  "scope": "Projected decoded GS updates: full motion, regional share, GS residual.\n\nArrows are exact screen-coordinate differences times a single stated gain.\nThey are model-fitted updates, not ground-truth object motion or optical flow.\nThe full-motion panel is not a separately trained no-sharing baseline.\n",
+  "residual_projection": "project(base + shared + residual) - project(base + shared); displayed at base for correspondence.",
+  "sampling": "One eligible Gaussian centre nearest each 18px grid cell centre; depth/opacity-filtered centres; no motion-magnitude selection. All three maps use identical scale and origin set. Regional arrows are one actual member per represented region, not a normalized average."
+}

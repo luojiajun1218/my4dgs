@@ -1,22 +1,35 @@
-"""CPU numerical/lifecycle tests for the explicit 300-step frame plan."""
+"""CPU numerical, lifecycle, diagnostics and recovery tests for the frame plan."""
 import copy
+import json
+import math
+import random
 import tempfile
 import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace as NS
 from unittest.mock import Mock, patch
+
+import numpy as np
 import torch
-from pipeline.frame_plan import FramePlanController
+
 from pipeline.adaptive_birth import AdaptiveBirthController
-from pipeline.module import Module, BirthConfig, GaussianConfig
-from pipeline.model.spatial_gated_motion import SpatialGatedMotion
-from pipeline.model.frame_plan_birth import FramePlanBirthModel, nearest_old_references
-from pipeline.model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES, QuantizedNewGaussianView, model_raw
+from pipeline.frame_plan import FramePlanController, effective_final_joint_refine_steps, fitting_old_motion
 from pipeline.model.adaptive_birth_storage import newborn_storage_terms
+from pipeline.model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES, QuantizedNewGaussianView, model_raw, reference_digest
+from pipeline.model.early_replacement_model import _logits
+from pipeline.model.frame_plan_birth import FramePlanBirthModel, nearest_old_references
+from pipeline.model.gaussian import BirthGaussianModel
+from pipeline.model.rate_budget import RateBudgetState
+from pipeline.model.sparse_logscale import LogScaleUpdateConfig, MotionSupportLogScaleUpdate
 from pipeline.model.sparse_updates import QuantizedOpacityUpdate, OpacityUpdateConfig
+from pipeline.model.spatial_gated_motion import SpatialGatedMotion
+from pipeline.module import Module, BirthConfig, GaussianConfig
+from pipeline.trainer import Trainer
+from scripts.replay_rigid_tree import decode_frame
 from tests import test_spatial_motion as spatial_tests
+from tests.fixture_birth_cpu import EvidenceRenderer, early_controller_fixture
 from tests.test_codec import reference_raw
-from tests.test_reincarnation import early_controller_fixture
+
 
 
 def motion_fixture():
@@ -41,8 +54,9 @@ def motion_fixture():
     return model
 
 
-def controller_fixture(directory,budget=False):
+def controller_fixture(directory,budget=False,shared_colour=False):
     m, views = early_controller_fixture(directory)
+    m.full_update_active = False
     m.config.birth.frame_training_plan = True
     m.config.birth.radiance_mode = 'adaptive_residual_birth'
     m.config.birth.joint_old_opacity = True
@@ -65,6 +79,8 @@ def controller_fixture(directory,budget=False):
         learning_rate=.001, l1_weight=.05, proximal_regularization=True)
     m.opacity_update = QuantizedOpacityUpdate(m.config.opacity_update)
     m.opacity_update.setup(m.gaussians._opacity)
+    if shared_colour:
+        raise ValueError('Regional shared-colour training is retired')
     m.feature_dc_update = None
     m.birth_transaction = None
     m.births = FramePlanBirthModel(1)
@@ -77,7 +93,7 @@ def controller_fixture(directory,budget=False):
         for name, method in vars(cls).items():
             if callable(method):
                 setattr(m, name, MethodType(method, m))
-    for name in ('make_birth_view', 'training_step'):
+    for name in ('make_birth_view', 'training_step', '_step_feature_dc', '_opacity_rate_price'):
         setattr(m, name, MethodType(getattr(Module, name), m))
     m.prepare_frame = lambda: None
     m.pre_training_step = MethodType(Module.pre_training_step, m)
@@ -209,6 +225,8 @@ class FramePlanMotionTests(unittest.TestCase):
 
     def test_closed_candidates_learn_current_motion_without_changing_rendered_field(self):
         model=motion_fixture()
+        # Isolate L1 descent; discrete block bytes can jump when a region opens.
+        model.config.rate_loss_weight=0.
         model.config.spatial_gate.refine_unselected_candidates=True
         model.prepare_plan_step(151)
         with torch.no_grad():
@@ -237,6 +255,27 @@ class FramePlanMotionTests(unittest.TestCase):
         for step in (100,150,181):
             model.prepare_plan_step(step)
             self.assertEqual(float(model.loss_terms(step,diagnostics=False)['candidate_motion_loss']),0.)
+
+    def test_unselected_candidates_receive_storage_gradients_without_l1(self):
+        model=motion_fixture()
+        model.config.spatial_gate.refine_unselected_candidates=True
+        model.config.relative_motion_loss_weight=0.
+        model.prepare_plan_step(151)
+        with torch.no_grad():
+            model.region_translation.zero_()
+            model.gate_logits.fill_(-5.)
+        model._select_frontier(freeze=False)
+        with torch.no_grad():
+            model.gs_translation[:,0]=model.gs_steps[0]
+        used=model._stored_region_support()
+        terms=model.loss_terms(151,diagnostics=False)
+        self.assertGreater(float(terms['candidate_rate_bytes_surrogate']),0.)
+        terms['candidate_motion_loss'].backward()
+        unused=model.node_counts.gt(0)&~used
+        self.assertTrue(model.region_translation.grad[unused].ne(0).any())
+        self.assertFalse(model.region_translation.grad[used].ne(0).any())
+        self.assertIsNone(model.gs_translation.grad)
+        self.assertIsNone(model.gate_logits.grad)
 
     def test_fixed_gate_phase_can_prepare_unused_candidates_without_pose_changes(self):
         model=motion_fixture()
@@ -367,6 +406,19 @@ class FramePlanBirthTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'zero surviving old'):
             nearest_old_references(seed,{k:v[:0] for k,v in raw.items()},2.)
 
+    def test_sh3_birth_can_inherit_reference_rest_without_coding_a_cancellation(self):
+        raw=reference_raw()
+        raw['sh_rest']=torch.arange(len(raw['xyz'])*15*3,dtype=torch.float32).reshape(-1,15,3)/1000
+        sources=torch.tensor([1,2])
+        seed={name:value[sources].clone() for name,value in raw.items()}
+        seed['xyz'][:,0]+=.001
+        optimizer=torch.optim.Adam([torch.nn.Parameter(torch.tensor(0.))],lr=.001)
+        model=FramePlanBirthModel(3)
+        model.add(seed,sources,sources,200,optimizer,GaussianConfig())
+        view=QuantizedNewGaussianView(model,BirthConfig(rotation_updates=True),2.,raw,sources)
+        self.assertTrue(torch.equal(view.symbols['sh_rest'],torch.zeros_like(view.symbols['sh_rest'])))
+        torch.testing.assert_close(view.raw_value('sh_rest'),raw['sh_rest'][sources],rtol=0,atol=0)
+
     def test_low_alpha_support_gets_time_to_fit_with_logit_learning_rates(self):
         raw=reference_raw();cfg=BirthConfig(rotation_updates=True,survival_aware_storage=True)
         args=GaussianConfig(opacity_lr=.06)
@@ -459,11 +511,15 @@ class FramePlanControllerTests(unittest.TestCase):
                     if step==100:self.assertNotIn(m.motion.gs_translation,adam.state)
                     if step==200:
                         self.assertLessEqual(m._plan_used_quota,2)
-                        self.assertTrue((m.births.cohorts[0]['parameters']['_features_rest']==0).all())
+                        batch=m.births.cohorts[0]['parameters']['_features_rest']
+                        refs=m.births.source_rows[:len(batch)]
+                        torch.testing.assert_close(batch,m._adaptive_reference()['sh_rest'][refs],rtol=0,atol=0)
                         self.assertEqual(len(m.gaussians._xyz),count-1)
                     if step==250:
                         self.assertLessEqual(m._plan_used_quota,4)
-                        self.assertTrue((m.births.cohorts[1]['parameters']['_features_rest']==0).all())
+                        batch=m.births.cohorts[1]['parameters']['_features_rest']
+                        refs=m.births.source_rows[-len(batch):]
+                        torch.testing.assert_close(batch,m._adaptive_reference()['sh_rest'][refs],rtol=0,atol=0)
                 self.assertEqual(updates.call_count,300)
             self.assertEqual([event['step'] for event in m._plan_events],[200,250,300])
             self.assertEqual(m.early_shared_steps,300)
@@ -476,6 +532,33 @@ class FramePlanControllerTests(unittest.TestCase):
             self.assertEqual(m._plan_events[1]['removed_new'],1)
             self.assertTrue((m.births.source_rows<len(m.gaussians._xyz)).all())
             m.finalize_frame.assert_called_once()
+
+    def test_old_opacity_is_fitted_on_every_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            m,_=controller_fixture(directory)
+            for frame in (1,2,3,4,99):
+                m.current_frame=frame
+                m._plan_prepare_rates(151)
+                self.assertTrue(m.opacity_update.delta.requires_grad)
+            for name in ('tail_commit_validation', 'tail_commit_probe_trained_views',
+                         'tail_commit_decouple_old_attributes',
+                         'tail_commit_max_motion_only_streak',
+                         'tail_commit_max_old_attribute_streak'):
+                with self.assertRaises(TypeError):
+                    BirthConfig(**{name: True})
+
+    def test_frame_finalization_does_not_depend_on_frame_interval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            m, _ = controller_fixture(directory)
+            m.birth_control['early_replacement'] = {}
+            m.early_birth_updates = 0
+            m.finalize_frame = Mock()
+            m._plan_update_rate_budget = Mock()
+            for frame in (1, 2, 3, 4, 99):
+                m.current_frame = frame
+                m._plan_finish()
+            self.assertEqual(m.finalize_frame.call_count, 5)
+            self.assertEqual(m._plan_update_rate_budget.call_count, 5)
 
     def test_sampling_is_reproducible_without_touching_global_rng(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -519,8 +602,29 @@ class FramePlanControllerTests(unittest.TestCase):
                 if step==300:
                     m._plan_cleanup.assert_called_once_with(300);m._plan_finish.assert_called_once()
 
-
-
+    def test_population_rate_exemption_does_not_disable_motion_price(self):
+        with tempfile.TemporaryDirectory() as directory:
+            m, _ = controller_fixture(directory)
+            m.motion_committed = True
+            m.early_initialized = False
+            m.early_shared_steps = 219
+            m.config.birth.population_rate_exempt = True
+            m.config.rigid_tree.motion_fit_window_steps = 20
+            m.config.opacity_update.l1_weight = 0
+            m._rate_byte_price = lambda step: .01
+            self.assertEqual(m._opacity_rate_price(220), 0.)
+            self.assertEqual(m._rate_byte_price(220), .01)
+            update = m.opacity_update
+            with torch.no_grad():
+                update.delta.zero_()
+                update.delta[0] = .01
+            m.motion.optimizer.state[update.delta] = dict(
+                step=torch.tensor(1.), exp_avg=torch.zeros_like(update.delta),
+                exp_avg_sq=torch.full_like(update.delta, 1e-5))
+            m._plan_post_step([], 220)
+            self.assertEqual(int(update.symbols()[0]), 1)
+            m.config.birth.population_rate_exempt = False
+            self.assertEqual(m._opacity_rate_price(220), .01)
 
 def cpu_gaussian_setup(model, args):
     """Host allocator adapter for libgs' otherwise hard-coded CUDA setup."""
@@ -657,6 +761,7 @@ class FramePlanPersistenceTests(unittest.TestCase):
             manifest=json.loads((stream_dir/'frame_001.json').read_text())
             self.assertEqual(manifest['birth_cohorts'],2)
             self.assertEqual(manifest['birth_events'],[200,250])
+            self.assertIsNone(manifest.get('feature_dc_update'))
             self.assertEqual(m.frame_report['retired_count'],3)
             self.assertEqual(m.frame_report['birth_count'],4)
             self.assertEqual(m._rate_budget_state['last_frame'],1)
@@ -683,4 +788,496 @@ class FramePlanPersistenceTests(unittest.TestCase):
             self.assertGreater(m.motion.rate_multiplier,1.)
 
 
-if __name__=='__main__':unittest.main()
+class NoisyRenderer(EvidenceRenderer):
+    """Exercise restoration even if a renderer consumes RNG and stores evidence."""
+    def __init__(self, model):
+        super().__init__(model)
+        self.last_contributions = None
+
+    def __call__(self, *args, **kwargs):
+        random.random()
+        np.random.random()
+        torch.rand(())
+        self.last_contributions = object()
+        return super().__call__(*args, **kwargs)
+
+
+class FramePlanDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def assert_rng_equal(self, a, b):
+        self.assertTrue(torch.equal(a['torch'], b['torch']))
+        self.assertEqual(a['python'], b['python'])
+        self.assertEqual(a['numpy'][0], b['numpy'][0])
+        np.testing.assert_array_equal(a['numpy'][1], b['numpy'][1])
+        self.assertEqual(a['numpy'][2:], b['numpy'][2:])
+
+    def run_frame(self, directory, diagnostic, legacy_reference=False, fixed=False):
+        random.seed(17)
+        np.random.seed(17)
+        torch.manual_seed(17)
+        m, _ = controller_fixture(directory)
+        m.config.birth.keep_incumbent_fixed_after_motion = fixed
+        m.config.rigid_tree.spatial_gate.final_joint_refine_steps = 20
+        checkpoint_harness(m)
+        m.renderer = NoisyRenderer(m.gaussians)
+        m.finalize_frame = MethodType(Module.finalize_frame, m)
+        view = NS(path='cam00.png', image=torch.full((3, 8, 8), .55))
+        trainer = NS(module=m, datamodule=m.datamodule, output_dir=Path(directory),
+                     current_frame=1, global_step=0, device=torch.device('cpu'),
+                     config=NS(stage_image_camera='cam00.png' if diagnostic else None,
+                               motion_views_per_step=4, birth_views_per_step=4),
+                     _stage_viewpoint=view, _frame_diagnostic_seconds=0.)
+        for name in ('_capture_rng', '_record_stage_image', 'record_birth_comparison',
+                     'snapshot_frame_plan_reference', 'record_frame_plan_stage',
+                     'record_frame_plan_decoded'):
+            setattr(trainer, name, MethodType(getattr(Trainer, name), trainer))
+        trainer._restore_rng = Trainer._restore_rng
+        trainer._views_per_step = lambda step: 4
+        m.trainer = trainer
+        Trainer._write_reference(trainer, 0, m.motion.frame_reference_state)
+        trainer.snapshot_frame_plan_reference()
+
+        # Verify each actual boundary render restores all RNGs and temporary
+        # renderer/cache state, including when the renderer itself mutates them.
+        record = trainer._record_stage_image
+        def check_record(*args, **kwargs):
+            before_rng = trainer._capture_rng()
+            renderer_model = m.renderer.gaussians
+            contribution = m.renderer.last_contributions
+            cache = getattr(m.gaussians, '_render_cache', None)
+            contents = dict(cache) if cache is not None else None
+            attrs = {name: value.detach().clone() for name, value in model_raw(m.gaussians).items()}
+            result = record(*args, **kwargs)
+            if kwargs.get('old_pose') is not None:
+                # At the current pose, the raw-view counterfactual must match
+                # the normal old-only rendering of the same appearance.
+                step = args[0]
+                record(step, view, label='__pose_normal', old_only=True)
+                normal = m.stage_image_metrics[-1]['mse']
+                pose = (m.gaussians._xyz.detach(), m.gaussians._rotation.detach())
+                record(step, view, label='__pose_override', old_only=True, old_pose=pose)
+                overridden = m.stage_image_metrics[-1]['mse']
+                self.assertAlmostEqual(normal, overridden, delta=1.e-7)
+                m.stage_image_metrics[:] = [r for r in m.stage_image_metrics
+                    if not r['phase'].startswith('__pose_')]
+            self.assert_rng_equal(before_rng, trainer._capture_rng())
+            self.assertIs(m.renderer.gaussians, renderer_model)
+            self.assertIs(m.renderer.last_contributions, contribution)
+            self.assertIs(getattr(m.gaussians, '_render_cache', None), cache)
+            if cache is not None:
+                self.assertEqual(cache.keys(), contents.keys())
+                for key in cache:
+                    self.assertIs(cache[key], contents[key])
+            for name in RAW_FIELDS:
+                torch.testing.assert_close(model_raw(m.gaussians)[name], attrs[name], rtol=0, atol=0)
+            return result
+        trainer._record_stage_image = check_record
+
+        for step in range(1, 301):
+            trainer.global_step = step
+            m.pre_training_step()
+            if step in (200, 250, 300) and (not fixed or step == 200):
+                # Force a low-alpha old row before the normal optimizer update.
+                row = m.opacity_update.rows[0]
+                with torch.no_grad():
+                    m.opacity_update.delta[row] = -m.opacity_update.alpha_reference[row]
+            Trainer._fit_views(trainer, None, step, defer_metrics=True)
+            if diagnostic and step == 250:
+                packet = dict(global_step=step, current_frame=1)
+                Module.on_save_checkpoint(m, packet)
+                clone, _ = controller_fixture(directory)
+                clone.config.birth.keep_incumbent_fixed_after_motion = fixed
+                clone.config.rigid_tree.spatial_gate.final_joint_refine_steps = 20
+                checkpoint_harness(clone)
+                Module.on_load_checkpoint(clone, packet)
+                for name in RAW_FIELDS:
+                    torch.testing.assert_close(clone._plan_diagnostic_reference[name],
+                        m._plan_diagnostic_reference[name], rtol=0, atol=0)
+                if legacy_reference:
+                    # A checkpoint produced before diagnostic snapshots must
+                    # still be able to replay its prior stream at finalization.
+                    m._plan_diagnostic_reference = None
+
+        files = {item.name: item.read_bytes() for item in
+                 (Path(directory) / 'frame_storage' / 'rigid_tree').glob('*.bin')}
+        return (m.stage_image_metrics, reference_digest(model_raw(m.gaussians)),
+                m.motion.codec_previous_state.digest(), files, trainer._capture_rng(),
+                m.birth_control['frame_plan_events'])
+
+    def test_boundaries_decoding_and_training_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second, \
+                tempfile.TemporaryDirectory() as legacy, \
+                patch.object(BirthGaussianModel, 'training_setup', cpu_gaussian_setup):
+            observed = self.run_frame(first, True)
+            baseline = self.run_frame(second, False)
+            resumed_legacy = self.run_frame(legacy, True, legacy_reference=True)
+        records, digest, state, files, rng, events = observed
+        self.assertEqual((digest, state, files), baseline[1:4])
+        self.assert_rng_equal(rng, baseline[4])
+        self.assertEqual((digest, state, files), resumed_legacy[1:4])
+        self.assert_rng_equal(rng, resumed_legacy[4])
+        self.assertTrue(resumed_legacy[0][-1]['decoded_raw_matches_manifest'])
+        expected = [(step, f'plan_{phase}') for step in (200, 250)
+                    for phase in ('pre_cleanup', 'post_cleanup', 'pre_birth', 'post_birth')]
+        expected += [(280, phase) for phase in ('plan_pre_tail', 'plan_pre_tail_old_only')]
+        expected += [(300, phase) for phase in
+                     ('plan_pre_cleanup', 'plan_pre_cleanup_old_only',
+                      'plan_pre_cleanup_old_pre_tail_pose', 'plan_post_cleanup',
+                      'birth_off', 'birth_on', 'plan_decoded')]
+        self.assertEqual([(row['step'], row['phase']) for row in records], expected)
+        self.assertTrue(all(not row['participates_in_training_or_selection'] for row in records))
+        self.assertTrue(all(row['camera'] == 'cam00.png' for row in records))
+        for step in (200, 250, 300):
+            before = next(r for r in records if r['step'] == step and r['phase'] == 'plan_pre_cleanup')
+            after = next(r for r in records if r['step'] == step and r['phase'] == 'plan_post_cleanup')
+            event = next(e for e in events if e['step'] == step)
+            self.assertGreater(event['removed_old'], 0)
+            self.assertEqual(before['population_old_count'] - after['population_old_count'], event['removed_old'])
+            self.assertEqual(before['population_birth_count'] - after['population_birth_count'], event['removed_new'])
+        off, on, decoded = records[-3:]
+        self.assertTrue(off['old_only'])
+        self.assertFalse(on['old_only'])
+        self.assertEqual(off['population_birth_count'], on['population_birth_count'])
+        self.assertGreater(on['population_birth_count'], 0)
+        self.assertEqual(decoded['representation'], 'decoded_stream')
+        self.assertTrue(decoded['decoded_state_matches_manifest'])
+        self.assertTrue(decoded['decoded_raw_matches_manifest'])
+        self.assertAlmostEqual(on['mse'], decoded['mse'], delta=1.e-6)
+        prior = next(r for r in records if r['phase'] == 'plan_pre_tail_old_only')
+        frozen_pose = next(r for r in records if r['phase'] == 'plan_pre_cleanup_old_pre_tail_pose')
+        self.assertEqual(prior['population_old_count'], frozen_pose['population_old_count'])
+        self.assertEqual(frozen_pose['pose'], 'pre_tail')
+        self.assertTrue(frozen_pose['old_only'])
+
+    def test_fixed_mode_has_no_tail_and_preserves_old_only_image(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(BirthGaussianModel, 'training_setup', cpu_gaussian_setup):
+            records, _, _, _, _, events = self.run_frame(directory, True, fixed=True)
+        self.assertFalse(any('tail' in row['phase'] for row in records))
+        before_birth = next(r for r in records
+                            if r['step'] == 200 and r['phase'] == 'plan_post_cleanup')
+        old_at_end = next(r for r in records if r['phase'] == 'plan_pre_cleanup_old_only')
+        self.assertEqual(before_birth['population_old_count'], old_at_end['population_old_count'])
+        self.assertEqual(before_birth['mse'], old_at_end['mse'])
+        self.assertEqual([event['removed_old'] for event in events[1:]], [0, 0])
+
+
+class FixedIncumbentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def assert_state_equal(self, before, after):
+        self.assertEqual(before.keys(), after.keys())
+        for key, value in before.items():
+            if torch.is_tensor(value):
+                torch.testing.assert_close(value, after[key], rtol=0, atol=0)
+            else:
+                self.assertEqual(value, after[key])
+
+    def setup_controller(self, directory, fixed):
+        torch.manual_seed(94)
+        m, _ = controller_fixture(directory)
+        m.config.birth.keep_incumbent_fixed_after_motion = fixed
+        m.config.rigid_tree.spatial_gate.final_joint_refine_steps = 30
+        m.config.logscale_update = LogScaleUpdateConfig(enabled=True)
+        m.logscale_update = MotionSupportLogScaleUpdate(m.config.logscale_update)
+        checkpoint_harness(m)
+        m.finalize_frame = MethodType(Module.finalize_frame, m)
+        trainer = NS(module=m, datamodule=m.datamodule, output_dir=Path(directory),
+                     global_step=0, config=NS(stage_image_camera=None,
+                         motion_views_per_step=4, birth_views_per_step=4),
+                     _views_per_step=lambda step: 4)
+        m.trainer = trainer
+        prior = copy.deepcopy(m.motion.frame_reference_state)
+        initial = {k: v.detach().cpu().clone() for k, v in model_raw(m.gaussians).items()}
+        Trainer._write_reference(trainer, 0, prior)
+        return m, trainer, prior, initial
+
+    def step(self, m, trainer, step):
+        trainer.global_step = step
+        m.pre_training_step()
+        Trainer._fit_views(trainer, None, step, defer_metrics=True)
+
+    def test_configuration_validation(self):
+        with self.assertRaisesRegex(ValueError, 'requires the frame training plan'):
+            BirthConfig(keep_incumbent_fixed_after_motion=True).validate(200)
+        with self.assertRaisesRegex(ValueError, 'must be boolean'):
+            BirthConfig(frame_training_plan=True, keep_incumbent_fixed_after_motion=1).validate(200)
+        BirthConfig(frame_training_plan=True, keep_incumbent_fixed_after_motion=True).validate(200)
+        self.assertFalse(BirthConfig().keep_incumbent_fixed_after_motion)
+
+    def test_setup_uses_effective_tail_for_optional_logscale(self):
+        class PastConfigurationChecks(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            for fixed in (False, True):
+                m, _, _, _ = self.setup_controller(directory, fixed)
+                m.datamodule.config.white_background = False
+                m.config.effective_motion_observations = True
+                def after_checks(*args, **kwargs):
+                    raise PastConfigurationChecks()
+                m.register_buffer = after_checks
+                if fixed:
+                    with self.assertRaises(PastConfigurationChecks):
+                        Module.setup(m)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'Log-scale updates require'):
+                        Module.setup(m)
+
+    def test_freezes_200_state_and_adam_but_trains_births_and_decodes(self):
+        with tempfile.TemporaryDirectory() as baseline_dir, tempfile.TemporaryDirectory() as fixed_dir, \
+                tempfile.TemporaryDirectory() as resumed_dir, \
+                patch.object(BirthGaussianModel, 'training_setup', cpu_gaussian_setup):
+            baseline, baseline_trainer, _, _ = self.setup_controller(baseline_dir, False)
+            fixed, trainer, prior, initial = self.setup_controller(fixed_dir, True)
+            for step in range(1, 201):
+                self.step(baseline, baseline_trainer, step)
+                self.step(fixed, trainer, step)
+            # A configured tail changes nothing in the first 200 updates.
+            for name in RAW_FIELDS:
+                torch.testing.assert_close(model_raw(fixed.gaussians)[name],
+                    model_raw(baseline.gaussians)[name], rtol=0, atol=0)
+                torch.testing.assert_close(model_raw(fixed.births)[name],
+                    model_raw(baseline.births)[name], rtol=0, atol=0)
+            self.assertTrue(baseline.logscale_update.ready)
+            self.assertFalse(fixed.logscale_update.ready)
+            self.assertEqual(effective_final_joint_refine_steps(fixed), 0)
+            legacy_packet = dict(global_step=200, current_frame=1)
+            Module.on_save_checkpoint(baseline, legacy_packet)
+            del legacy_packet['rigid_tree_module_config']['birth']['keep_incumbent_fixed_after_motion']
+            legacy, _, _, _ = self.setup_controller(resumed_dir, False)
+            Module.on_load_checkpoint(legacy, copy.deepcopy(legacy_packet))
+            self.assertFalse(legacy.config.birth.keep_incumbent_fixed_after_motion)
+
+            old = {key: value.detach().clone() for key, value in model_raw(fixed.gaussians).items()}
+            old_count = len(old['xyz'])
+            parameters = {name: getattr(fixed.motion, name) for name in
+                ('gate_logits', 'region_translation', 'gs_translation', 'region_rotation', 'gs_rotation')}
+            parameters['old_alpha'] = fixed.opacity_update.delta
+            values = {name: value.detach().clone() for name, value in parameters.items()}
+            states = {name: copy.deepcopy(fixed.motion.optimizer.state.get(value, {}))
+                      for name, value in parameters.items()}
+            alpha = fixed.opacity_update.canonical_logits().clone()
+            resume = None
+
+            for step in range(201, 301):
+                self.step(fixed, trainer, step)
+                self.assertFalse(fitting_old_motion(fixed))
+                self.assertFalse(fixed.logscale_update.ready)
+                self.assertFalse(any(group.get('name') == 'early_old_logscale'
+                                     for group in fixed.motion.optimizer.param_groups))
+                if step in (201, 250, 270, 271, 299, 300):
+                    for name, value in parameters.items():
+                        self.assertFalse(value.requires_grad, name)
+                        self.assertIsNone(value.grad, name)
+                        torch.testing.assert_close(value, values[name], rtol=0, atol=0)
+                        self.assert_state_equal(states[name], fixed.motion.optimizer.state.get(value, {}))
+                    torch.testing.assert_close(fixed.opacity_update.canonical_logits(), alpha, rtol=0, atol=0)
+                    current = model_raw(fixed.gaussians)
+                    for name in RAW_FIELDS:
+                        torch.testing.assert_close(current[name][:old_count], old[name], rtol=0, atol=0)
+                if step == 250:
+                    packet = dict(global_step=step, current_frame=1)
+                    Module.on_save_checkpoint(fixed, packet)
+                    resume, resume_trainer, _, _ = self.setup_controller(fixed_dir, True)
+                    Module.on_load_checkpoint(resume, copy.deepcopy(packet))
+                    self.step(resume, resume_trainer, 251)
+                if step == 251:
+                    for name in RAW_FIELDS:
+                        torch.testing.assert_close(model_raw(fixed.births)[name],
+                            model_raw(resume.births)[name], rtol=0, atol=0)
+            events = fixed.birth_control['frame_plan_events']
+            self.assertEqual([event['removed_old'] for event in events[1:]], [0, 0])
+            gradient_rows = {row['step']: row['parameters']
+                             for row in fixed.birth_control['frame_plan_gradients']}
+            for step in (201, 250, 251, 300):
+                self.assertFalse(gradient_rows[step]['old_alpha']['has_gradient'])
+            self.assertGreater(gradient_rows[201]['birth0__opacity']['gradient_norm'], 0.)
+            self.assertEqual(gradient_rows[300]['birth0__opacity']['adam_updates'], 99)
+            self.assertEqual(gradient_rows[300]['birth1__opacity']['adam_updates'], 49)
+            self.assertGreater(fixed.frame_report['birth_count'], 0)
+            directory = Path(fixed_dir) / 'frame_storage' / 'rigid_tree'
+            decoded, raw = decode_frame(directory, 1, prior, initial)
+            self.assertEqual(decoded.digest(), fixed.motion.codec_previous_state.digest())
+            self.assertEqual(reference_digest(raw), fixed.frame_report['materialized_sha256'])
+            manifest = json.loads((directory / 'frame_001.json').read_text())
+            accounting = manifest['training_step_accounting']
+            self.assertEqual(accounting['motion_optimizer_steps'], 200)
+            self.assertEqual(accounting['old_opacity'], 100)
+            self.assertEqual(accounting['configured_final_joint_refine_steps'], 30)
+            self.assertTrue(accounting['incumbent_fixed_after_motion'])
+            self.assertEqual(fixed.birth_control['early_replacement']['final_joint_refine_steps'], 0)
+
+            # A real frame-boundary checkpoint must restart the next frame
+            # from the same decoded motion and retain the fixed policy.
+            checkpoint = dict(global_step=300, current_frame=1)
+            Module.on_save_checkpoint(fixed, checkpoint)
+            self.assertTrue(checkpoint['rigid_tree_module_config']['birth']
+                            ['keep_incumbent_fixed_after_motion'])
+            resumed, resumed_trainer, _, _ = self.setup_controller(resumed_dir, True)
+            Module.on_load_checkpoint(resumed, copy.deepcopy(checkpoint))
+            previous = {key: value.detach().cpu().clone()
+                        for key, value in model_raw(fixed.gaussians).items()}
+            previous_state = copy.deepcopy(fixed.motion.codec_previous_state)
+            for instance in (fixed, resumed):
+                Module.begin_next_frame(instance)
+                instance.current_frame = 2
+                Module.prepare_frame(instance)
+                torch.testing.assert_close(instance.motion.base_xyz.cpu(), previous_state.xyz,
+                                           rtol=0, atol=0)
+                torch.testing.assert_close(instance.motion.base_rotation.cpu(), previous_state.rotation,
+                                           rtol=0, atol=0)
+            for step in range(1, 301):
+                self.step(fixed, trainer, step)
+                self.step(resumed, resumed_trainer, step)
+                if step in (200, 250, 299, 300):
+                    for name in RAW_FIELDS:
+                        torch.testing.assert_close(model_raw(fixed.gaussians)[name],
+                            model_raw(resumed.gaussians)[name], rtol=0, atol=0)
+                    for name in ('region_translation', 'gs_translation', 'gate_logits'):
+                        torch.testing.assert_close(getattr(fixed.motion, name),
+                            getattr(resumed.motion, name), rtol=0, atol=0)
+                    torch.testing.assert_close(fixed.opacity_update.delta,
+                                               resumed.opacity_update.delta, rtol=0, atol=0)
+            second_dir = Path(resumed_dir) / 'frame_storage' / 'rigid_tree'
+            fixed_packets = {p.name: p.read_bytes() for p in directory.glob('*_002.bin')}
+            resumed_packets = {p.name: p.read_bytes() for p in second_dir.glob('*_002.bin')}
+            self.assertEqual(fixed_packets, resumed_packets)
+            decoded2, raw2 = decode_frame(second_dir, 2, previous_state, previous)
+            self.assertEqual(decoded2.digest(), resumed.motion.codec_previous_state.digest())
+            self.assertEqual(reference_digest(raw2), resumed.frame_report['materialized_sha256'])
+
+
+class RateBudgetTests(unittest.TestCase):
+    def test_previous_bytes_change_next_weight_and_update_is_idempotent(self):
+        state=RateBudgetState()
+        report=state.update(1,75000,50000,.25,64.)
+        self.assertEqual(report['used_multiplier'],1.)
+        self.assertGreater(report['next_multiplier'],1.)
+        saved=state.capture()
+        self.assertEqual(report,state.update(1,75000,50000,.25,64.))
+        self.assertEqual(saved,state.capture())
+        restored=RateBudgetState.restore(saved,64.)
+        second=restored.update(2,25000,50000,.25,64.)
+        self.assertEqual(second['used_multiplier'],report['next_multiplier'])
+        self.assertLess(second['next_multiplier'],second['used_multiplier'])
+        self.assertEqual(restored.total_bytes,100000)
+        self.assertEqual(second['mean_complete_bytes'],50000)
+        self.assertEqual(state.frames,1)
+        with self.assertRaises(ValueError):state.update(0,75000,50000,.25,64.)
+        with self.assertRaises(ValueError):state.update(3,75000,50000,.25,64.)
+        with self.assertRaises(ValueError):state.update(1,75001,50000,.25,64.)
+
+    def test_multiplier_bounds_and_invalid_history(self):
+        state=RateBudgetState()
+        state.update(1,10**9,50000,10.,4.)
+        self.assertAlmostEqual(state.multiplier,4.)
+        state.update(2,1,50000,10.,4.)
+        self.assertEqual(state.multiplier,1.)
+        capped=RateBudgetState()
+        capped.update(1,10**9,50000,10.,100.)
+        RateBudgetState.restore(capped.capture(),100.)
+        capped.update(2,10**9,50000,10.,100.)
+        RateBudgetState.restore(capped.capture(),100.)
+        for field,value in (('frames',-1),('last_frame',9),('log_multiplier',math.inf)):
+            bad=state.capture();bad[field]=value
+            with self.subTest(field=field),self.assertRaises(ValueError):RateBudgetState.restore(bad,4.)
+
+    def test_motion_multiplier_is_checkpointed_and_prices_loss_without_config_mutation(self):
+        model=motion_fixture();model.prepare_plan_step(151)
+        with torch.no_grad():model.gs_translation[:,0]=.01
+        base=model.loss_terms(151,diagnostics=False)['rate_loss'].detach()
+        model.rate_multiplier=3.
+        changed=model.loss_terms(151,diagnostics=False)['rate_loss'].detach()
+        torch.testing.assert_close(changed,base*3)
+        original=model.config.rate_loss_weight
+        restored=type(model)(copy.deepcopy(model.config));restored.restore(copy.deepcopy(model.capture()))
+        self.assertEqual(restored.rate_multiplier,3.)
+        self.assertEqual(restored.config.rate_loss_weight,original)
+
+    def test_initial_multiplier_validation_and_first_frame_warm_start(self):
+        from types import SimpleNamespace as NS
+        from pipeline.frame_plan import FramePlanController
+        model=motion_fixture();cfg=model.config
+        for value in (True,.5,65.,math.inf):
+            cfg.initial_rate_multiplier=value
+            with self.assertRaisesRegex(ValueError,'initial_rate_multiplier'):
+                cfg.validate()
+        cfg.initial_rate_multiplier=2.
+        with self.assertRaisesRegex(ValueError,'initial_rate_multiplier'):
+            cfg.validate()
+        cfg.target_update_bytes=50000;cfg.validate()
+        harness=NS(config=NS(rigid_tree=cfg),motion=model,current_frame=1,
+                   _rate_budget_state=None,frame_report={'encoded_bytes':75000})
+        FramePlanController._plan_setup_rate_budget(harness)
+        self.assertEqual(model.rate_multiplier,2.)
+        self.assertEqual(harness._rate_budget_state['frames'],0)
+        FramePlanController._plan_update_rate_budget(harness)
+        report=harness.frame_report['rate_budget']
+        self.assertEqual(report['used_multiplier'],2.)
+        self.assertEqual(report['initial_multiplier'],2.)
+        harness.current_frame=2
+        FramePlanController._plan_setup_rate_budget(harness)
+        self.assertEqual(model.rate_multiplier,report['next_multiplier'])
+
+
+class SurvivalStorageTests(unittest.TestCase):
+    def make(self,alpha):
+        reference=reference_raw();reference['opacity'].fill_(torch.logit(torch.tensor(.8)))
+        raw={k:v[:1].clone() for k,v in reference.items()}
+        raw['opacity'].fill_(_logits(torch.tensor(alpha)))
+        model=FramePlanBirthModel(1)
+        optimizer=torch.optim.Adam([torch.nn.Parameter(torch.zeros(()))])
+        model.add(raw,torch.tensor([0]),torch.tensor([0]),200,optimizer,GaussianConfig())
+        cfg=BirthConfig(frame_training_plan=True,storage_loss_enabled=True,
+            radiance_mode='adaptive_residual_birth',rotation_updates=True,new_opacity_step=.01)
+        return model,reference,cfg
+
+    def test_alive_forward_cost_is_unchanged_but_opacity_gradient_can_retire(self):
+        model,reference,cfg=self.make(.2)
+        old=QuantizedNewGaussianView(model,cfg,1.,reference,model.source_rows)
+        before=newborn_storage_terms(old)['surrogate_bytes']
+        before.backward()
+        self.assertLess(float(model.cohorts[0]['parameters']['_opacity'].grad),0.)
+        model.optimizer.zero_grad(set_to_none=True)
+        cfg.survival_aware_storage=True
+        view=QuantizedNewGaussianView(model,cfg,1.,reference,model.source_rows)
+        after=newborn_storage_terms(view)['surrogate_bytes']
+        torch.testing.assert_close(after,before,rtol=0,atol=0)
+        after.backward()
+        self.assertGreater(float(model.cohorts[0]['parameters']['_opacity'].grad),0.)
+
+    def test_zero_attribute_delta_still_pays_but_deleted_point_does_not(self):
+        model,reference,cfg=self.make(.8);cfg.survival_aware_storage=True
+        alive=QuantizedNewGaussianView(model,cfg,1.,reference,model.source_rows)
+        self.assertTrue(all(not value.detach().any() for value in alive.symbols.values()))
+        self.assertGreater(float(newborn_storage_terms(alive)['surrogate_bytes']),0.)
+        model,reference,cfg=self.make(.005);cfg.survival_aware_storage=True
+        gone=QuantizedNewGaussianView(model,cfg,1.,reference,model.source_rows)
+        self.assertLess(float(gone.get_opacity),.01)
+        terms=newborn_storage_terms(gone)
+        self.assertEqual(float(terms['surrogate_bytes']),0.)
+        self.assertEqual(float(terms['support_points']),0.)
+
+    def test_opaque_newborn_still_has_a_finite_exit_gradient(self):
+        model,reference,cfg=self.make(1.);cfg.survival_aware_storage=True
+        view=QuantizedNewGaussianView(model,cfg,1.,reference,model.source_rows)
+        newborn_storage_terms(view)['surrogate_bytes'].backward()
+        gradient=model.cohorts[0]['parameters']['_opacity'].grad
+        self.assertTrue(torch.isfinite(gradient).all())
+        self.assertGreater(float(gradient),0.)
+
+    def test_nonfinite_seed_is_rejected_before_training(self):
+        model,reference,cfg=self.make(.2)
+        raw={key:value[:1].clone() for key,value in reference.items()}
+        raw['opacity'].fill_(math.inf)
+        with self.assertRaisesRegex(ValueError,'finite raw'):
+            model.add(raw,torch.tensor([0]),torch.tensor([0]),250,model.optimizer,GaussianConfig())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,168 +1,123 @@
-# 首帧处理操作指南：减少GS数量，同时保住动态重建质量
+# 首帧处理指南
 
-给后续agent：当前验证有效的路线是**从已有高质量首帧中，按训练视角的图像影响裁点，保留所选点的全部原始属性，并保持原候选空间划分**。当前Flame Steak从加载后的206237点降到150000点，完整300帧画质基本保持、略有提升。它不是从零训练15万点首帧的方法，也不保证所有场景在15万点时都达到同样结果。
+目标是先得到质量可靠的首帧，再删掉影响较小的 GS。点数越少越好，但最终以动态 30 帧的画质和存储为准，不能只看首帧 PSNR。
 
-复现时先读本文，再读[完整300帧结果](experiment/20261028_cov150_full300.md)和[每帧训练计划](frame_training_plan.md)。仓库代码、配置和本文进入Git；checkpoint、分数和reference留在本地，通过路径访问，不提交原始训练产物。
+## Cut Beef 当前首帧入口（2026-10-31 更新）
 
-## 1. 当前已经验证到什么程度
+按用户要求，后续 Cut Beef 实验采用新训练的 **SH1 / exact15k / 150,000 GS** 首帧。当前配置入口为 [cut_roasted_beef_first30.yaml](../config/cut_roasted_beef_first30.yaml)。配置采用仓库当前统一 RD 与末段联合训练机制，所有 19 个非 cam00 相机参与训练；没有继承历史 ABCD 提交或 internal-probe 选择策略。配置已准备，新的动态 30 帧尚未运行。
 
-| 相同动态训练流程 | 原首帧 | 本轮保留原属性的首帧 |
-|---|---:|---:|
-| 加载后的初始GS数 | 206237 | 150000 |
-| 首帧PSNR，项目原生/dB | 33.952248 | 33.958199 |
-| 首帧解码参考包/MB | 17.720236 | 13.118597 |
-| 全300帧PSNR，项目原生/dB | 34.064716 | 34.120266 |
-| 完整动态更新/KB每帧 | 50.970251 | 48.962441 |
-| 最后一帧GS数 | 192764 | 152597 |
+- 首帧资产：`/mnt/SSD500GB/my4dgs_assets/cut_beef_sh1_supportsafe15k_cov150_20261031T190839`。
+- checkpoint / reference SHA256：`65e5abf049067e801dc6b0b321e3f336c1a58766f043f42a998df958414cf424` / `6de15990b9b96fed6c200fbb90dcbcf5b6434a7d2bbb0542b7845a6eddcc8d07`。
+- 新 SH1 的 cam00 首帧为 **34.504936 dB**，共享 reference 为 **13.035366 MB**；同一输入和评测程序重测当前 SH3 为 **34.458683 dB / 31.221183 MB**。MB=1,000,000 bytes，checkpoint 内的优化器状态不计入 reference 大小。
+- 评测与六属性一致性核验：`/mnt/SSD500GB/my4dgs_output/cut_beef_sh1_retrain_20261031T190839/comparison.json`、`/mnt/SSD500GB/my4dgs_output/cut_beef_sh1_retrain_20261031T190839/verification.json`。这里只确认首帧表现，不能沿用历史 SH3 的动态指标。
 
-当前完整300帧按整幅RGB8公式计算为34.091273 dB，尚未达到希望的34.2 dB。点数减少27.27%，动态存储只减少3.94%，因此首帧压缩有效，但不是动态存储问题的全部解法。48.96 KB是299次动态更新的平均；包含13.12 MB首帧后，完整流摊至300帧仍为92.53 KB/帧。KB=1000字节，MB=1000000字节。
+历史选择 SH3 的依据是旧 SH1 首帧仅 33.6360 dB、动态前缀仅 33.4400 dB；这不是“SH1 本身不够用”的结论。新 SH1 从零训练 15,000 次优化，每步使用两个视角；采用 40k→200k 渐进上限及多视角覆盖支持的增密，再由训练相机影响度和空间覆盖保留 150k。旧 SH1 使用每步一个视角与普通增密，因此同为 SH1 不代表训练出的几何、透明度和颜色权重相同。提升在裁点前的母版中已经存在：旧 33.6786 dB，新 34.5065 dB。旧图像缓存已清理，当前只能确认相机文件同源，不能补作新旧输入逐像素等价验证，也不能将全部提升归因于某个单独改动。
 
-## 2. 输入、坐标和分辨率
+上述是首帧资产入口与已有静态证据的更新，不是一份已完成的动态实验记录。历史 SH3 实验保持独立；旧的 2026-10-29 通用配置已保存为 legacy 配置（原路径 `../config/cut_roasted_beef_first30_legacy_20261029.yaml` 已不在工作区）。
 
-以下路径是本机已经验证的Flame Steak输入，均只读：
+## Coffee Martini 当前首帧（2026-11-02）
 
-| 用途 | 路径 |
-|---|---|
-| 原始“重要版”SH1首帧checkpoint | `/home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth` |
-| 原首帧候选空间与解码参考 | `output/flame_steak_1027/fs_units_300/20261028T060649_97d995/frame_storage/rigid_tree/reference_frame0.npz` |
-| 本轮实际使用的15万点checkpoint | `output/flame_steak_1028/fs_seed150c/20261028T130623/ckpt-0-15000.pth` |
-| 完整300帧配置 | [fs_cov150_300.yaml](../config/fs_cov150_300.yaml) |
-| 资格30帧配置 | [fs_cov150_30.yaml](../config/fs_cov150_30.yaml) |
+选用 **SH1 / 15,000 步 / 160,000 GS**，cam00 首帧 PSNR 为 **29.3362 dB**。训练数据排除 cam13；首帧资产为 `/mnt/SSD500GB/my4dgs_assets/coffee_no13_baseline_160k_frame0_20261102`。
 
-原checkpoint实际为214996点；按物理透明度`alpha >= 0.0075`加载后为206237点。本文的筛点、区域覆盖和保留行编号都基于**过滤后的206237行**，不能直接拿这些行编号去索引原214996行。
+后续动态训练入口为 [coffee_martini_no13_first30.yaml](../config/coffee_martini_no13_first30.yaml)，沿用原有 Coffee 动态参数。这个首帧尚未验证动态 30 帧。
 
-数据使用`data/colmap4d/flame_steak_half`对应的1345×1008图像，`resolution: 1`，SH degree=1，cam01–cam20用于筛点，cam00单列评估。数据通过软链接访问。不能只改图像尺寸却不核对相机内参、相机划分及相机归一化尺度；GS坐标也不能随意乘图像缩放比例。分辨率影响投影、像素覆盖和损失，不会把GS点变成二维图像点。
+## Coffee Martini 历史首帧比较
 
-原`reference_frame0.npz`含首帧属性及候选空间层级。裁点脚本要求它的`xyz`与当前checkpoint经0.0075过滤后的`xyz`**逐位一致**；动态初始化复用模板时还核验场景extent、空间深度与离群点路由。若文件缺失，应先从**未裁点的同一首帧**构建新的frame0 reference，不能使用其他场景或裁点后重建的划分冒充原模板；不需要为此重跑完整300帧。
+按 Cut Beef 同一配方从零训练 SH1：固定 15,000 步、每步两个视角、40k→200k 渐进增密上限，最后按训练视角影响和母版区域覆盖保留 150k。沿用已核对的 no13 图像与 40k 初始化点云，16 路训练、cam00 评估；本次没有重做 COLMAP。
 
-本机场景可用下面的初始化命令补建模板。该命令加载已完成的原首帧，仅处理frame0，随后结束；从日志读取新run路径，将其中的`frame_storage/rigid_tree/reference_frame0.npz`作为`first_reference`：
+- 母版加载后 190,307 点，cam00 **29.343124 dB**；保留 150,000 点后为 **29.323029 dB / SSIM 0.923229**，共享 reference **13.086370 MB**。
+- 当前保留基线同程序重测为 **29.023022 dB**，新候选高 0.300007 dB；相对历史 15k 最好记录 29.312492 dB 仅高 0.010536 dB，不能称为明显突破。动态帧尚未训练，现有动态入口未切换。
+- 候选资产：`/mnt/SSD500GB/my4dgs_assets/coffee_no13_sh1_supportsafe15k_cov150_20261031T214049`。六类属性与 reference 逐位一致，16 路评分中没有 cam00 或 cam13；裁点保留了母版区域覆盖，随后按 Cut Beef 流程为使用版生成独立布局。
+- [训练配置](../config/coffee_martini_no13_frame0_sh1_mv2_supportsafe200k_15k_20261031T214049.yaml)；完整命令、输入及源码指纹见 `/mnt/SSD500GB/my4dgs_output/coffee_no13_sh1_retrain_20261031T214049/recipe.json`，对比和核验见同目录 `comparison.json`、`verification.json`。这是首帧准备记录，不是动态实验报告。
+- 2026-11-02 点云重建对照：重新用 17 路无 cam13 图像生成点云，对齐后使用相同的训练图像、相机和配方。母版为 **28.9079 dB**（旧点云 **29.3431 dB**）；裁到 15 万点后为 **28.8942 dB**（旧版 **29.3230 dB**），暂保留旧版。两次训练有随机性，新点云的坐标对齐也有误差，不能据此否定所有重建方法。[对照报告](/mnt/SSD500GB/my4dgs_output/coffee_no13_rebuild_aligned_20261102/comparison.json)。
+- 2026-11-02 补充：旧母版裁到 **16 万点为 29.3362 dB**，裁到 **19 万点为 29.3431 dB**；前者少 3 万点，仅低 0.0069 dB。两者都是 SH1、15,000 步、未用 cam13，checkpoint 和 reference 已核对一致。可选资产分别为 `/mnt/SSD500GB/my4dgs_assets/coffee_no13_baseline_160k_frame0_20261102` 和 `/mnt/SSD500GB/my4dgs_assets/coffee_no13_best_frame0_20261102`；尚未用这两个资产跑动态 30 帧。
+- 本轮另试了窗外补点和借鉴 [OR2](https://github.com/bbangsik13/OR2) 的训练视角误差图，均未超过上述 19 万点结果。误差图方案在 12 万点时为 **29.2341 dB**，同点数旧母版为 **29.1792 dB**；各为单次训练，不能把差异直接归因于某一改动。[点数比较](/mnt/SSD500GB/my4dgs_output/coffee_no13_baseline_point_sweep_20261102/comparison.json)、[误差图结果](/mnt/SSD500GB/my4dgs_output/coffee_no13_or2_sh1_20261102/comparison.json)。
 
-```bash
-conda activate ReConGS
-python main.py --config=config/fs_units_300.yaml \
-  experiment_name="fs_f0ref_$(date +%Y%m%dT%H%M%S)" \
-  data.extra_dataset_kwargs.num_frames=1 \
-  module.rigid_tree.spatial_gate.reference_layout=null \
-  gui_enabled=false
-```
+## 基本原则
 
-这一步的原始checkpoint、透明度阈值、相机与层级设置必须与随后筛点一致；新生成NPZ的文件SHA不一定与历史文件相同，应核对实际属性及布局内容。
+1. **先确认数据正确。** 相机、帧号、图像尺寸和内参必须一致。Coffee Martini 排除不同步的 cam13；16 路用于 GS 训练，cam00 用于评估。现有点云融合和模型选择用到了 cam00，因此这不是完全独立的测试结果。
+2. **按动态训练的实际分辨率训练首帧。** 不要先在另一种分辨率训练，再直接拿来跑动态序列。
+3. **训练预算保持 15,000 step。** 改变 GS 数量上限时，只调整 `module.densify.max_gaussians`，不同时延长训练步数或改变其他训练参数；不要改成 17,500、20,000 step。
+4. **统一使用 15,000 步终点，不能按 PSNR 改选中间步数。** 中间保存点仅用于排障和观察收敛；即使 10,000 或 12,500 步的 PSNR 更高，也不能替代 `ckpt-0-15000.pth`。GS 数量上限与训练步数是独立参数。
+5. **删点后保留原属性和原空间划分。** 不改被保留 GS 的位置、尺度、旋转、透明度和 SH，也不重新生成候选区域。
+6. **先跑 30 帧，再决定是否跑 300 帧。** 静态首帧好，不代表后续动态一定好。
 
-本地已验证输入指纹：
+## 操作流程
 
-```text
-原checkpoint SHA256:
-0715e9f0ce2eaea16633207fb9f1e87170162f9fb2974f8b9f1a20206da35c7d
+### 1. 训练一个质量可靠的首帧
 
-原reference_frame0.npz SHA256:
-0fed82393ca2efd0d99189361242abf994ea90277ba1c35a896d2772f7bc901b
+首帧训练要使用动态序列相同的图像、相机划分和分辨率。`trainer.num_init_steps` 固定为 `15000`。在只比较 GS 点数预算的实验中，学习率日程、增密开始/结束步数、SH 阶数等沿用原训练配置，只改变 GS 数量上限；用户明确要求调整 SH 或首帧训练方法时，应另存新配方并记录差异，训练预算仍固定。处理和动态训练的源必须是实际完成 15,000 步的终点 checkpoint，不能通过选择较早保存点或增加训练步数来改变实验协议。
 
-实际15万点首帧的raw属性摘要（reference_digest，不是pth文件SHA）:
-7fa53b8471437c40624a50eebc1df30749918784b6aa219d8c73c64878f34730
-```
+**统一协议固定使用 15,000 步终点。** 原 checkpoint、裁点后的 checkpoint 都必须满足 `current_frame == 0`、`global_step == 15000`，动态配置的 `trainer.num_init_steps` 也必须是 `15000`。不是“最多训练 15,000 步后在预算内挑最好的一步”。
 
-## 3. 筛点依据：图像影响与区域覆盖
+GS 数量与训练步数是两个独立参数。例如 `module.densify.max_gaussians: 180000` 表示增密阈值约 18 万点，`trainer.num_init_steps: 15000` 表示训练 15,000 步。原生增密在每批操作前检查数量，实际 GS 数可能略高于阈值，因此必须记录实际点数，并核验最终入口满足约定预算。
 
-实现为[scripts/compact_initial_model.py](../scripts/compact_initial_model.py)。固定首帧，渲染训练相机；对每幅渲染图做两个固定种子的随机正负投影，通过原生渲染器反向计算每个点的透明度响应，再累加平方能量。它近似衡量“去掉该点可能使图像发生多大变化”，不是按GS大小、透明度或某个视角的颜色误差单独排序。
+Coffee Martini 当前使用：
 
-评分不使用GT像素，也不使用cam00，更不使用未来帧的运动、PSNR或残差来选点。GT用于后续质量评估。原生合成中的遮挡与透明度参与响应计算，但分数仍只是局部近似：多个点同时删除会相互影响，原生有限扰动抽查的相对偏差最高约30%，不能称为精确删除代价。
-
-选择流程：
-
-1. 先做既有`alpha < 0.0075`过滤。
-2. 计算全部剩余GS的图像影响分数，按分数从高到低稳定排序。
-3. 在原有每个非空最细候选区域中，优先保留`min(2, 该区域原有点数)`个最高分GS。
-4. 用剩余名额按全局分数填满到150000点；保持原行顺序输出，选中的GS不重新排序为按分数排列。
-5. 只删除未选中的行，所选GS的位置、旋转、logscale、透明度、SH DC和高阶SH全部保持原值。
-
-本轮原有4050个非空最细区域全部保留。单纯全局top150000会清空39个区域，覆盖约束相对该选择只替换119个名额。可细分节点数仍为583，不能把覆盖约束描述为增加了可用gate，也没有验证这119个点独立贡献了多少画质。
-
-这20个视角的评分只在首帧离线做一次；逐动态帧仍按当前计划使用4个训练视角，不会新增每帧20视角候选筛选。
-
-## 4. 复现当前首帧的命令
-
-在仓库根目录使用同一个终端执行。先确认GPU没有正在运行的其他训练；本命令需要GPU，会生成新的小首帧及统计文件，但不启动动态训练、不复制数据、不修改输入checkpoint。
+- 数据：`data/colmap4d/coffee_martini_half_no13`
+- 完整首帧入口：`data/colmap4d/coffee_martini_full_first_no13`，只在重建初始化点云时使用
+- 图像尺寸：`1341 × 1006`
+- 首帧训练配置：[coffee_martini_no13_frame0_sh1_mv2_supportsafe200k_15k_20261031T214049.yaml](../config/coffee_martini_no13_frame0_sh1_mv2_supportsafe200k_15k_20261031T214049.yaml)
+- 不使用 cam13，不添加训练专用 XYZ 噪声
 
 ```bash
 conda activate ReConGS
-cd /home/gamer-02/Documents/DeepLearning/my4dgs
+# 新配置需设置 num_init_steps: 15000，测试和保存步数均不超过15000。
+# 当前 main.py 的动态入口要求已有首帧；从零训练使用原生静态入口。
+frame0_config="config/your_scene_frame0.yaml"
+python scripts/run_first_frame.py --config "$frame0_config" \
+  --name "frame0_$(date +%Y%m%dT%H%M%S)"
+```
 
-first_source="/home/gamer-02/Documents/DeepLearning/ReCon-GS/output/flame_steak_fullres/20260926T225223_dc5baf/ckpt-0-15000.pth"
-first_reference="output/flame_steak_1027/fs_units_300/20261028T060649_97d995/frame_storage/rigid_tree/reference_frame0.npz"
-first_seed_dir="output/flame_steak_1028/fs_seed150c_repro_$(date +%Y%m%dT%H%M%S)"
+### 2. 比较不同点数
+
+[compact_initial_model.py](../scripts/compact_initial_model.py)会估计每个 GS 对训练视角图像的影响，优先保留影响大的点，同时保证原有最细区域不会被清空。cam00 和未来帧不参与逐点打分。
+
+下面是 Coffee Martini 历史 16 万点候选的复现形式，其源 checkpoint 为历史 17,500 步结果，不能作为新实验的步数设置依据。新实验必须替换为本次 15,000 步终点 checkpoint、相应原空间模板和渲染配置。输出必须使用新路径，不能覆盖已有结果。
+
+```bash
+source_ckpt="output/coffee_martini_no13_dynamic_20261029/assets/frame0_source/ckpt-0-17500.pth"
+reference="output/coffee_martini_no13_dynamic_20261029/assets/reference_layout/reference_frame0.npz"
+output_ckpt="output/coffee_martini_no13_dynamic_20261029/assets/candidates/cov160_$(date +%Y%m%dT%H%M%S)/ckpt-0-17500.pth"
 
 python scripts/compact_initial_model.py \
-  --checkpoint "$first_source" \
-  --render-config config/fs_units_300.yaml \
-  --coverage-reference "$first_reference" \
-  --target-count 150000 \
+  --checkpoint "$source_ckpt" \
+  --render-config output/coffee_martini_no13_dynamic_20261029/assets/frame0_source/config.yaml \
+  --coverage-reference "$reference" \
+  --target-count 160000 \
   --opacity-threshold 0.0075 \
   --probes 2 \
   --seed 1729 \
-  --output "$first_seed_dir/ckpt-0-15000.pth"
+  --output "$output_ckpt"
 ```
 
-如果shell未初始化conda，可先执行：
+Coffee Martini 已比较 10 万、12 万、14 万、15 万、16 万、17 万和 18 万点。其他场景可在约 10 万到 20 万点之间取样，但不能超过透明度过滤后的源点数。静态 PSNR 接近时，优先把点数更少的候选送入动态 30 帧验证。
+
+### 3. 跑动态 30 帧
+
+只替换首帧 checkpoint 和对应的 `reference_frame0.npz`，新增 GS、损失、量化和训练步数保持不变。这样才能判断差异是否来自首帧。
+
+Coffee Martini 当前 16 万点配置为 [coffee_martini_no13_first30.yaml](../config/coffee_martini_no13_first30.yaml)：
 
 ```bash
-source /home/gamer-02/Documents/Codex/miniforge3/etc/profile.d/conda.sh
 conda activate ReConGS
+python main.py --config=config/coffee_martini_no13_first30.yaml \
+  experiment_name="coffee_no13_cov160_first30_$(date +%Y%m%dT%H%M%S)"
 ```
 
-输出有三个文件：`ckpt-0-15000.pth`为首帧；`ckpt-0-15000.json`记录输入指纹、过滤/目标点数、筛点训练相机、前后画质和覆盖统计；`ckpt-0-15000.scores.pt`保存分数与过滤后原布局中的保留行。输出路径必须是新的，不能覆盖历史run；不要把这些产物加入Git。
+30 帧完成后比较平均 PSNR、每帧存储、最终 GS 数量和困难区域画质。通过后再用同一首帧和同一动态配置扩展到 300 帧。
 
-GPU浮点归约及分数边界附近的排序可能带来小差异。精确复用已验收版本时直接使用上表的实际15万点checkpoint；重新评分时记录自己的属性摘要与结果，不因行数一致就宣称与历史checkpoint逐位一致。
+## 当前结果
 
-## 5. 接入动态训练：保留原划分，不续训首帧
+- **Flame Steak：** 从加载后的 206,237 点保留 150,000 点，完整 300 帧 PSNR 从 34.0647 提高到 34.1203 dB，动态存储从 50.97 降到 48.96 KB/帧。这只证明 15 万点适合该场景。
+- **Coffee Martini（历史实验）：** 17,500 步首帧经过透明度过滤后有 180,741 点，cam00 PSNR 为 29.3634 dB；裁到 16 万点后为 29.3585 dB。其动态 frame 1–29 平均为 29.5782 dB、64.54 KB/帧，未达到当前画质和存储目标，因此不直接扩展到 300 帧。该历史训练预算不沿用到新实验。
 
-当前成功流程**没有在裁点后调用`scripts/run_first_frame.py`继续训练首帧**。保留checkpoint的`current_frame=0`及原完成步数15000，动态配置保持`trainer.num_init_steps: 15000`，随后从该已完成首帧建立解码参考并进入动态帧。
+## 检查清单
 
-`module.rigid_tree.spatial_gate.reference_layout`必须继续指向与筛点时相同的原始候选模板。新参考按保留下来的GS重新路由，但复用原划分平面、候选区域中心和离群点路由；gate及区域运动重新学习。新reference内嵌这些结构数据，后续解码不依赖外部模板文件。
-
-本机复现实验可直接用现有配置，只覆盖新checkpoint和新的实验名：
-
-```bash
-# first_seed_dir沿用上一节同一终端中的变量；如果使用已有首帧则显式重设它。
-python main.py --config=config/fs_cov150_30.yaml \
-  ckpt_path="$first_seed_dir/ckpt-0-15000.pth" \
-  experiment_name="fs_f0r30_$(date +%Y%m%dT%H%M%S)"
-```
-
-若把`first_reference`换成新构建的同首帧模板，还要覆盖：
-
-```text
-module.rigid_tree.spatial_gate.reference_layout=<该模板的实际路径>
-```
-
-30帧完成、质量和码流核验通过后，再以同一配置方法从同一首帧新跑完整300帧：
-
-```bash
-python main.py --config=config/fs_cov150_300.yaml \
-  ckpt_path="$first_seed_dir/ckpt-0-15000.pth" \
-  experiment_name="fs_f0r300_$(date +%Y%m%dT%H%M%S)"
-```
-
-两条训练命令依次执行；先分析30帧，合适才执行300帧。不要为了接入首帧同时改动图像损失、量化精度、出生额度、共享颜色或动态训练阶段。当前共享颜色关闭。前30帧过关不能证明后半段过关，完整结论仍需同一方法的全300帧。
-
-## 6. 下一个agent应核验什么
-
-- **输入和行映射：** 原214996点→透明度过滤后206237点→150000点；重新加载后数量不能因为不同阈值或配置再次意外减少。分数/保留行对应过滤后的布局。
-- **保留属性：** 六类原始属性必须与原checkpoint经过同样过滤、按保留行索引后的值逐位一致。旋转不能额外改约定或做一次不必要的原地归一化；SH阶数保持1。
-- **区域覆盖和参考：** 读取报告`coverage`，检查非空最细区域保留及`guarded_regions_below_available_minimum == 0`；新动态reference的GS属性与新checkpoint一致，候选划分与原模板一致。首帧gate重置并重新学习，不照搬旧训练运动。
-- **保存与恢复：** 原有Adam行状态与裁点后行数一致；checkpoint中的Parameter在恢复后仍可训练。现有回归检查为`python -m unittest discover -s tests -p test_initial_checkpoint.py`。本轮没有恢复静态优化，但仍须保持保存格式正确。
-- **实际图像：** 相同相机、GT、分辨率、背景、SH阶数下渲染前后首帧，查看图像与PSNR/SSIM；记录项目逐通道dB平均、整幅RGB浮点和RGB8公式的区别。cam00已经参与开发决策，不能宣称独立测试泛化。
-- **动态资格：** 同一首帧先跑完整30帧，观察火焰等困难区域、完整动态包、残差行、实际新增/退出及总GS数；通过后做完整300帧、独立CPU/GPU解码/像素核验，并分别测渲染和完整播放速度。
-
-已验收15万点动态首帧的状态摘要为`86f2233dfc4f6a62defef00398107485f1fb9a964bc0f0768fa4eb1b7f2e05b1`，参考包13118597字节；状态摘要还包含布局，不能只靠属性摘要替代它。证据详见上述完整300帧记录，历史诊断文件在`tmp/first_frame_v3/coverage_seed_proof.json`、`cov150_dynamic_bootstrap.json`和`cov150_300_bootstrap.json`，这些tmp文件不是长期唯一依据。
-
-## 7. 已经踩过的坑与其他场景的适用范围
-
-**静态PSNR更高，不保证后续动态更好。** 一版全属性续训15万点首帧的静态PSNR为34.186138 dB，但动态30帧只有34.019742 dB；本轮保留原属性的首帧静态33.958199 dB，动态30帧反而有34.227168 dB。单独续训SH2500步也没有改善首帧。它们是已有实验现象，不能据此证明某一种属性变化必然是唯一原因；后续若要续训，应作为新候选另行验证。
-
-**15万点是当前场景验证有效的工作点，不是所有数据集的最优预算。** 其他场景先准备自身质量可靠的首帧、相机与frame0 reference，再用该场景训练相机评分和候选覆盖约束。保留“筛点、属性不变、空间划分一致、动态验证”这条流程，不能直接套用Flame Steak的空间模板、源checkpoint、绝对点数或预期PSNR。
-
-当前裁点脚本还显式校验cam00和1345×1008评估尺寸，且拒绝用cam00筛点；迁移到不同相机命名、留出划分或分辨率的场景前，要先适配这些校验和相应配置。不要为了通过检查悄悄缩放GT或改测试划分。它只接受已完成的静态frame0 checkpoint，不能把动态rigid checkpoint直接当同类输入。
-
-首帧模板缺失时，可从原首帧配置生成一个`num_frames: 1`、已完成首帧步数匹配、`reference_layout: null`的新初始化run：当前`Trainer.setup()`会写出`frame_storage/rigid_tree/reference_frame0.npz`。先核对原始属性与坐标，再把该文件用于覆盖选择和后续参考；无需训练动态帧。若要从零训练新场景，当前动态`main.py`要求共享已完成首帧，应先使用项目已有的原生静态入口；本文未验证一套适用于所有新场景的低点数从零训练配方。
-
-后续agent的交付应包括输入来源/指纹、命令和配置、点数/区域/属性核验、前后首帧图像，以及实际动态30/300帧结果。只有完成至少30帧的训练实验才在`docs/experiment/`新增实验记录；本文是操作指南，不是额外短实验报告。
+- 数据没有错帧或不同步，相机数量和留出视角正确。
+- 首帧固定使用实际完成 15,000 step 的终点；只调整 GS 上限，不联动改变训练步数、学习率日程或增密日程。源、裁点后 checkpoint 与动态入口的步数必须都等于 15,000，不能只检查“不超过 15,000”。
+- checkpoint 的分辨率、SH 阶数和透明度阈值与动态配置一致。
+- 裁点前的 checkpoint 与 `reference_frame0.npz` 属于同一首帧；脚本的 XYZ 校验必须通过。
+- 被保留 GS 的全部属性不变，所有原有非空区域仍有覆盖。
+- 每次实验使用新的输出目录，不覆盖历史产物。
+- 只有完成至少 30 帧后，才在 `docs/experiment/` 记录实验结论。

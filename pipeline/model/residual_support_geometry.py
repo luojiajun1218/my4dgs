@@ -117,6 +117,15 @@ def residual_support_seed(raw,rows,cache,position_step):
     cost=(distance*weights[:,None,:]).sum(-1).masked_fill(~valid_views,torch.inf)
     chosen=cost.argmin(-1);index=torch.arange(count,device=xyz.device)
     position=positions[index,chosen];covariance=covariances[index,chosen]
+    parent_radius=scale.amax(-1).clamp_min(position_step)
+    normalized_distance=(positions-position[:,None]).norm(dim=-1)/parent_radius[:,None]
+    normalized_distance=normalized_distance.masked_fill(~valid_views,torch.inf)
+    ordered_distance=normalized_distance.sort(-1).values
+    second_view_distance=(ordered_distance[:,1] if len(cache)>1 else
+                          ordered_distance[:,0].new_full((count,),torch.inf))
+    weighted_spread=((positions-position[:,None]).square().sum(-1)*weights).sum(-1)
+    weighted_spread=(weighted_spread/weights.sum(-1).clamp_min(
+        torch.finfo(weights.dtype).tiny)).sqrt()/parent_radius
     # Separate the new primitive from an exactly tied source-depth layer by
     # the codec's coordinate uncertainty, rather than a parent-size jitter.
     position=position-2*position_step*torch.stack(directions,1)[index,chosen]
@@ -132,8 +141,18 @@ def residual_support_seed(raw,rows,cache,position_step):
     if not all(bool(torch.isfinite(v).all()) for v in seed.values()):
         raise ValueError('Residual support produced nonfinite seeds')
     ratios=eigen.sqrt().amax(-1)/scale.amax(-1)
+    def quantiles(value):
+        value=value[valid_any&torch.isfinite(value)]
+        if not len(value):return None
+        return {str(q):float(torch.quantile(value,q)) for q in (.1,.25,.5,.75,.9,.95,.99)}
+
     report=dict(policy='native_error_footprint_v1',seeded_count=int(valid_any.sum()),
         single_view_count=int((valid_views.sum(-1)==1).sum()),
+        support_view_count_quantiles=quantiles(valid_views.sum(-1).double()),
+        second_view_distance_parent_sigma_quantiles=quantiles(second_view_distance),
+        weighted_proposal_spread_parent_sigma_quantiles=quantiles(weighted_spread),
+        consistent_second_view_count={str(limit):int((valid_any&(second_view_distance<=limit)).sum())
+                                      for limit in (1.,2.,4.,8.)},
         child_to_parent_max_scale_median=float(ratios[valid_any].median()) if bool(valid_any.any()) else None,
         selected_view_counts=torch.bincount(chosen[valid_any],minlength=len(cache)).cpu().tolist(),
         view_names=[c.get('name',Path(str(c['view'].path)).name) for c in cache],

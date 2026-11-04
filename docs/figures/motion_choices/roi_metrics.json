@@ -1,0 +1,32 @@
+[
+  {
+    "frame": 149,
+    "window": "hand",
+    "xyxy": [
+      560,
+      610,
+      875,
+      835
+    ],
+    "RGB8_PSNR": {
+      "no_old_position_update": 31.258769645209465,
+      "shared_only": 32.18014062207394,
+      "full": 32.4611646541526
+    }
+  },
+  {
+    "frame": 269,
+    "window": "fire",
+    "xyxy": [
+      590,
+      805,
+      805,
+      980
+    ],
+    "RGB8_PSNR": {
+      "no_old_position_update": 24.9403000724344,
+      "shared_only": 25.297633413822357,
+      "full": 25.70923838090552
+    }
+  }
+]

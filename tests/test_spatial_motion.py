@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import copy
 import importlib
 import itertools
+import json
 import math
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
+from pipeline.model.birth_quantization import reference_digest
 from pipeline.model.rigid_residual_tree import (
     RigidTreeConfig,
     _quantized,
@@ -25,6 +27,8 @@ from pipeline.model.rigid_residual_tree import (
 )
 from pipeline.model.rigid_tree_codec import (
     DecodedState,
+    _validate_state,
+    compose_decoded_survivors,
     compress_motion_packet,
     decode_motion,
     encode_motion,
@@ -38,11 +42,15 @@ from pipeline.model.sparse_integer_codec import (
 from pipeline.model.spatial_gate import (
     SPATIAL_ROUTING_FIELDS,
     spatial_accumulate,
+    spatial_layout,
     spatial_owner,
     spatial_route,
     spatial_state_route,
 )
 from pipeline.model.spatial_gated_motion import SpatialGatedMotion
+
+from pipeline.model.stream_packet import read_stream_step
+from scripts.extend_spatial_reference import extend
 
 # ----- test_spatial_gated_motion -----
 RIGID = importlib.import_module('pipeline.model.rigid_residual_tree')
@@ -1249,6 +1257,64 @@ class JointSpatialMotionTests(unittest.TestCase):
         self.assertGreater(float(model.gs_translation.grad.abs().sum()), 0.)
         self.assertGreater(float(model.region_translation.grad.abs().sum()), 0.)
 
+    def test_region_selection_rate_scale_changes_only_gate_gradient(self):
+        model = self.model()
+        parent = int(model.owner[0])
+        children = torch.where(model.parents.eq(parent) & model.node_counts.gt(0))[0]
+        with torch.no_grad():
+            # Parent and children predict the same full motion, so point
+            # residual rate is identical on either side of this gate.  Its
+            # remaining rate derivative is solely the selected region blocks.
+            model.region_translation[parent, 0] = .004
+            model.region_translation[children, 0] = .004
+            model.gate_logits[parent] = -.2
+        values, gradients = [], []
+        # Zero is used only as an internal gradient-attribution probe; public
+        # configuration validation intentionally rejects it.
+        for scale in (1., 0., .25):
+            model.config.spatial_gate.region_selection_rate_gradient_scale = scale
+            terms = model.loss_terms(10, False)
+            values.append(float(terms['rate_bytes_surrogate']))
+            gradients.append(torch.autograd.grad(
+                terms['rate_loss'], model.gate_logits, retain_graph=False)[0][parent])
+        self.assertEqual(values, [values[0]] * 3)
+        region_gradient = gradients[0] - gradients[1]
+        self.assertGreater(abs(float(region_gradient)), 0.)
+        torch.testing.assert_close(gradients[2] - gradients[1], region_gradient * .25,
+                                   rtol=1e-6, atol=1e-10)
+
+    def test_region_selection_rate_scale_also_prices_point_residual_choice(self):
+        model = self.model()
+        parent = int(model.owner[0])
+        children = torch.where(model.parents.eq(parent) & model.node_counts.gt(0))[0]
+        members = model.owner.eq(parent)
+        with torch.no_grad():
+            model.region_translation[parent, 0] = .004
+            model.region_translation[children, 0] = .024
+            model.gs_translation[members, 0] = .02
+            model.gate_logits[parent] = -.2
+        values, gradients = [], []
+        for scale in (1., 0., .25):
+            model.config.spatial_gate.region_selection_rate_gradient_scale = scale
+            terms = model.loss_terms(10, False)
+            values.append(float(terms['rate_bytes_surrogate']))
+            gradients.append(torch.autograd.grad(
+                terms['rate_loss'], model.gate_logits, retain_graph=False)[0])
+        self.assertEqual(values, [values[0]] * 3)
+        self.assertGreater(float(gradients[0].abs().sum()), 0.)
+        torch.testing.assert_close(gradients[1], torch.zeros_like(gradients[1]),
+                                   rtol=0, atol=1e-12)
+        torch.testing.assert_close(gradients[2], gradients[0] * .25,
+                                   rtol=1e-6, atol=1e-10)
+
+    def test_region_selection_rate_scale_rejects_nonpositive_or_nonfinite_values(self):
+        for value in (0., -1., float('inf'), float('nan'), True, 1.01):
+            config = copy.deepcopy(self.model().config)
+            config.spatial_gate.region_selection_rate_gradient_scale = value
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, 'Region-selection rate gradient scale'):
+                config.validate()
+
     def test_gate_ste_has_discrete_cost_and_the_soft_binary_derivative(self):
         model = self.model()
         parent = int(model.owner[0])
@@ -2312,5 +2378,175 @@ class ProximalGSRegularizationTests(unittest.TestCase):
         torch.testing.assert_close(model.gs_rotation,restored.gs_rotation,rtol=0,atol=0)
 
 
-if __name__ == '__main__':
+def reference_fixture():
+    generator = torch.Generator().manual_seed(20261102)
+    xyz = torch.rand((512, 3), generator=generator) * 2 - 1
+    xyz = torch.cat((xyz, torch.tensor([[-30., -30., -30.], [30., 30., 30.]])))
+    rotation = torch.zeros((len(xyz), 4)); rotation[:, 0] = 1
+    paths, parents, opened, centers, routing = spatial_layout(
+        xyz, 4, return_centers=True, initialization='robust_median',
+        distance_quantile=.99, outlier_assignment='nearest_region', return_routing=True)
+    raw = dict(xyz=xyz, rotation=rotation, logscale=torch.zeros(len(xyz), 3),
+               opacity=torch.zeros(len(xyz), 1), sh_dc=torch.zeros(len(xyz), 1, 3),
+               sh_rest=torch.zeros(len(xyz), 3, 3))
+    packet = {name: value.numpy() for name, value in raw.items()}
+    packet.update(owner=spatial_owner(paths, opened).numpy(), parents=parents.numpy(),
+                  frame_index=np.array(0), extent=np.array(2.), region_count=np.array(len(parents)),
+                  spatial_paths=paths.numpy(), spatial_open=opened.numpy(),
+                  spatial_centers=centers.numpy(),
+                  **{key: value.numpy() for key, value in routing.items()})
+    return packet, raw
+
+
+def motion_payload(prior, frame, opened, *, births=False, inherit_rotation=False):
+    paths = spatial_state_route(prior.xyz, prior)
+    owner = spatial_owner(paths, opened)
+    rows = torch.arange(len(prior.xyz))
+    region_t = torch.zeros((len(prior.parents), 3), dtype=torch.int16)
+    region_r = torch.zeros_like(region_t)
+    deepest = int(paths[:, -1].max())
+    assert deepest > 32767
+    region_t[deepest] = torch.tensor([5, -3, 2], dtype=torch.int16)
+    gs_t = torch.zeros((len(rows), 3), dtype=torch.int16)
+    gs_r = torch.zeros_like(gs_t)
+    gs_t[1] = torch.tensor([-2, 1, 4], dtype=torch.int16)
+    sources = torch.tensor([0, 1], dtype=torch.long) if births else torch.empty(0, dtype=torch.long)
+    xyz, rotation = compose_decoded_survivors(
+        prior, 2., rows, owner, prior.parents, region_t, region_r, gs_t, gs_r,
+        .001, .001, gs_translation_step_extent=.001, gs_rotation_step_rad=.001,
+        spatial_open=opened, spatial_relative=True, inherit_birth_rotation=inherit_rotation)
+    newborn = xyz[sources] + torch.tensor([.002, 0., -.002])
+    arguments = (prior, frame, 2., rows, owner, prior.parents, region_t, region_r,
+                 gs_t, gs_r, sources, newborn, rotation[sources], .001, .001)
+    options = dict(gs_translation_step_extent=.001, gs_rotation_step_rad=.001,
+                   spatial_open=opened, spatial_relative=True,
+                   inherit_birth_rotation=inherit_rotation, birth_pose_steps=(.002, .001))
+    return encode_motion(*arguments, compression='none', **options), deepest
+
+
+class DepthFiveTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+        cls.old, cls.raw = reference_fixture()
+        cls.new = extend(cls.old)
+        cls.prior = DecodedState.from_reference(cls.new)
+        _validate_state(cls.prior)
+
+    def frontier(self):
+        paths = self.prior.spatial_paths
+        row = int(paths[:, -1].argmax())
+        opened = self.prior.spatial_open.clone()
+        opened[paths[row, :-1]] = True
+        return opened
+
+    def test_extension_preserves_previous_routes_and_all_non_layout_fields(self):
+        self.assertEqual(self.prior.spatial_paths.shape[1], 5)
+        self.assertEqual(len(self.prior.parents), 37449)
+        np.testing.assert_array_equal(self.old['spatial_paths'], self.new['spatial_paths'][:, :4])
+        np.testing.assert_array_equal(self.old['parents'], self.new['parents'][:4681])
+        changed = {'parents', 'region_count', 'spatial_paths', 'spatial_open',
+                   'spatial_centers', 'spatial_leaf_nodes'}
+        for key in self.old.keys() - changed:
+            np.testing.assert_array_equal(self.old[key], self.new[key], err_msg=key)
+
+    def test_reference_template_loads_and_raw_gate_cost_is_counted(self):
+        metadata = []
+        with tempfile.TemporaryDirectory() as folder:
+            for depth, reference in ((4, self.old), (5, self.new)):
+                path = Path(folder) / f'reference{depth}.npz'
+                np.savez_compressed(path, **reference)
+                cfg = RigidTreeConfig()
+                cfg.spatial_gate.max_depth = depth
+                cfg.spatial_gate.initialization = 'robust_median'
+                cfg.spatial_gate.outlier_assignment = 'nearest_region'
+                cfg.spatial_gate.reference_layout = str(path)
+                cfg.spatial_gate.training_schedule = 'joint'
+                cfg.spatial_gate.start_step = cfg.spatial_gate.gate_start_step = 0
+                cfg.validate()
+                model = SpatialGatedMotion(cfg)
+                model.setup(self.raw['xyz'], self.raw['rotation'], 2., frame_index=1)
+                np.testing.assert_array_equal(model.spatial_paths.cpu().numpy(), reference['spatial_paths'])
+                metadata.append(model._metadata_bytes())
+        self.assertEqual(metadata[1] - metadata[0], 4097)  # bitmap + region-count varint
+
+    def test_quantized_motion_codec_and_stream_parser_support_large_node_ids(self):
+        from pipeline.model.rigid_tree_codec import compress_motion_packet
+        opened = self.frontier()
+        raw_packet, deepest = motion_payload(self.prior, 1, opened)
+        self.assertEqual(raw_packet[:4], b'SPG6')
+        packed = compress_motion_packet(raw_packet)
+        self.assertEqual(uncompressed_motion_packet(packed), raw_packet)
+        decoded = decode_motion(packed, self.prior)
+        self.assertTrue(torch.equal(decoded.spatial_open, opened))
+        self.assertTrue(torch.equal(decoded.owner, spatial_owner(self.prior.spatial_paths, opened)))
+        expected_raw = {**self.raw, 'xyz': decoded.xyz, 'rotation': decoded.rotation}
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            (directory / 'motion_001.bin').write_bytes(packed)
+            manifest = dict(frame=1, motion='motion_001.bin', birth=None, opacity_update=None,
+                            previous_count=len(self.prior.xyz), old_count=len(self.prior.xyz),
+                            birth_count=0, total_count=len(decoded.xyz),
+                            decoded_state_sha256=decoded.digest().hex(),
+                            raw_state_sha256=reference_digest(expected_raw))
+            (directory / 'frame_001.json').write_text(json.dumps(manifest))
+            step = read_stream_step(directory, 1, region_count=37449, depth=5, rest=3)
+            np.testing.assert_array_equal(step.opened, opened.numpy())
+            np.testing.assert_array_equal(step.regional_symbols[deepest], [5, -3, 2])
+            self.assertEqual(step.stored_bytes, sum(p.stat().st_size for p in directory.iterdir()))
+        inherited, _ = motion_payload(self.prior, 1, opened, inherit_rotation=True)
+        self.assertEqual(inherited[:4], b'SPG8')
+        self.assertEqual(decode_motion(inherited, self.prior).digest(), decoded.digest())
+
+    def test_births_and_next_frame_replay_keep_five_level_routing(self):
+        first, _ = motion_payload(self.prior, 1, self.frontier(), births=True)
+        decoded = decode_motion(first, self.prior)
+        self.assertEqual(len(decoded.xyz), len(self.prior.xyz) + 2)
+        self.assertEqual(decoded.spatial_paths.shape, (len(decoded.xyz), 5))
+        second, _ = motion_payload(decoded, 2, self.frontier_for(decoded))
+        next_state = decode_motion(second, decoded)
+        self.assertEqual(next_state.frame_index, 2)
+        self.assertEqual(next_state.spatial_paths.shape, (len(decoded.xyz), 5))
+
+    @staticmethod
+    def frontier_for(state):
+        opened = state.spatial_open.clone()
+        opened[0] = True
+        return opened
+
+
+@unittest.skipUnless(torch.cuda.is_available(), 'CUDA stream parity check')
+class DepthFiveGPUStreamTests(unittest.TestCase):
+    def test_five_level_stream_matches_cpu_with_large_node_ids(self):
+        from pipeline.model.gpu_stream import GPUStream
+        from pipeline.model.rigid_tree_codec import compress_motion_packet
+
+        packet, raw = reference_fixture()
+        prior = DecodedState.from_reference(extend(packet))
+        paths = prior.spatial_paths
+        opened = prior.spatial_open.clone()
+        opened[paths[paths[:, -1].argmax(), :-1]] = True
+        payload, deepest = motion_payload(prior, 1, opened)
+        payload = compress_motion_packet(payload)
+        decoded = decode_motion(payload, prior)
+        expected = {**raw, 'xyz': decoded.xyz, 'rotation': decoded.rotation}
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            (directory / 'motion_001.bin').write_bytes(payload)
+            manifest = dict(frame=1, motion='motion_001.bin', birth=None, opacity_update=None,
+                            previous_count=len(prior.xyz), old_count=len(prior.xyz),
+                            birth_count=0, total_count=len(decoded.xyz),
+                            decoded_state_sha256=decoded.digest().hex(),
+                            raw_state_sha256=reference_digest(expected))
+            (directory / 'frame_001.json').write_text(json.dumps(manifest))
+            step = read_stream_step(directory, 1, region_count=len(prior.parents), depth=5, rest=3)
+            self.assertGreater(deepest, 32767)
+            player = GPUStream(prior, raw, capacity=len(raw['xyz']) + 2)
+            player.advance(step)
+            actual = player.capture_raw()
+            self.assertEqual(player.capture_state(actual).digest(), decoded.digest())
+            self.assertEqual(reference_digest(actual), reference_digest(expected))
+
+
+if __name__ == "__main__":
     unittest.main()

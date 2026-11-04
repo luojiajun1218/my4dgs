@@ -49,13 +49,17 @@ class GaussianModel(BaseGaussianModel):
     def get_features(self):
         dc = getattr(self, 'rigid_sh_dc', None)
         dc = self._features_dc if dc is None else dc
-        return self._render_cached('features', (dc, self._features_rest),
-            lambda: torch.cat((dc, self._features_rest), dim=1))
+        rest = getattr(self, 'rigid_sh_rest', None)
+        rest = self._features_rest if rest is None else rest
+        return self._render_cached('features', (dc, rest),
+            lambda: torch.cat((dc, rest), dim=1))
 
     @property
     def get_scaling(self):
-        return self._render_cached('scaling', (self._scaling,),
-                                   lambda: self.scaling_activation(self._scaling))
+        override = getattr(self, 'rigid_logscale', None)
+        source = self._scaling if override is None else override
+        return self._render_cached('scaling_override' if override is not None else 'scaling',
+                                   (source,), lambda: self.scaling_activation(source))
 
     @property
     def get_opacity(self):

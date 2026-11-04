@@ -34,14 +34,6 @@ python main.py --config=config/xxxxx.yaml
 
 ## 本机故障恢复与代理命令
 
-### 显卡掉卡：`gpu-recover`
-
-- 适用情况：宿主机上的 `nvidia-smi` 无法识别显卡，或内核日志出现 `GPU has fallen off the bus`、Xid 79、要求重启的 Xid 154，且机器仍能执行终端或 SSH 命令。先区分真实掉卡与受限运行环境无法访问 GPU；仅训练报错或 CUDA 显存不足时，应先排查程序。
-- 先用 `gpu-recover --check` 检查远程连接所需服务；用 `gpu-recover --status` 查看当前状态和上次开机检查报告。两者都不会重启。
-- 确认需要通过重启恢复时运行 `gpu-recover`。它会申请 sudo 权限、收集诊断、配置网络/SSH/Tailscale/Clash 开机恢复，并在诊断完成后安排 **1 分钟后整机重启**。重启会中断训练，执行前应保存可保存的进度并确认其他任务状态。
-- 只收集诊断用 `gpu-recover --collect-only`；重启发生前可用 `gpu-recover --cancel` 取消。日志保存在 `/var/log/gpu-recovery/`，不要在仓库中保存 sudo 密码。
-- 重启后，从已接入同一 Tailscale 网络的设备尝试 `ssh gamer-02@100.124.74.30`，再检查 `gpu-recover --status` 和 `nvidia-smi`。本地服务检查通过不等于外部 SSH 已验证；整机完全卡死时也无法依靠此脚本恢复。
-
 ### 代理变慢或连接超时：`clash change`
 
 - 适用情况：Clash 代理已运行，但访问外部服务超时、下载很慢，或 Codex 持续显示 reconnecting。先用 `clash status` 查看当前节点、实测带宽和连通性，再按需运行 `clash change` 测速并选择节点。

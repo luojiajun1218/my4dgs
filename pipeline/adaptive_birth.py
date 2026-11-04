@@ -23,9 +23,23 @@ class AdaptiveBirthController:
         rotation=getattr(self.gaussians,'rigid_rotation',None)
         raw['xyz']=(self.gaussians._xyz if xyz is None else xyz).detach()
         raw['rotation']=(self.gaussians._rotation if rotation is None else rotation).detach()
+        if (getattr(self, 'full_update_active', False) and xyz is None and
+                self.motion_committed and not self.frame_finalized):
+            # Birth/cleanup calls outside a render still need the live point
+            # motion, not the pose materialized at step 200.
+            current_xyz, current_rotation = self.motion.decoded_survivor_pose()
+            raw['xyz'] = current_xyz.to(self.gaussians._xyz)
+            raw['rotation'] = current_rotation.to(self.gaussians._rotation)
         raw['opacity']=self.opacity_update().detach()
         feature_update=getattr(self,'feature_dc_update',None)
         if feature_update is not None:raw['sh_dc']=feature_update().detach()
+        logscale_update=getattr(self,'logscale_update',None)
+        if logscale_update is not None and logscale_update.ready:
+            raw['logscale']=logscale_update.canonical_logscale(raw['logscale'])
+        full = getattr(self, 'full_attribute_update', None)
+        if getattr(self, 'full_update_active', False) and full is not None:
+            raw.update({name: value.detach() for name, value in full.apply(
+                {name: raw[name] for name in ('logscale', 'sh_dc', 'sh_rest')}).items()})
         return raw
 
     @torch.no_grad()

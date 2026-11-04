@@ -352,7 +352,8 @@ def validate_sequence_extension(checkpoint, current_data_config,
         relative_files.update((index, f'frame_storage/rigid_tree/motion_{frame:03d}.bin',
                                f'frame_summary/frame_{frame:03d}.json'))
         for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity'),
-                            ('feature_dc_update', 'shdc')):
+                            ('feature_dc_update', 'shdc'),
+                            ('logscale_update', 'logscale')):
             name = manifest.get(field)
             if name is not None:
                 if name != f'{stem}_{frame:03d}.bin':

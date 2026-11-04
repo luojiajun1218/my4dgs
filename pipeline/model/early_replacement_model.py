@@ -12,8 +12,7 @@ from torch.nn import functional as F
 
 from .gaussian import BirthGaussianModel
 from .birth_quantization import RAW_FIELDS,physical_covariance
-from .conservative_family import _clone_tree
-from .reincarnation_model import project_sh1_sphere,sh1_sphere_range
+from .birth_helpers import _clone_tree, project_sh1_sphere, sh1_sphere_range
 
 
 class _Exact(torch.autograd.Function):

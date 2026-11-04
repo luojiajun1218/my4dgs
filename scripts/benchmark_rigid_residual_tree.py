@@ -1,9 +1,10 @@
 """Benchmark full rigid-tree rendering and sequential decoded playback.
 
 Materialized FPS times Module.forward plus clamp at cam00. Playback FPS times
-each motion/birth file read, checked decode, host-to-GPU materialization, and
-the same Module.forward plus clamp. Dataset loading, reference loading,
-integrity preflight, quality metrics, and warmups are outside timed scopes.
+each frame manifest and dynamic packet read, checked CPU decode, host-to-GPU
+materialization, and the same Module.forward plus clamp. Dataset loading,
+reference loading, integrity preflight, quality metrics, and warmups are outside
+timed scopes.
 """
 
 from __future__ import annotations
@@ -362,10 +363,14 @@ def _summarize_storage(rows):
     motion = sum(int(row['motion_bytes']) for row in dynamic)
     birth = sum(int(row['birth_bytes']) for row in dynamic)
     opacity = sum(int(row.get('opacity_update_bytes', 0)) for row in dynamic)
+    logscale = sum(int(row.get('logscale_update_bytes', 0)) for row in dynamic)
+    full_attributes = sum(int(row.get('full_attribute_update_bytes', 0)) for row in dynamic)
     for row in dynamic:
         payload = (int(row['motion_bytes']) + int(row['birth_bytes']) +
                    int(row.get('opacity_update_bytes', 0)) +
-                   int(row.get('feature_dc_update_bytes', 0)))
+                   int(row.get('feature_dc_update_bytes', 0)) +
+                   int(row.get('logscale_update_bytes', 0)) +
+                   int(row.get('full_attribute_update_bytes', 0)))
         if int(row['encoded_bytes']) != payload or int(row.get('payload_bytes', payload)) != payload:
             raise ValueError('Dynamic payload bytes must equal all declared attribute and motion packets')
 
@@ -383,12 +388,18 @@ def _summarize_storage(rows):
     result = dict(dynamic_frame_count=len(sizes), motion_bytes_total=motion,
                   birth_bytes_total=birth,
                   opacity_update_bytes_total=opacity,
+                  logscale_update_bytes_total=logscale,
                   manifest_index_measured=all('manifest_index_bytes' in row for row in dynamic),
                   encoded_bytes_scope='payload only: motion, birth and optional old-opacity packet files',
                   complete_update_bytes_scope='payload plus necessary per-frame manifest JSON file')
-    if any('feature_dc_update_bytes' in row for row in dynamic):
+    if (any('feature_dc_update_bytes' in row for row in dynamic) or
+            any('logscale_update_bytes' in row for row in dynamic) or
+            any('full_attribute_update_bytes' in row for row in dynamic)):
         result['feature_dc_update_bytes_total'] = sum(int(row.get('feature_dc_update_bytes', 0)) for row in dynamic)
-        result['encoded_bytes_scope'] = 'payload only: motion, births and optional opacity/DC packets'
+        result['encoded_bytes_scope'] = ('payload only: motion, births and optional '
+                                         'opacity/DC/log-scale/full-attribute packets')
+    if any('full_attribute_update_bytes' in row for row in dynamic):
+        result['full_attribute_update_bytes_total'] = full_attributes
     for name, value in payload_stats.items():
         result[f'encoded_bytes_{name}'] = value  # Preserve legacy payload names.
         result[f'payload_bytes_{name}'] = value
@@ -475,24 +486,43 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
     birth_name = f'birth_{frame:03d}.bin'
     opacity_name = f'opacity_{frame:03d}.bin'
     feature_name = f'shdc_{frame:03d}.bin'
+    logscale_name = f'logscale_{frame:03d}.bin'
+    full_name = f'fullattr_{frame:03d}.bin'
     if (manifest.get('motion') != motion_name or manifest.get('birth') not in (None, birth_name) or
             manifest.get('opacity_update') not in (None, opacity_name) or
-            manifest.get('feature_dc_update') not in (None, feature_name)):
+            manifest.get('feature_dc_update') not in (None, feature_name) or
+            manifest.get('logscale_update') not in (None, logscale_name) or
+            manifest.get('full_attribute_update') not in (None, full_name)):
         raise ValueError(f'Frame {frame} manifest packet names differ from expected files')
+    if (manifest.get('full_attribute_update') is not None and
+            (manifest.get('full_update') is not True or
+             manifest.get('full_attribute_update_timing') != 'after_regional_dc_before_births')):
+        raise ValueError('Full attribute packet must follow regional DC and precede births')
     motion_bytes = (stream / motion_name).stat().st_size
     birth_bytes = (stream / birth_name).stat().st_size if manifest['birth'] else 0
     opacity_bytes = (stream / opacity_name).stat().st_size if manifest.get('opacity_update') else 0
     feature_bytes = (stream / feature_name).stat().st_size if manifest.get('feature_dc_update') else 0
+    logscale_bytes = ((stream / logscale_name).stat().st_size
+                      if manifest.get('logscale_update') else 0)
+    full_bytes = ((stream / full_name).stat().st_size
+                  if manifest.get('full_attribute_update') else 0)
     if not manifest.get('opacity_update') and (stream / opacity_name).exists():
         raise ValueError('Opacity packet is not declared by frame manifest')
     if not manifest.get('feature_dc_update') and (stream / feature_name).exists():
         raise ValueError('DC feature packet is not declared by frame manifest')
+    if not manifest.get('logscale_update') and (stream / logscale_name).exists():
+        raise ValueError('Log-scale packet is not declared by frame manifest')
+    if not manifest.get('full_attribute_update') and (stream / full_name).exists():
+        raise ValueError('Full attribute packet is not declared by frame manifest')
     manifest_index_bytes = (stream / f'frame_{frame:03d}.json').stat().st_size
     saved_motion = summary['motion']['bytes']
     saved_birth = summary['birth']['archive_bytes'] if summary.get('birth') else 0
     saved_opacity = summary['opacity_update']['archive_bytes'] if summary.get('opacity_update') else 0
     saved_feature = summary['feature_dc_update']['archive_bytes'] if summary.get('feature_dc_update') else 0
-    payload = motion_bytes + birth_bytes + opacity_bytes + feature_bytes
+    saved_logscale = summary['logscale_update']['archive_bytes'] if summary.get('logscale_update') else 0
+    saved_full = (summary['full_attribute_update']['archive_bytes']
+                  if summary.get('full_attribute_update') else 0)
+    payload = motion_bytes + birth_bytes + opacity_bytes + feature_bytes + logscale_bytes + full_bytes
     complete = payload + manifest_index_bytes
     # Frame-plan summaries explicitly include the manifest in encoded_bytes.
     # Historical summaries use that name for payload only. Validate every
@@ -504,7 +534,8 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
         summary['complete_dynamic_update_bytes'] == complete and summary['encoded_bytes'] == complete
         if has_complete_accounting else summary['encoded_bytes'] == payload)
     if (saved_motion != motion_bytes or saved_birth != birth_bytes or saved_opacity != opacity_bytes or
-            saved_feature != feature_bytes or
+            saved_feature != feature_bytes or saved_logscale != logscale_bytes or
+            saved_full != full_bytes or
             not valid_accounting or
             summary['shared_reference_bytes'] != reference_bytes or
             summary['decoder_reference'] != relative_reference or
@@ -519,6 +550,10 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
         result['opacity_update_bytes'] = opacity_bytes
     if 'feature_dc_update' in manifest:
         result['feature_dc_update_bytes'] = feature_bytes
+    if 'logscale_update' in manifest:
+        result['logscale_update_bytes'] = logscale_bytes
+    if 'full_update' in manifest or 'full_attribute_update' in manifest:
+        result['full_attribute_update_bytes'] = full_bytes
     return result
 
 
@@ -669,7 +704,8 @@ def _run_sequence(args, config, run, device, first_gpu_check):
         scopes=dict(render_fps='Only synchronized full materialized render + clamp '
                     'after per-frame decode/upload; warmups, camera loading, quality '
                     'checks and decode are excluded.',
-                    decode='Motion/birth/optional-opacity file reads, CPU decode and manifest verification '
+                    decode='Manifest and all referenced motion/birth/optional attribute file reads, '
+                           'CPU decode and manifest verification '
                            'reported separately; initial reference load is one-time '
                            'and excluded.'),
         no_training_updates=True)
@@ -865,10 +901,12 @@ def main():
             materialized='CUDA-synchronized Module.forward plus clamp; includes Python '
                          'property activation and rasterizer setup, excludes decoding, transfer, '
                          'camera/GT loading and metrics.',
-            playback='Per dynamic frame: local motion/birth file reads, integrity-checked CPU '
+            playback='Per dynamic frame on the target camera: local manifest and all referenced '
+                     'motion/birth/opacity/DC/log-scale/full-attribute file reads, checked CPU '
                      'decode, raw GS host-to-GPU install, CUDA-synchronized Module.forward '
-                     'plus clamp. Excludes one-time reference, camera/GT loading, manifest '
-                     'verification and metrics. Files were preflight-read, so OS cache may help.'),
+                     'plus clamp. Excludes one-time reference, camera/GT loading, separate '
+                     'full-manifest digest verification and metrics. Files were preflight-read, '
+                     'so OS cache may help.'),
         no_training_updates=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2))

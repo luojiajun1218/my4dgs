@@ -1,0 +1,464 @@
+{
+  "sequence": {
+    "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_1028/coffee_cov100_30_20261028T201028/20261028T201030_98ee9d",
+    "dynamic_frames": 29,
+    "total_frames_including_initial": 30,
+    "first_frame_psnr": 29.44912338256836,
+    "dynamic_psnr": 29.467223726469896,
+    "all30_psnr": 29.466620381673177,
+    "dynamic_ssim": 0.9261789630199301,
+    "dynamic_lpips": 0.14820556291218462,
+    "mean_update_KB": 50.38113793103448,
+    "dynamic_total_bytes": 1461053,
+    "reference_bytes": 8838478,
+    "final_points": 98222,
+    "stage200_to_300_mean_gain_db": 0.0049702216838968215,
+    "stage200_to_300_worse_frames": 11,
+    "mean_births": 245.6206896551724,
+    "birth_initial_SSE_mean_change_pct": 5.153502909226616,
+    "cam13_birth_batches": 17,
+    "cam13_mean_selected_seed_share_when_in_batch": 0.632,
+    "cam13_batches": [
+      {
+        "frame": 1,
+        "step": 200,
+        "share": 0.766
+      },
+      {
+        "frame": 2,
+        "step": 250,
+        "share": 0.758
+      },
+      {
+        "frame": 6,
+        "step": 250,
+        "share": 0.638
+      },
+      {
+        "frame": 7,
+        "step": 200,
+        "share": 0.746
+      },
+      {
+        "frame": 8,
+        "step": 250,
+        "share": 0.486
+      },
+      {
+        "frame": 9,
+        "step": 200,
+        "share": 0.802
+      },
+      {
+        "frame": 11,
+        "step": 250,
+        "share": 0.61
+      },
+      {
+        "frame": 14,
+        "step": 200,
+        "share": 0.596
+      },
+      {
+        "frame": 15,
+        "step": 250,
+        "share": 0.696
+      },
+      {
+        "frame": 18,
+        "step": 250,
+        "share": 0.792
+      },
+      {
+        "frame": 21,
+        "step": 200,
+        "share": 0.636
+      },
+      {
+        "frame": 21,
+        "step": 250,
+        "share": 0.458
+      },
+      {
+        "frame": 23,
+        "step": 250,
+        "share": 0.648
+      },
+      {
+        "frame": 24,
+        "step": 250,
+        "share": 0.438
+      },
+      {
+        "frame": 28,
+        "step": 200,
+        "share": 0.48
+      },
+      {
+        "frame": 28,
+        "step": 250,
+        "share": 0.648
+      },
+      {
+        "frame": 29,
+        "step": 250,
+        "share": 0.546
+      }
+    ],
+    "independent_CPU_decode_verified_frames": 29,
+    "final_checkpoint_raw_bitwise_equal": true,
+    "decoded_sha256": "a054a08809cb74779a20244616a2e57f007ce77231a659e64841aff47393cc5a",
+    "raw_sha256": "60257a6645f1dd69059cb2a80078a711777b33c2b5b666c966946dda04dde30a",
+    "frame27_reanchor": [
+      {
+        "step": 200,
+        "error": null,
+        "bound": null
+      },
+      {
+        "step": 250,
+        "error": 6.103515625e-05,
+        "bound": 0.00010122698815373586
+      },
+      {
+        "step": 300,
+        "error": 3.24249267578125e-05,
+        "bound": 0.00011890237421519122
+      }
+    ]
+  },
+  "first_frame_comparisons": [
+    {
+      "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_20261028/coffee_f0_tunedcov100k_20261028/ckpt-0-25000.pth",
+      "model_index": 0,
+      "size": "half",
+      "point_count": 100000,
+      "step": 25000,
+      "aggregate": {
+        "train": {
+          "psnr": 31.396426930147058,
+          "global_psnr": 31.390203700346106,
+          "mse": 0.0008707076793892638,
+          "l1": 0.013338589273831424
+        },
+        "test": {
+          "psnr": 29.44912338256836,
+          "global_psnr": 29.438859939575195,
+          "mse": 0.0011379261268302798,
+          "l1": 0.02063804119825363
+        }
+      }
+    },
+    {
+      "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_20261028/coffee_f0_tunedcov100k_20261028/ckpt-0-25000.pth",
+      "model_index": 0,
+      "size": "full",
+      "point_count": 100000,
+      "step": 25000,
+      "aggregate": {
+        "train": {
+          "psnr": 32.12158988503849,
+          "global_psnr": 32.11273743124569,
+          "mse": 0.0007626319523243344,
+          "l1": 0.012321278398089549
+        },
+        "test": {
+          "psnr": 29.79134178161621,
+          "global_psnr": 29.779006958007812,
+          "mse": 0.0010522023076191545,
+          "l1": 0.020054534077644348
+        }
+      }
+    },
+    {
+      "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_20261028/coffee_f0_ft122k_n0_25k_resume22500_20261028/20261028T185222_d92b78/ckpt-0-25000.pth",
+      "model_index": 1,
+      "size": "half",
+      "point_count": 114962,
+      "step": 25000,
+      "aggregate": {
+        "train": {
+          "psnr": 31.39512892330394,
+          "global_psnr": 31.38884106804343,
+          "mse": 0.0008710191348868915,
+          "l1": 0.013331494074972236
+        },
+        "test": {
+          "psnr": 29.447250366210938,
+          "global_psnr": 29.437143325805664,
+          "mse": 0.001138375955633819,
+          "l1": 0.02062692679464817
+        }
+      }
+    },
+    {
+      "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_20261028/coffee_f0_ft122k_n0_25k_resume22500_20261028/20261028T185222_d92b78/ckpt-0-25000.pth",
+      "model_index": 1,
+      "size": "full",
+      "point_count": 114962,
+      "step": 25000,
+      "aggregate": {
+        "train": {
+          "psnr": 32.12883657567642,
+          "global_psnr": 32.119864744298596,
+          "mse": 0.0007618687505943372,
+          "l1": 0.012295400175978155
+        },
+        "test": {
+          "psnr": 29.793289184570312,
+          "global_psnr": 29.781108856201172,
+          "mse": 0.001051694038324058,
+          "l1": 0.02003675512969494
+        }
+      }
+    },
+    {
+      "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_20261027/coffee_frame0_180k_20261027/20261027T220156_71f7b3/ckpt-0-15000.pth",
+      "model_index": 2,
+      "size": "half",
+      "point_count": 178996,
+      "step": 15000,
+      "aggregate": {
+        "train": {
+          "psnr": 31.324416889863855,
+          "global_psnr": 31.316440357881433,
+          "mse": 0.0008563577584401868,
+          "l1": 0.013445697779602864
+        },
+        "test": {
+          "psnr": 29.428037643432617,
+          "global_psnr": 29.425216674804688,
+          "mse": 0.0011415067128837109,
+          "l1": 0.02068360336124897
+        }
+      }
+    },
+    {
+      "checkpoint": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/coffee_martini_20261027/coffee_frame0_180k_20261027/20261027T220156_71f7b3/ckpt-0-15000.pth",
+      "model_index": 2,
+      "size": "full",
+      "point_count": 178996,
+      "step": 15000,
+      "aggregate": {
+        "train": {
+          "psnr": 31.641809351303998,
+          "global_psnr": 31.632880266974954,
+          "mse": 0.0008015821615973597,
+          "l1": 0.012950721580316038
+        },
+        "test": {
+          "psnr": 29.584087371826172,
+          "global_psnr": 29.5810489654541,
+          "mse": 0.0011012735776603222,
+          "l1": 0.020414279773831367
+        }
+      }
+    }
+  ],
+  "sync_probes": [
+    {
+      "query_camera": "cam13",
+      "reference_camera": "cam12",
+      "query_frame": 0,
+      "best": {
+        "reference_frame": 45,
+        "delta": 45,
+        "matches": 64,
+        "median_sampson_px": 0.2347940635823205,
+        "inlier_fraction_1px": 0.84375
+      },
+      "zero_delta": {
+        "reference_frame": 0,
+        "delta": 0,
+        "matches": 26,
+        "median_sampson_px": 12.7292516176363,
+        "inlier_fraction_1px": 0.07692307692307693
+      }
+    },
+    {
+      "query_camera": "cam13",
+      "reference_camera": "cam12",
+      "query_frame": 60,
+      "best": {
+        "reference_frame": 105,
+        "delta": 45,
+        "matches": 48,
+        "median_sampson_px": 0.16813635456541282,
+        "inlier_fraction_1px": 0.8125
+      },
+      "zero_delta": {
+        "reference_frame": 60,
+        "delta": 0,
+        "matches": 50,
+        "median_sampson_px": 2.3066813651239597,
+        "inlier_fraction_1px": 0.08
+      }
+    },
+    {
+      "query_camera": "cam13",
+      "reference_camera": "cam12",
+      "query_frame": 120,
+      "best": {
+        "reference_frame": 165,
+        "delta": 45,
+        "matches": 60,
+        "median_sampson_px": 0.2303336238823811,
+        "inlier_fraction_1px": 0.85
+      },
+      "zero_delta": {
+        "reference_frame": 120,
+        "delta": 0,
+        "matches": 70,
+        "median_sampson_px": 2.5622632762868647,
+        "inlier_fraction_1px": 0.17142857142857143
+      }
+    },
+    {
+      "query_camera": "cam13",
+      "reference_camera": "cam14",
+      "query_frame": 0,
+      "best": {
+        "reference_frame": 45,
+        "delta": 45,
+        "matches": 136,
+        "median_sampson_px": 0.173155171826904,
+        "inlier_fraction_1px": 0.9558823529411765
+      },
+      "zero_delta": {
+        "reference_frame": 0,
+        "delta": 0,
+        "matches": 38,
+        "median_sampson_px": 19.052663378839004,
+        "inlier_fraction_1px": 0.2631578947368421
+      }
+    },
+    {
+      "query_camera": "cam13",
+      "reference_camera": "cam14",
+      "query_frame": 60,
+      "best": {
+        "reference_frame": 105,
+        "delta": 45,
+        "matches": 127,
+        "median_sampson_px": 0.18080078888120776,
+        "inlier_fraction_1px": 0.9133858267716536
+      },
+      "zero_delta": {
+        "reference_frame": 60,
+        "delta": 0,
+        "matches": 114,
+        "median_sampson_px": 3.1126279985321843,
+        "inlier_fraction_1px": 0.18421052631578946
+      }
+    },
+    {
+      "query_camera": "cam13",
+      "reference_camera": "cam14",
+      "query_frame": 120,
+      "best": {
+        "reference_frame": 165,
+        "delta": 45,
+        "matches": 146,
+        "median_sampson_px": 0.1870248707382537,
+        "inlier_fraction_1px": 0.8972602739726028
+      },
+      "zero_delta": {
+        "reference_frame": 120,
+        "delta": 0,
+        "matches": 113,
+        "median_sampson_px": 2.2250282350053183,
+        "inlier_fraction_1px": 0.3274336283185841
+      }
+    }
+  ],
+  "source_archives": {
+    "archives": [
+      {
+        "path": "/home/gamer-02/Documents/DeepLearning/data/n3dv/archives/coffee_martini.zip",
+        "archive_sha256": "cbc31291ce143e6f31a00f23a049663a61cc8793af8dab259dbc6e338a676816",
+        "cam13_member_sha256": "02e1d56a8af8caf1141a614e6bc5bc8b6fe278cd7fc07730d2f65363a9761314"
+      },
+      {
+        "path": "/home/gamer-02/Downloads/coffee_martini.zip",
+        "archive_sha256": "cbc31291ce143e6f31a00f23a049663a61cc8793af8dab259dbc6e338a676816",
+        "cam13_member_sha256": "02e1d56a8af8caf1141a614e6bc5bc8b6fe278cd7fc07730d2f65363a9761314"
+      }
+    ],
+    "online_official_zip_verified": false,
+    "local_cam13_sha256": "02e1d56a8af8caf1141a614e6bc5bc8b6fe278cd7fc07730d2f65363a9761314",
+    "downloaded_archives_identical": true,
+    "archive_cam13_members_equal_local": true
+  },
+  "raw_frame_checks": [
+    {
+      "camera": "cam13",
+      "frame": 0,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam13",
+      "frame": 60,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam13",
+      "frame": 120,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam12",
+      "frame": 0,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam12",
+      "frame": 45,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam12",
+      "frame": 105,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam12",
+      "frame": 165,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam14",
+      "frame": 0,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam14",
+      "frame": 45,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam14",
+      "frame": 105,
+      "video_pixels_match_source_png": true
+    },
+    {
+      "camera": "cam14",
+      "frame": 165,
+      "video_pixels_match_source_png": true
+    }
+  ],
+  "temporal_error_diagnostic": {
+    "frames": 29,
+    "formula": "RGB8, whole-image global MSE; temporal variance is a diagnostic proxy, not semantic segmentation",
+    "lowest_variance_half_SSE_fraction": 0.3271883960129316,
+    "highest_variance_fifth_SSE_fraction": 0.38740454225284976,
+    "time_mean_error_energy_fraction": 0.9060237167724441,
+    "dynamic_vs_frozen_initial_SSE_reduction": 0.6249212258562615,
+    "stable_half_dynamic_vs_frozen_initial_SSE_reduction": -0.055576500277716656
+  },
+  "source_file_sha256": {
+    "pipeline/frame_plan.py": "13a6ccbdc85adb8d4e4fe8a368a106482dcf702f5916d121009cfb3dcce24fb9",
+    "pipeline/model/birth_quantization.py": "b175532bb69df56a4baed9673416429d0f78bdf774d6a98156736e4d984acd91",
+    "output/coffee_martini_1028/coffee_cov100_30_20261028T201028/20261028T201030_98ee9d/config.yaml": "01606197b467d87eda92165899d5c8504bed940efaa285b6b4312005a893b942"
+  },
+  "scope": "30 total frames; diagnostics do not establish full-300-frame performance or the PSNR recovered by correcting timing"
+}

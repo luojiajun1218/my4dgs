@@ -23,6 +23,7 @@ class SpatialGateConfig:
     training_schedule: str = 'staged'
     min_region_size: int = 16
     learning_rate: float = 0.15
+    region_selection_rate_gradient_scale: float = 1.0
     initial_logit: float = -0.2
     start_step: int = 20
     gate_start_step: int = 40
@@ -160,6 +161,10 @@ class SpatialGateConfig:
             raise ValueError('learn_region_motion must be boolean')
         if not isinstance(self.joint_image_gradients, bool):
             raise ValueError('joint_image_gradients must be boolean')
+        scale = self.region_selection_rate_gradient_scale
+        if (isinstance(scale, bool) or not isinstance(scale, (float, int)) or
+                not math.isfinite(scale) or not 0 < scale <= 1):
+            raise ValueError('Region-selection rate gradient scale must be in (0, 1]')
         if self.joint_image_gradients and (self.training_schedule != 'joint' or not self.learn_region_motion):
             raise ValueError('Joint image gradients require joint training and learn_region_motion')
         if self.image_fit_during_gate is not True:

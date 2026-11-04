@@ -28,6 +28,48 @@ def _backend():
         extra_cflags=['-O3'], extra_cuda_cflags=['-O3'], verbose=False)
 
 
+@functools.lru_cache(maxsize=1)
+def _regional_error_backend():
+    """A separate extension: the historical observed rasterizer is untouched."""
+    from torch.utils.cpp_extension import load
+    root = Path(__file__).resolve().parents[2] / 'extensions' / 'regional_error_stats'
+    return load(name='my4dgs_regional_error_stats',
+        sources=[str(root / 'stats.cpp'), str(root / 'stats.cu')],
+        extra_cflags=['-O3'], extra_cuda_cflags=['-O3'], verbose=False)
+
+
+class RegionalErrorStats:
+    """One forward's saved buffers, consumed once before its backward pass.
+
+    ``accumulate`` returns one numerator and denominator per input Gaussian;
+    callers perform region ownership aggregation independently for each view.
+    """
+
+    def __init__(self):
+        self._state = None
+        self._captured = False
+
+    def _capture(self, geom, binning, image, point_count, instance_count, height, width):
+        if self._captured:
+            raise RuntimeError('Regional error statistics already contain a forward')
+        self._state = (geom, binning, image, point_count, instance_count, height, width)
+        self._captured = True
+
+    @torch.no_grad()
+    def accumulate(self, error_map):
+        if self._state is None:
+            raise RuntimeError('Regional error statistics require an unconsumed forward')
+        geom, binning, image, points, instances, height, width = self._state
+        if not isinstance(error_map, torch.Tensor) or error_map.shape != (height, width):
+            raise ValueError('Regional error map must have shape [height, width]')
+        if error_map.dtype != torch.float32 or error_map.device != geom.device:
+            raise ValueError('Regional error map must be float32 on the forward device')
+        num, den = _regional_error_backend().accumulate(
+            geom, binning, image, error_map.detach().contiguous(), points, instances)
+        self._state = None
+        return num.detach(), den.detach()
+
+
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
     return tuple(copied_tensors)
@@ -42,8 +84,9 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
+    stats_sink=None,
 ):
-    return _RasterizeGaussians.apply(
+    args = (
         means3D,
         means2D,
         sh,
@@ -54,6 +97,10 @@ def rasterize_gaussians(
         cov3Ds_precomp,
         raster_settings,
     )
+    # Keep the old nine-input autograd call unchanged when statistics are off.
+    if stats_sink is None:
+        return _RasterizeGaussians.apply(*args)
+    return _RasterizeGaussians.apply(*args, stats_sink)
 
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
@@ -68,6 +115,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         cov3Ds_precomp,
         raster_settings,
+        stats_sink=None,
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -104,6 +152,11 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raise ex
         else:
             num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend().rasterize_gaussians(*args)
+
+        ctx.has_stats_sink = stats_sink is not None
+        if stats_sink is not None:
+            stats_sink._capture(geomBuffer, binningBuffer, imgBuffer, means3D.shape[0],
+                num_rendered, raster_settings.image_height, raster_settings.image_width)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
@@ -167,7 +220,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             None,
         )
 
-        return grads
+        return grads + (None,) if ctx.has_stats_sink else grads
 
 class GaussianRasterizationSettings(NamedTuple):
     image_height: int
@@ -199,7 +252,7 @@ class GaussianRasterizer(nn.Module):
 
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, stats_sink=None):
 
         raster_settings = self.raster_settings
 
@@ -232,4 +285,5 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings,
+            stats_sink,
         )

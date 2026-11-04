@@ -1,0 +1,62 @@
+{
+  "schema": "motion_sharing_report_v1",
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/flame_steak_1028/fs_cov150_300/20261028T133500_9a96a2",
+  "frames": 299,
+  "example_frame": 149,
+  "actual_motion_mean_KB": 38.52011371237458,
+  "matched_no_share_motion_mean_KB": 139.11615050167222,
+  "motion_byte_reduction": 0.723108254696053,
+  "actual_motion_total_MB": 11.517514,
+  "matched_no_share_motion_total_MB": 41.595729,
+  "complete_dynamic_mean_KB": 48.9624414715719,
+  "total_point_events": 42921634,
+  "total_nonzero_fraction": 0.9289034755759764,
+  "residual_nonzero_fraction": 0.12644059636685778,
+  "residual_row_reduction": 0.8638818782667844,
+  "residual_L1_reduction": 0.9164048013955408,
+  "residual_L2_reduction": 0.90758023331168,
+  "nearest_difference_bins": 5.847134158361869,
+  "random_difference_bins": 44.60488321435601,
+  "nearest_difference_reduction": 0.8689126898895236,
+  "all299_state_hashes_verified": true,
+  "all_integer_motion_fields_exact": true,
+  "maximum_alternative_float32_difference_bins": 0.009790861710971098,
+  "locality_scope": "Same anchors sampled from top25% displacement magnitude per frame, nearest nonself versus random nonself partner. Fitted model motion, not independent motion ground truth.",
+  "coding_scope": "Each no-sharing packet uses its original previous reference; regional symbols zero, minimal valid gates, total point symbols on identical grid. Original births/deletions/pose tail preserved, same production auto compressor. Complete motion packet bytes include structure and newborn poses. Not a retraining ablation or a new sequential stream. Float32 addition reorder differences separately audited.",
+  "source_script_sha": "27cd1057fcf03df9277a93cb007a57644ed4155fb8ca9e0b74194de3ab495ccb",
+  "motion_display_max_bins": 42.242750446986804,
+  "region_overlay_scope": "Actual final encoded owner IDs; stable per-node colours. Dashed outlines are convex envelopes of depth-filtered projected member centres within the crop, not image segmentation boundaries. Three most populous visible regions labelled per crop. Arrows use one actual member per labelled region, project its shared 3-D translation at the previous position, then multiply screen displacement by 8.",
+  "scene_projection_scope": "Make scene-based, read-only diagnostics from a certified fitted GS stream.\n\nThese figures analyse a frozen fitted motion field. The point overlays are\ndepth-filtered projections of Gaussian centres, not pixel optical flow or an\nocclusion-exact GS render. No model is trained or changed by this script.\n",
+  "scene_sources": [
+    {
+      "frame": 29,
+      "checkpoint_sha": "abb59d71fb538e8fb42e7e89c25d7dea2fb9f0b860cf51cc109e4cd0f5537aca",
+      "state_sha": "e3240759a16951e8b2cf5c8376de6a067878aa41f8d22e6e1075d8eac9e8571a",
+      "raw_sha": "66eea439d3c732d6aa4cfd5f14ca219c50b8e12fab7d03a3e9870e3ea1c3085e",
+      "image_sha": "b4cb58046e1420279d6321f0bdd6be9eba229ed9e4dbc9458315eac5f5dd79ae",
+      "reconstruction_sha": "ca0cc98bd4760a80470d5cab8a7189b6d5fe4c7175532b3092738bb096c985d3",
+      "shown_old_centres": 59239,
+      "shown_topquartile_anchors": 21250
+    },
+    {
+      "frame": 149,
+      "checkpoint_sha": "ffd1ff03b5888f3936236fe424590cd3051f6028e13b723fa9fd70c5857528b7",
+      "state_sha": "1f0265a128922a0a4d676189a918e64ea49548dd13a6a668a3c98be34fe5f3e0",
+      "raw_sha": "a38825f69656aab0c58171018815bd45ef5c27217ddc74b0ac94e4a94c5bf5d6",
+      "image_sha": "394da4fdc5c1fc9b74d014a344b6d4f13ad084b7d5778c7dbc677ce262e1bda9",
+      "reconstruction_sha": "2deaa126c9609e115bc06a7fb9c656cbab04389bbd4e67d642b462049254cde0",
+      "shown_old_centres": 57588,
+      "shown_topquartile_anchors": 14354
+    },
+    {
+      "frame": 269,
+      "checkpoint_sha": "c29db7c1444eda28544b6ba9e5809a906bf90d858c20a02d019d12e658c81a17",
+      "state_sha": "bf4205e5f83db4fad4618647696ebafda93a81b4137aa6b2d4fc0edadff2033c",
+      "raw_sha": "ead17732135690b4258a412e870bdc432de71f5eda1f9856eaa30e764c00a039",
+      "image_sha": "b9392f8636f00f9d3e8167e1bd8906e6bd0a97d053312cb47d7a72ea48d6039e",
+      "reconstruction_sha": "53a42d1d9a7e3a05adba63d6888b8af77eba6c95c1036ee9aa5be270b4651365",
+      "shown_old_centres": 57345,
+      "shown_topquartile_anchors": 16132
+    }
+  ]
+}

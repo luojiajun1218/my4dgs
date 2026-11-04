@@ -62,6 +62,7 @@ class StreamStep:
     stored_bytes: int
     feature_dc: bytes | None = None
     inherit_birth_rotation: bool = False
+    logscale_update: bytes | None = None
 
 
 def _birth_attributes(packet, old_count, count, rest):
@@ -162,6 +163,12 @@ def read_stream_step(directory, frame, *, region_count, depth, rest, max_points=
                           opacity_update=f'opacity_{frame:03d}.bin')
     if manifest.get('frame') != frame:
         raise ValueError('Unsupported frame manifest')
+    # This specialized fast player cannot apply general per-GS rotation or
+    # full appearance packets. Call the complete CPU replay path instead.
+    if manifest.get('full_update') or manifest.get('full_attribute_update') is not None:
+        raise ValueError('Full-update frames require the complete CPU decoder')
+    if (directory / f'fullattr_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected full attribute packet absent from frame manifest')
     for key, name in expected_names.items():
         if manifest.get(key) not in (name,None) or (key == 'motion' and manifest.get(key) != name):
             raise ValueError('Unexpected stream filename')
@@ -176,9 +183,21 @@ def read_stream_step(directory, frame, *, region_count, depth, rest, max_points=
             raise ValueError('Unknown shared color packet')
     elif (directory/f'shdc_{frame:03d}.bin').exists():
         raise ValueError('Unexpected feature DC packet')
+    logscale = manifest.get('logscale_update')
+    logscale_packet = None
+    if logscale is not None:
+        if (logscale != f'logscale_{frame:03d}.bin' or
+                manifest.get('logscale_update_timing', 'before_births') != 'before_births'):
+            raise ValueError('Log-scale packet must precede newborn attributes')
+        logscale_packet = (directory / logscale).read_bytes()
+        if logscale_packet[:4] not in (b'SLS1', b'SLZ1', b'SLA1', b'ZLA1'):
+            raise ValueError('Unknown log-scale packet')
+    elif (directory/f'logscale_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected log-scale packet')
     packet = (directory/expected_names['motion']).read_bytes()
     stored = len(manifest_bytes)+len(packet)
     if feature_packet is not None:stored += len(feature_packet)
+    if logscale_packet is not None:stored += len(logscale_packet)
     sections = {}
     raw = motion.uncompressed_motion_packet(packet,sparse_sections=sections)
     reader = integer._Reader(raw[:-motion.CHECKSUM_BYTES])
@@ -271,4 +290,4 @@ def read_stream_step(directory, frame, *, region_count, depth, rest, max_points=
     return StreamStep(frame,prior,bytes.fromhex(manifest['decoded_state_sha256']),manifest['raw_state_sha256'],
         count+len(deleted),count,births,deleted,opened,regional,magic in (b'SPG6',b'SPG8'),gs_rows,gs_values,
         extent*region_step,extent*gs_step,sources,pose_symbols,pose_steps,attribute,update,
-        timing == 'before_births',stored,feature_packet,inherit_rotation)
+        timing == 'before_births',stored,feature_packet,inherit_rotation,logscale_packet)

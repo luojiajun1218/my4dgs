@@ -1,0 +1,65 @@
+{
+  "run": "/home/gamer-02/Documents/DeepLearning/my4dgs/output/flame_steak_1028/fs_cov150_300/20261028T133500_9a96a2",
+  "frame": 149,
+  "region_count": 251,
+  "all_face_adjacent_pairs": 925,
+  "supported_position_routing_verified": true,
+  "actual_state_sha": "1f0265a128922a0a4d676189a918e64ea49548dd13a6a668a3c98be34fe5f3e0",
+  "raw_sha": "a38825f69656aab0c58171018815bd45ef5c27217ddc74b0ac94e4a94c5bf5d6",
+  "region_mean_full_motion_statistics": {
+    "moving_region_count": 63,
+    "moving_threshold_bins": 32.12515002973524,
+    "adjacent_moving_pairs": 88,
+    "adjacent_mean_angle_deg": 26.279450156977386,
+    "random_expected_mean_angle_deg": 63.3286534969308,
+    "adjacent_mean_vector_difference_bins": 40.778094407279035,
+    "random_expected_mean_vector_difference_bins": 88.97066689190338,
+    "random_scope": "Exact uniform nonself-partner expectation within the same top-quartile moving-region pool; identical adjacency-degree anchor weights."
+  },
+  "decoded_shared_motion_statistics": {
+    "moving_region_count": 63,
+    "moving_threshold_bins": 32.210200995715205,
+    "adjacent_moving_pairs": 91,
+    "adjacent_mean_angle_deg": 25.73296028454297,
+    "random_expected_mean_angle_deg": 63.04549778522506,
+    "adjacent_mean_vector_difference_bins": 39.94802183395922,
+    "random_expected_mean_vector_difference_bins": 88.01675732684245,
+    "random_scope": "Exact uniform nonself-partner expectation within the same top-quartile moving-region pool; identical adjacency-degree anchor weights."
+  },
+  "example": {
+    "nodes": [
+      1970,
+      1974,
+      1972
+    ],
+    "mean_motion_vectors_bins": [
+      [
+        63.31858974358974,
+        37.989102564102566,
+        230.91794871794872
+      ],
+      [
+        49.70193548387097,
+        26.374193548387098,
+        190.93032258064517
+      ],
+      [
+        59.826395039858284,
+        45.22143489813995,
+        248.0132860938884
+      ]
+    ],
+    "AB_angle_deg": 1.5821165027493642,
+    "AC_angle_deg": 2.031463814923535,
+    "common_reference_world": [
+      -1.6186556816101074,
+      4.042868137359619,
+      11.587973594665527
+    ],
+    "selection": "Fixed torch-hand image window, maximum visible depth4 anchor with two visible face-adjacent depth4 neighbours; neighbours ranked by visible area. Motion values not used to select.",
+    "arrow_scope": "Common camera reference for directions; lengths proportional to 3-D mean displacement, at 0.3 native pixels per quantization bin. Region colours show dominant native compositing contribution, not semantic masks."
+  },
+  "scope": "Analyse different face-adjacent 3-D regions in an existing fitted frame.\n\nNeighbourhood is derived from the saved median split planes, not screen\nproximity or motion similarity. Motion is the mean decoded full GS translation\nwithin each region. This is fitted-field evidence, not independent motion GT.\n",
+  "adjacency": "Candidate boxes derived from the saved median split planes; shared face with positive overlap on the other two axes. Full GS membership is validated for points inside the saved routing support ball; far-outlier nearest-leaf assignments are not geometric box membership.",
+  "caveat": "The fitted model already has a spatial-sharing prior. These regional correlations do not independently validate real-world motion, gate optimality or SOTA."
+}

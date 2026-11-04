@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 from .birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES
 from .early_replacement_model import _logits, _Exact
-from .conservative_family import _clone_tree
+from .birth_helpers import _clone_tree
 
 
 class FramePlanBirthModel:

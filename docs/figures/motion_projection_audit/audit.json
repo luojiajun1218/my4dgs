@@ -1,0 +1,22 @@
+{
+  "sample_count": 1042,
+  "actual_projected_motion_below_one_pixel": 998,
+  "actual_projected_full_motion_median_px": 0.12407268408111082,
+  "actual_projected_full_motion_max_px": 3.8742322804108733,
+  "previous_displayed_full_motion_max_px": 93.87843202780924,
+  "previous_varying_amplification_median": 19.43695006192816,
+  "old_drawing_issue": "2-D projected direction with 3-D-norm length; not screen displacement. This creates point-dependent enlargement relative to actual screen motion.",
+  "source_scope": "Exact decoded fitted GS updates, not ground-truth object motion. Centre visibility is approximate. Full panel is not a retrained no-sharing ablation.",
+  "checks": {
+    "gain1": {
+      "same_GS_and_raw_vectors_as_previous": true,
+      "maximum_display_vector_error": 0.0,
+      "state_sha": "1f0265a128922a0a4d676189a918e64ea49548dd13a6a668a3c98be34fe5f3e0"
+    },
+    "gain10": {
+      "same_GS_and_raw_vectors_as_previous": true,
+      "maximum_display_vector_error": 0.0,
+      "state_sha": "1f0265a128922a0a4d676189a918e64ea49548dd13a6a668a3c98be34fe5f3e0"
+    }
+  }
+}

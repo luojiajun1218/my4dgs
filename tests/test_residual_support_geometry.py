@@ -1,10 +1,15 @@
-"""Exact image moments and coordinate/covariance checks without a renderer."""
+"""CPU checks for support responsibility, image moments and geometry."""
 import math
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
+
 import torch
-from pipeline.model.support_reincarnation_proposal import _native_responsibility,_rotation
-from pipeline.model.residual_support_geometry import residual_support_seed,residual_support_opacity,support_distribution,_matrix_quaternion
+from torch import nn
+
+from pipeline.model.birth_quantization import RAW_ATTRIBUTES, RAW_FIELDS, model_raw
+from pipeline.model.gaussian import GaussianModel
+from pipeline.model.residual_support_geometry import residual_support_seed, residual_support_opacity, support_distribution, _matrix_quaternion
+from pipeline.model.support_reincarnation_proposal import _native_responsibility, _rotation, score_support_responsibility
 from pipeline.module import BirthConfig
 
 
@@ -146,4 +151,85 @@ class SupportGeometryTests(unittest.TestCase):
             BirthConfig(residual_support_init=True).validate(200)
 
 
-if __name__=='__main__':unittest.main()
+class LinearNativeContractRenderer:
+    """CPU renderer with the exact colour Jacobian sum_i Talpha_i*c_i."""
+    def __init__(self,weights):
+        self.weights=weights;self.gaussians=object();self.collect_contributions=False
+        self.zero_forward_values=[];self.fail_zero=False
+
+    def __call__(self,view,background,override_color=None):
+        if override_color is None:
+            image=view.rendered
+        else:
+            if self.fail_zero:raise RuntimeError('intentional zero render failure')
+            self.assert_zero=bool(override_color.detach().eq(0).all())
+            image=torch.einsum('nhw,nc->chw',self.weights,override_color)
+            self.zero_forward_values.append(float(image.detach().abs().max()))
+        result={'render':image}
+        if self.collect_contributions:
+            result['motion_contribution_filter']=self.weights.sum((1,2))>0
+        return result
+
+
+def support_fixture(constant=False):
+    model=GaussianModel(3);model.active_sh_degree=3
+    raw=dict(xyz=torch.tensor([[0.,0.,3.]]).repeat(4,1),
+        rotation=torch.tensor([[2.,.1,-.2,.3]]).repeat(4,1),
+        logscale=torch.tensor([[4.,2.,.5],[.1,.08,.001],[.5,.3,.01],[.6,.4,.002]]).log(),
+        opacity=torch.tensor([[.7],[-100.],[.2],[.3]]),
+        sh_dc=torch.arange(12.).reshape(4,1,3)/10,
+        sh_rest=torch.arange(4*15*3.).reshape(4,15,3)/100)
+    for name,attr in zip(RAW_FIELDS,RAW_ATTRIBUTES):setattr(model,attr,nn.Parameter(raw[name].clone()))
+    weights=torch.tensor([.3,0.,.1,.2])[:,None,None].expand(4,8,8).clone()
+    renderer=LinearNativeContractRenderer(weights)
+    xx=torch.arange(8).float()[None].expand(8,-1)
+    residual=torch.full((8,8),.1) if constant else (xx-3.5)*.05
+    gt=torch.full((3,8,8),.4)
+    views=[SimpleNamespace(path=f'cam{i:02d}.png',image=gt.clone(),rendered=gt+residual,
+        fovx=2*math.atan(.5),fovy=2*math.atan(.5),world_view_transform=torch.eye(4)) for i in (1,2,3)]
+    module=SimpleNamespace(gaussians=model,renderer=renderer,background=torch.zeros(3))
+    return module,views,raw,weights
+
+
+
+class SupportResponsibilityTests(unittest.TestCase):
+    def test_zero_forward_retains_true_positive_SSE_colour_gradient(self):
+        module,views,_,weights=support_fixture()
+        scores,observed,bits,report=score_support_responsibility(module,views)
+        error=sum((v.rendered-v.image).square().sum(0) for v in views)
+        expected=(weights*error).sum((1,2))
+        torch.testing.assert_close(scores,expected,rtol=1e-6,atol=1e-8)
+        self.assertEqual(module.renderer.zero_forward_values,[0.,0.,0.])
+        torch.testing.assert_close(observed,torch.tensor([7,0,7,7]))
+        torch.testing.assert_close(bits,torch.tensor([7,0,7,7]))
+        self.assertAlmostEqual(report['native_responsibility_fraction_of_total_SSE'],.6,places=6)
+        for attr in RAW_ATTRIBUTES:self.assertIsNone(getattr(module.gaussians,attr).grad)
+
+    def test_opposite_residual_signs_cancel_DC_but_not_responsibility(self):
+        module,views,_,weights=support_fixture()
+        signed=(weights[0]*(views[0].rendered-views[0].image)).sum()
+        self.assertLess(abs(float(signed)),1e-6)
+        scores,_,_,_=score_support_responsibility(module,views)
+        self.assertGreater(float(scores[0]),0)
+
+    def test_renderer_flags_and_model_restore_even_on_exception(self):
+        module,views,_,_=support_fixture();original=module.renderer.gaussians
+        module.renderer.collect_contributions=True
+        score_support_responsibility(module,views)
+        self.assertIs(module.renderer.gaussians,original)
+        self.assertTrue(module.renderer.collect_contributions)
+        module.renderer.fail_zero=True
+        with self.assertRaisesRegex(RuntimeError,'intentional zero'):
+            score_support_responsibility(module,views)
+        self.assertIs(module.renderer.gaussians,original)
+        self.assertTrue(module.renderer.collect_contributions)
+
+    def test_test_camera_and_nonmaterialized_overrides_are_rejected(self):
+        module,views,_,_=support_fixture();views[0].path='cam00.png'
+        with self.assertRaisesRegex(ValueError,'external test'):score_support_responsibility(module,views)
+        views[0].path='cam01.png';module.gaussians.rigid_alpha=torch.ones(4,1)
+        with self.assertRaisesRegex(ValueError,'materialized'):score_support_responsibility(module,views)
+
+
+if __name__ == "__main__":
+    unittest.main()

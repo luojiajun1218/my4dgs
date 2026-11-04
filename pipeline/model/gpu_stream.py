@@ -6,6 +6,7 @@ and raw-state hashes are checked by the separate independent verification pass.
 No decoded future frames are cached.
 """
 import hashlib
+import math
 import struct
 
 import numpy as np
@@ -56,8 +57,10 @@ class GPUStream:
         self.depth=reference_state.spatial_paths.shape[1]
         self.regions=len(self.parents)
         self.rest=raw['sh_rest'].shape[1]
-        if self.rest not in (0,3):
-            raise ValueError('GPU stream currently supports SH0/SH1')
+        side=math.isqrt(1+self.rest)
+        self.sh_degree=side-1
+        if side*side != 1+self.rest or not 0 <= self.sh_degree <= 3:
+            raise ValueError('GPU stream requires a complete SH0-SH3 coefficient set')
         count=len(reference_state.xyz)
         shapes=dict(xyz=(count,3),rotation=(count,4),logscale=(count,3),opacity=(count,1),
                     sh_dc=(count,1,3),sh_rest=(count,self.rest,3))
@@ -204,6 +207,17 @@ class GPUStream:
             self.host['sh_dc'][old_ids]=features
             combined=np.concatenate((features,self.host['sh_rest'][old_ids]),axis=1)
             self.attribute_bank['features'].index_copy_(0,self._upload(old_ids),self._upload(combined))
+        if step.logscale_update is not None:
+            from .sparse_logscale import decode_logscale_delta
+            reference=torch.from_numpy(self.host['logscale'][old_ids].copy())
+            decoded_scale=decode_logscale_delta(step.logscale_update,reference,
+                allowed_rows=torch.from_numpy(step.gs_rows.copy()),frame_index=step.frame)
+            values=decoded_scale.logscale.numpy()
+            self.host['logscale'][old_ids]=values
+            changed_ids=old_ids[decoded_scale.rows.numpy()]
+            changed=values[decoded_scale.rows.numpy()]
+            self.attribute_bank['scaling'].index_copy_(0,self._upload(changed_ids),
+                self._upload(changed).exp())
         birth_ids=np.arange(self.next_uid,self.next_uid+step.birth_count,dtype=np.int64)
         if step.birth_count:
             source_ids=old_ids[step.sources]
@@ -247,7 +261,7 @@ class GPUStream:
         values=dict(xyz=slot['xyz'][:n])
         for name,bank in self.attribute_bank.items():
             values[name]=torch.index_select(bank,0,ids,out=slot[name][:n])
-        return StreamView(values,1 if self.rest else 0)
+        return StreamView(values,self.sh_degree)
 
     @torch.no_grad()
     def capture_raw(self):
