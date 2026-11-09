@@ -1,16 +1,20 @@
 """Spatial gate motion, GS residuals, and quantized newborn Gaussians."""
 
 from dataclasses import asdict, dataclass, field, replace
+from collections import OrderedDict
 import json
 import math
 from pathlib import Path
 from typing import Optional
+import weakref
 
 import torch
-from torch.nn.functional import interpolate, l1_loss
+from torch.nn.functional import conv2d, interpolate, l1_loss
 from torchvision.utils import save_image
 
-from libgs.metric import lpips, psnr, ssim
+from libgs.metric import psnr, ssim
+from libgs.metric.lpips import LPIPS
+from libgs.metric.ssim import create_window
 from libgs.model.merged_gaussian import MergedGaussianModel
 from libgs.pipeline import Module as BaseModule
 from libgs.pipeline import ModuleConfig as BaseModuleConfig
@@ -26,15 +30,16 @@ from .model.rigid_residual_tree import (RigidTreeConfig,
     saved_config_with_default_motion_lr)
 from .model.contribution_renderer import ContributionRenderer
 from .model.full_attribute_update import (FullUpdateConfig, FullAttributeUpdate,
-    FullUpdateSpatialGatedMotion, FIELDS as FULL_ATTRIBUTE_FIELDS)
+    FullUpdateSpatialGatedMotion, normalize_full_update_config, FIELDS as FULL_ATTRIBUTE_FIELDS)
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
-from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpdate
+from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpdate, RegionalFeatureDCUpdate
+from .model.regional_logscale import RegionalLogScaleConfig, RegionalLogScaleUpdate
 from .model.sparse_logscale import (LogScaleUpdateConfig,
     MotionSupportLogScaleUpdate)
 from .model.residual_birth import ResidualBirthConfig, BirthTransaction, RawView
 from .early_replacement import EarlyReplacementController
 from .frame_plan import (FramePlanController, fitting_old_motion, regional_attribute_repair_active,
-                         effective_final_joint_refine_steps)
+                         effective_final_joint_refine_steps, regional_point_budget, regional_probe_steps)
 
 
 BIRTH_ALLOCATION = 'clone_small_v1'
@@ -47,6 +52,11 @@ def uses_residual_birth(config):
 def uses_early_replacement(config):
     return (uses_residual_birth(config) and
             getattr(config.birth, 'radiance_mode', 'free') == 'adaptive_residual_birth')
+
+
+def _full_attribute_learning_rates(args):
+    return dict(logscale=args.scaling_lr, sh_dc=args.feature_lr,
+                sh_rest=args.feature_lr / 20.)
 
 
 def birth_allocation(config):
@@ -271,7 +281,9 @@ class BirthConfig:
 @dataclass
 class ModuleConfig(BaseModuleConfig):
     sh_degree: int = 1
+    ablation_motion_only: bool = False
     effective_motion_observations: bool = False
+    stable_tail_covariance_backward: bool = False
     motion_coarse_to_fine: bool = False
     initial_opacity_threshold: float = 0.0
     lambda_dssim: float = 0.2
@@ -286,10 +298,68 @@ class ModuleConfig(BaseModuleConfig):
     opacity_update: OpacityUpdateConfig = field(default_factory=OpacityUpdateConfig)
     feature_dc_update: FeatureDCUpdateConfig = field(default_factory=FeatureDCUpdateConfig)
     logscale_update: LogScaleUpdateConfig = field(default_factory=LogScaleUpdateConfig)
+    regional_logscale: RegionalLogScaleConfig = field(default_factory=RegionalLogScaleConfig)
     full_update: FullUpdateConfig = field(default_factory=FullUpdateConfig)
 
 
 MOTION_IMAGE_SCHEDULE = 'bootstrap_aligned_v1'
+
+
+def validate_early_point_checkpoint(schedule, state, global_step):
+    if (schedule != 'standard' and state.get('prepared') and
+            not state.get('finalized') and int(global_step) >= 100):
+        raise ValueError('Early-point mid-frame checkpoints at step100 or later are not resumable')
+
+
+def early_schedule_resume_allowed(saved, requested, state, verified_prefix):
+    """Permit only standard-to-early scheduling at a verified finalized prefix."""
+    if not (verified_prefix is not None and isinstance(saved, dict) and
+            isinstance(saved.get('full_update'), dict) and
+            isinstance(requested.get('full_update'), dict)):
+        return False
+    before, after = saved['full_update'], requested['full_update']
+    schedule = after.get('point_training_schedule')
+    return bool(before.get('point_training_schedule', 'standard') == 'standard' and
+        schedule in ('select100', 'joint101') and
+        {**saved, 'full_update': {**before, 'point_training_schedule': schedule}} == requested and
+        state.get('prepared') is True and state.get('finalized') is True and
+        state.get('motion_committed') is True)
+
+
+def verified_color_resume_allowed(saved, requested, state, global_step, verified_prefix):
+    """Existing stop-at-200 color fork, with only explicit requested changes."""
+    if not (isinstance(saved, dict) and isinstance(saved.get('full_update'), dict) and
+            isinstance(requested.get('full_update'), dict)):
+        return False
+    previous, target = saved['full_update'], requested['full_update']
+    permitted = ('stop_after_motion', 'color_only', 'resume_from_finalized_200',
+                 'train_attributes', 'train_point_dc', 'color_point_budget',
+                 'sparse_color_stream_v2', 'sparse_color_logscale_v3',
+                 'point_training_schedule', 'shared_dc_rate_scale', 'point_dc_rate_scale')
+    comparable = {**saved, 'feature_dc_update': requested['feature_dc_update'],
+        'regional_logscale': requested['regional_logscale'] if (
+            saved['regional_logscale'] == asdict(RegionalLogScaleConfig()) and
+            requested['regional_logscale'] == {**asdict(RegionalLogScaleConfig()), 'enabled': True})
+            else saved['regional_logscale'],
+        'full_update': {**previous, **{key: target[key] for key in permitted}}}
+    return bool(verified_prefix is not None and state.get('prepared') is True and
+        state.get('finalized') is True and state.get('motion_committed') is True and
+        global_step == 200 and previous.get('stop_after_motion') is True and
+        previous.get('point_training_schedule', 'standard') == 'standard' and
+        target['point_training_schedule'] in ('standard', 'select100', 'joint101') and
+        not saved['feature_dc_update']['enabled'] and comparable == requested)
+
+
+def regional_scale_resume_allowed(saved, requested, state, verified_prefix):
+    """Only enable the default regional scale on a verified finalized prefix."""
+    defaults = asdict(RegionalLogScaleConfig())
+    enabled = {**defaults, 'enabled': True}
+    return bool(verified_prefix is not None and isinstance(saved, dict) and
+        saved.get('regional_logscale') == defaults and
+        requested.get('regional_logscale') == enabled and
+        {**saved, 'regional_logscale': enabled} == requested and
+        state.get('prepared') is True and state.get('finalized') is True and
+        state.get('motion_committed') is True)
 
 
 def motion_image_schedule_compatible(saved, enabled, motion_steps, bootstrap_steps):
@@ -311,23 +381,157 @@ def motion_image_factor(step, motion_steps, enabled=False, fitting_motion=False,
     return 1
 
 
-def motion_photometric_loss(image, target, lambda_dssim, factor=1, *, metric='l1'):
+class _LPIPSEvalCache:
+    """Keep the evaluation network outside the trained module and checkpoints."""
+
+    def __init__(self):
+        self._model = None
+        self._device = None
+
+    def __call__(self, image, target):
+        if self._model is None or self._device != image.device:
+            # torchvision initializes random weights before loading pretrained
+            # ones. Evaluation and cache warm-up must not perturb training RNG,
+            # including when a resumed run starts with an empty cache.
+            with torch.random.fork_rng(devices=[]):
+                model = LPIPS('vgg', '0.1').to(image.device)
+            self._model, self._device = model, image.device
+        return self._model(image, target)
+
+
+class _TrainingSSIMCache:
+    """Cache fixed target-image SSIM terms for the current frame."""
+
+    def __init__(self, max_bytes=768 * 1024 * 1024):
+        self.max_bytes = max_bytes
+        self._windows = {}
+        self._targets = OrderedDict()
+        self._target_bytes = 0
+        self._budgets = {}
+
+    def clear(self):
+        self._targets.clear()
+        self._target_bytes = 0
+        self._budgets.clear()
+
+    def _window(self, image):
+        key = (image.shape[-3], image.device, image.dtype)
+        if key not in self._windows:
+            self._windows[key] = create_window(11, image.shape[-3]).to(
+                device=image.device, dtype=image.dtype)
+        return self._windows[key]
+
+    def prepare(self, image, target, size):
+        if (target.requires_grad or image.device != target.device or image.dtype != target.dtype or
+                torch.is_autocast_enabled(image.device.type)):
+            return None
+        if image.device not in self._budgets:
+            # Leave room for the renderer and saved backward buffers.
+            free = torch.cuda.mem_get_info(image.device)[0] if image.is_cuda else 4 * self.max_bytes
+            self._budgets[image.device] = min(self.max_bytes, free // 4)
+        budget = self._budgets[image.device]
+        pixels = image.numel() // (image.shape[-2] * image.shape[-1]) * size[0] * size[1]
+        resized_bytes = pixels * image.element_size()
+        needed = resized_bytes * (2 + (tuple(target.shape[-2:]) != tuple(size)))
+        if needed > budget:
+            return None
+        try:
+            version = target._version
+        except RuntimeError:  # Inference tensors do not expose a version counter.
+            return None
+        key = (id(target), version, tuple(size))
+        entry = self._targets.get(key)
+        if entry is not None and entry[0]() is target:
+            self._targets.move_to_end(key)
+            return (target if entry[1] is None else entry[1], *entry[2:5])
+        if entry is not None:
+            self._target_bytes -= entry[5]
+            del self._targets[key]
+        resized = (interpolate(target[None], size=size, mode='area')[0]
+                   if tuple(target.shape[-2:]) != tuple(size) else target)
+        window = self._window(image)
+        with torch.no_grad():
+            mean = conv2d(resized, window, padding=5, groups=image.shape[-3])
+            variance = conv2d(resized * resized, window, padding=5,
+                              groups=image.shape[-3]) - mean.pow(2)
+        stored_resized = None if resized is target else resized
+        nbytes = sum(t.numel() * t.element_size() for t in
+                     (mean, variance) + (() if stored_resized is None else (stored_resized,)))
+        if nbytes <= budget:
+            while self._targets and self._target_bytes + nbytes > budget:
+                _, old = self._targets.popitem(last=False)
+                self._target_bytes -= old[5]
+            self._targets[key] = (weakref.ref(target), stored_resized, mean, variance, window, nbytes)
+            self._target_bytes += nbytes
+        return resized, mean, variance, window
+
+    @staticmethod
+    def ssim(image, target, mean_target, variance_target, window):
+        channel = image.shape[-3]
+        mean_image = conv2d(image, window, padding=5, groups=channel)
+        mean_image_sq = mean_image.pow(2)
+        mean_target_sq = mean_target.pow(2)
+        mean_product = mean_image * mean_target
+        variance_image = conv2d(image * image, window, padding=5, groups=channel) - mean_image_sq
+        covariance = conv2d(image * target, window, padding=5, groups=channel) - mean_product
+        return (((2 * mean_product + 0.01**2) * (2 * covariance + 0.03**2)) /
+                ((mean_image_sq + mean_target_sq + 0.01**2) *
+                 (variance_image + variance_target + 0.03**2))).mean()
+
+
+def stabilized_rmse(image, target):
+    """Pixel-scale RMSE with finite gradient and an exact zero at a match."""
+    mse = (image - target).square().mean()
+    return mse / ((mse + 1e-8).sqrt() + 1e-4)
+
+
+@torch.no_grad()
+def temporal_repair_weights(target, previous, strength, scale):
+    """Soft temporal evidence in a fixed training camera; never a hard mask."""
+    if target.shape != previous.shape or target.ndim != 3:
+        raise ValueError('Temporal repair images must have matching CHW shapes')
+    change = (target.detach() - previous.detach()).abs().mean(dim=0, keepdim=True)
+    change = torch.nn.functional.avg_pool2d(change.unsqueeze(0), 5, stride=1, padding=2)[0]
+    return 1 + strength * (change / scale).clamp(0, 1)
+
+
+def weighted_repair_rmse(image, target, weights):
+    if image.shape != target.shape or weights.shape != (1, *image.shape[-2:]):
+        raise ValueError('Repair weights must match the image')
+    mse = ((image - target).square() * weights).sum() / (weights.sum() * image.shape[0])
+    return mse / ((mse + 1e-8).sqrt() + 1e-4)
+
+
+def decoder_exact_rotation(motion, rotation):
+    """Use the CPU codec's quaternion values while preserving training gradients."""
+    _, decoded = motion.decoded_survivor_pose()
+    if decoded.shape != rotation.shape:
+        raise ValueError('Decoded motion rotation does not match training pose')
+    decoded = decoded.to(device=rotation.device, dtype=rotation.dtype)
+    return decoded + (rotation - rotation.detach())
+
+
+def motion_photometric_loss(image, target, lambda_dssim, factor=1, *, metric='l1', cache=None):
     if metric not in ('l1', 'rmse'):
         raise ValueError('Photometric pixel loss must be l1 or rmse')
+    size = (tuple(max(1, value // factor) for value in image.shape[-2:])
+            if factor > 1 else tuple(image.shape[-2:]))
+    cached = cache.prepare(image, target, size) if cache is not None else None
     if factor > 1:
-        size = tuple(max(1, value // factor) for value in image.shape[-2:])
         image = interpolate(image[None], size=size, mode='area')[0]
-        target = interpolate(target[None], size=size, mode='area')[0]
+        if cached is None:
+            target = interpolate(target[None], size=size, mode='area')[0]
+    if cached is not None:
+        target, mean_target, variance_target, window = cached
     # Global RMS keeps pixel-scale loss units while giving small errors small
     # gradients. The offset makes an exact match have zero finite loss/gradient.
     if metric == 'l1':
         pixel = l1_loss(image, target)
     else:
-        mse = (image - target).square().mean()
-        # Rationalize sqrt(mse+eps)-sqrt(eps) to keep exact zero in float32.
-        pixel = mse / ((mse + 1e-8).sqrt() + 1e-4)
-    return ((1 - lambda_dssim) * pixel +
-            lambda_dssim * (1 - ssim(image, target)))
+        pixel = stabilized_rmse(image, target)
+    structural = (ssim(image, target) if cached is None else
+                  cache.ssim(image, target, mean_target, variance_target, window))
+    return (1 - lambda_dssim) * pixel + lambda_dssim * (1 - structural)
 
 
 def set_birth_learning_rates(model, args, step, total, ratio):
@@ -473,12 +677,44 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
 
     def setup(self):
         cfg = self.config
+        if not isinstance(cfg.ablation_motion_only, bool):
+            raise ValueError('ablation_motion_only must be boolean')
+        if cfg.ablation_motion_only and (
+                cfg.full_update.enabled or not cfg.birth.frame_training_plan or
+                not uses_early_replacement(cfg) or not cfg.opacity_update.enabled or
+                cfg.feature_dc_update.enabled or cfg.logscale_update.enabled or
+                cfg.regional_logscale.enabled or cfg.rigid_tree.motion_steps != 200 or
+                cfg.birth.replace_low_opacity or cfg.birth.regional_color_birth or
+                cfg.birth.regional_alpha_repair or cfg.birth.regional_postfit_admission or
+                cfg.rigid_tree.spatial_gate.final_joint_refine_steps):
+            raise ValueError('Motion-only ablation requires the fixed-population 200-step frame plan without attribute repair')
         validate_initial_opacity_threshold(cfg.initial_opacity_threshold)
         cfg.birth.validate(cfg.rigid_tree.motion_steps)
         cfg.opacity_update.validate()
         cfg.feature_dc_update.validate()
         cfg.logscale_update.validate()
+        regional_scale_config = getattr(cfg, 'regional_logscale', RegionalLogScaleConfig())
+        regional_scale_config.validate()
+        if regional_scale_config.enabled and not (cfg.full_update.enabled and cfg.full_update.regional_repair and cfg.full_update.color_only and cfg.full_update.sparse_color_logscale_v3 and not cfg.logscale_update.enabled):
+            raise ValueError("Regional scale requires fixed-population color-only FUA3")
         cfg.full_update.validate()
+        supported_regional_dc = (cfg.feature_dc_update.enabled and
+            cfg.feature_dc_update.sharing == 'spatial_region' and cfg.feature_dc_update.post_motion_only)
+        if cfg.full_update.enabled and ((cfg.feature_dc_update.enabled and not supported_regional_dc) or
+                regional_scale_config.enabled or cfg.logscale_update.enabled):
+            raise ValueError('Gradient probing supports only post-motion regional DC as a shared appearance update')
+        if cfg.full_update.point_training_schedule != 'standard' and (regional_scale_config.enabled or
+                cfg.rigid_tree.shared_discovery_steps > 100 or not cfg.rigid_tree.spatial_gate.frame_training_plan):
+            raise ValueError('Early points need the fixed 100-step motion plan and no regional scale')
+        if cfg.full_update.color_only:
+            if cfg.feature_dc_update.enabled and not cfg.feature_dc_update.post_motion_only:
+                raise ValueError('Color-only shared DC must start after the step-200 motion plan')
+            if not cfg.feature_dc_update.enabled and not (cfg.full_update.train_attributes and
+                    (cfg.full_update.train_point_dc or cfg.full_update.sparse_color_logscale_v3)):
+                raise ValueError('Color-only fitting needs shared DC or point DC enabled')
+        regional_dc = (cfg.feature_dc_update.enabled and cfg.feature_dc_update.sharing == 'spatial_region')
+        if regional_dc and not cfg.full_update.regional_repair:
+            raise ValueError('Regional DC requires the fixed-population regional repair pipeline')
         if cfg.full_update.enabled and not cfg.full_update.regional_repair:
             raise ValueError('Periodic full-update training is retired; historical packets remain decodable')
         if cfg.full_update.enabled and (
@@ -490,21 +726,11 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             raise ValueError('Full updates require the joint frame plan, unrestricted point residuals, old opacity and no separate logscale update')
         if cfg.full_update.regional_repair:
             birth = cfg.birth
-            if (cfg.feature_dc_update.enabled or birth.replace_low_opacity or
+            if ((cfg.feature_dc_update.enabled and not regional_dc) or birth.replace_low_opacity or
                     birth.regional_color_birth or birth.regional_alpha_repair or
                     birth.regional_postfit_admission or not birth.joint_old_opacity or
-                    cfg.rigid_tree.spatial_gate.final_joint_refine_steps or
-                    cfg.rigid_tree.spatial_gate.max_depth != 5):
-                raise ValueError('Regional attribute repair requires fixed population, no shared colour and the D5 frame plan')
-            if (isinstance(birth.regional_color_min_views, bool) or
-                    not isinstance(birth.regional_color_min_views, int) or birth.regional_color_min_views < 2):
-                raise ValueError('Regional attribute repair requires at least two reliable training views')
-            for name in ('regional_color_l1_threshold', 'regional_color_min_support'):
-                value = getattr(birth, name)
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                    raise ValueError(f'{name} must be finite and positive')
-            if birth.regional_color_min_support < 32:
-                raise ValueError('Regional attribute repair needs at least 32 effective pixels per view')
+                    cfg.rigid_tree.spatial_gate.final_joint_refine_steps):
+                raise ValueError('Regional attribute repair requires fixed population and a supported frame plan')
         if cfg.logscale_update.enabled and (
                 not getattr(cfg.birth, 'frame_training_plan', False) or
                 effective_final_joint_refine_steps(self) or
@@ -530,6 +756,12 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 'birth.source_handoff requires alpha joint opacity updates without initial_alpha')
         if not isinstance(cfg.effective_motion_observations, bool):
             raise ValueError('effective_motion_observations must be boolean')
+        if not isinstance(cfg.stable_tail_covariance_backward, bool):
+            raise ValueError('stable_tail_covariance_backward must be boolean')
+        if (cfg.stable_tail_covariance_backward and
+                not (cfg.effective_motion_observations and cfg.full_update.enabled and
+                     cfg.full_update.regional_repair)):
+            raise ValueError('Stable tail covariance backward needs observed regional attribute repair')
         if not isinstance(cfg.motion_coarse_to_fine, bool):
             raise ValueError('motion_coarse_to_fine must be boolean')
         if not 0 <= cfg.lambda_dssim <= 1:
@@ -547,8 +779,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = FullUpdateSpatialGatedMotion(cfg.rigid_tree)
         self.full_attribute_update = None
+        self.regional_logscale = (RegionalLogScaleUpdate(regional_scale_config, self.motion) if regional_scale_config.enabled else None)
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
-        self.feature_dc_update = (QuantizedFeatureDCUpdate(cfg.feature_dc_update, motion=self.motion)
+        dc_type = RegionalFeatureDCUpdate if regional_dc else QuantizedFeatureDCUpdate
+        self.feature_dc_update = (dc_type(cfg.feature_dc_update, motion=self.motion)
                                   if cfg.feature_dc_update.enabled else None)
         self.logscale_update = (MotionSupportLogScaleUpdate(cfg.logscale_update)
                                 if cfg.logscale_update.enabled else None)
@@ -574,7 +808,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.early_initialized=False
         self.early_birth_updates=0
         self.early_shared_steps=0
-        self._rate_budget_state=None
         self.early_selected=None
         self.early_pinned_rows=None
         self.early_pinned_values=None
@@ -591,6 +824,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
 
     @property
     def total_steps(self):
+        if getattr(self.config, 'ablation_motion_only', False):
+            return self.motion_steps
+        if self.full_update_active and self.config.full_update.stop_after_motion:
+            return self.motion_steps
         boundary = getattr(self, 'birth_end_step', None)
         return (boundary if uses_residual_birth(self.config) and boundary is not None else
                 self.motion_steps + self.config.rigid_tree.birth_steps)
@@ -607,38 +844,68 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def _configure_full_update_motion(self, frame):
         cfg = getattr(self.config, 'full_update', None)
         active = bool(cfg is not None and cfg.enabled and cfg.regional_repair and frame > 0)
+        if active and cfg.shared_region_orientation and self.config.rigid_tree.rotation_updates:
+            raise ValueError('Shared-only orientation requires per-point motion rotation to be disabled')
         # Copy per-frame policy; the configured flag and checkpoint contract do not change.
         self.motion.config = (replace(self.config.rigid_tree, rotation_updates=True)
                               if active else self.config.rigid_tree)
         self.motion.regional_repair = active
+        self.motion.color_only = False
         self.motion.original_rotation_updates = self.config.rigid_tree.rotation_updates
+        self.motion.shared_region_orientation = bool(active and cfg.shared_region_orientation)
+        self.motion.refine_image_gate_ste = bool(getattr(self, 'gate_refine_image_ste', False))
 
     def full_update_prepare_step(self, step):
         if self.full_update_active and self.full_attribute_update is not None:
-            trainable = step > self.motion_steps
-            for parameter in self.full_attribute_update.parameters.values():
+            start = 101 if self.config.full_update.early_joint_repair else self.motion_steps + 1
+            trainable = step >= start
+            for name, parameter in self.full_attribute_update.parameters.items():
                 parameter.requires_grad_(trainable)
                 if not trainable:
                     parameter.grad = None
             args = self.config.gaussian
-            rates = dict(logscale=args.scaling_lr, sh_dc=args.feature_lr,
-                         sh_rest=args.feature_lr / 20.)
-            # These three parameters first become trainable at step 201.
-            # Their own 100-step schedule must not inherit a completed motion clock.
-            progress = min(max((step - 201) / 99., 0.), 1.)
+            rates = _full_attribute_learning_rates(args)
+            # Use the actual repair start rather than a completed motion clock.
+            progress = min(max((step - start) / max(1, 300 - start), 0.), 1.)
             factor = self.config.rigid_tree.motion_lr_final_ratio ** progress
             for group in self.motion.optimizer.param_groups:
                 name = group.get('name', '')
                 if name.startswith('early_full_'):
                     group['lr'] = rates[name[len('early_full_'):]] * factor
+        scale_shared = getattr(self, 'regional_logscale', None)
+        if scale_shared is not None and scale_shared.ready:
+            scale_shared.prepare_step(step, self.config.rigid_tree.motion_lr_final_ratio)
+            if scale_shared.disabled_for_frame:
+                scale_shared.delta.requires_grad_(False)
+                scale_shared.delta.grad = None
+        shared = getattr(self, 'feature_dc_update', None)
+        if isinstance(shared, RegionalFeatureDCUpdate):
+            shared.prepare_step(step, self.config.rigid_tree.motion_lr_final_ratio)
+            branch = getattr(self, 'color_drift_branch', None)
+            if shared.ready and step > self.motion_steps and branch in ('none', 'point'):
+                shared.delta.requires_grad_(False)
+                shared.delta.grad = None
 
     def full_update_after_step(self, step):
+        scale_shared = getattr(self, 'regional_logscale', None)
+        if scale_shared is not None and scale_shared.ready and step > self.motion_steps and not scale_shared.disabled_for_frame:
+            window = self.config.rigid_tree.motion_fit_window_steps
+            scale_shared.after_step(self._rate_byte_price(step) * self.config.full_update.shared_dc_rate_scale,
+                proximal=(window is None or step % window == 0 or step == self.total_steps))
+        shared = getattr(self, 'feature_dc_update', None)
+        if isinstance(shared, RegionalFeatureDCUpdate) and shared.ready and (step > self.motion_steps or not shared.config.post_motion_only):
+            shared.sync_owner()
+            window = self.config.rigid_tree.motion_fit_window_steps
+            shared.after_step(self._rate_byte_price(step) * self.config.full_update.shared_dc_rate_scale,
+                proximal=(window is None or step % window == 0 or step == self.total_steps))
         if self.full_update_active and self.full_attribute_update is not None:
-            if step <= self.motion_steps:
+            start = 101 if self.config.full_update.early_joint_repair else self.motion_steps + 1
+            if step < start:
                 return
             window = self.config.rigid_tree.motion_fit_window_steps
-            self.full_attribute_update.after_step(self.motion.optimizer, self._rate_byte_price(step),
-                proximal=(window is None or step % window == 0 or step == self.total_steps))
+            proximal = window is None or step % window == 0 or step == self.total_steps
+            self.full_attribute_update.after_step(self.motion.optimizer, self._rate_byte_price(step) * self.config.full_update.point_dc_rate_scale,
+                proximal=proximal)
 
     @torch.no_grad()
     def full_update_finish_pose_attributes(self):
@@ -648,17 +915,24 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.gaussians.apply_selected_motion(xyz.to(self.device), rotation.to(self.device))
 
     def full_update_reference(self, *, canonical=False):
-        return dict(logscale=self.gaussians._scaling, sh_dc=self.gaussians._features_dc,
-                    sh_rest=self.gaussians._features_rest)
+        dc = self.gaussians._features_dc
+        shared = getattr(self, 'feature_dc_update', None)
+        if isinstance(shared, RegionalFeatureDCUpdate) and shared.ready:
+            dc = shared.canonical_features().to(dc) if canonical else shared()
+        scale = self.gaussians._scaling
+        shared_scale = getattr(self, 'regional_logscale', None)
+        if shared_scale is not None and shared_scale.ready:
+            scale = shared_scale.canonical_features().to(scale) if canonical else shared_scale()
+        return dict(logscale=scale, sh_dc=dc, sh_rest=self.gaussians._features_rest)
 
     def on_save_checkpoint(self, ckpt):
+        ckpt['gate_refine_image_ste'] = bool(getattr(self, 'gate_refine_image_ste', False))
         if getattr(self.config.birth,'frame_training_plan',False) and self.frame_prepared:
             self._plan_record_phase_time()
         ckpt['birth_allocation'] = birth_allocation(self.config)
         ckpt['motion_image_schedule'] = MOTION_IMAGE_SCHEDULE
         ckpt['rigid_tree_version'] = 1
         ckpt['rigid_tree_config'] = asdict(self.config.rigid_tree)
-        ckpt['rate_budget_controller'] = BirthTransaction.tensor_tree(getattr(self,'_rate_budget_state',None),'cpu')
         ckpt['rigid_tree_module_config'] = asdict(self.config)
         ckpt['rigid_tree_initial_reference'] = self.initial_reference
         ckpt['gaussians'] = self.gaussians.capture()
@@ -687,6 +961,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                                      if self.births.source_rows is not None else None)
         feature_update = getattr(self, 'feature_dc_update', None)
         ckpt['quantized_feature_dc_update'] = feature_update.capture() if feature_update is not None else None
+        scale_shared = getattr(self, 'regional_logscale', None)
+        ckpt['regional_logscale_update'] = scale_shared.capture() if scale_shared is not None else None
+        ckpt['regional_logscale_disabled_for_frame'] = bool(scale_shared is not None and scale_shared.disabled_for_frame)
         logscale_update = getattr(self, 'logscale_update', None)
         ckpt['quantized_logscale_update'] = (logscale_update.capture(self.motion.optimizer)
             if logscale_update is not None and logscale_update.ready else None)
@@ -731,9 +1008,16 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             ckpt['regional_attribute_repair_state'] = BirthTransaction.tensor_tree(regional_attributes, 'cpu')
 
     def on_load_checkpoint(self, ckpt):
+        cache = getattr(self, '_training_ssim_cache', None)
+        if cache is not None:
+            cache.clear()
         self._plan_regional_alpha_state = None
         self._plan_regional_attribute_state = None
-        self._rate_budget_state=ckpt.get('rate_budget_controller')
+        self._plan_early_point_state = None
+        if ckpt.get('learnable_regional_repair_gate') is not None:
+            raise ValueError('Learnable attribute-repair checkpoints are replay-only')
+        if ckpt.get('rate_budget_controller') is not None:
+            raise ValueError('Feedback-trained checkpoints are replay-only; fixed-loss training needs a new experiment')
         diagnostic_reference = ckpt.get('frame_plan_diagnostic_reference')
         self._plan_diagnostic_reference = (None if diagnostic_reference is None else
             {name: value.detach().cpu().clone() for name, value in diagnostic_reference.items()})
@@ -752,12 +1036,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.reference_count = self.initial_reference['retained_count']
             self._freeze_base()
             return
-        if (getattr(self.config.rigid_tree,'target_update_bytes',0) and
-                ckpt.get('current_frame',0)>=1 and self._rate_budget_state is None):
-            raise ValueError('Budget-controlled checkpoint lost its controller state')
-        if self._rate_budget_state is not None:
-            from .model.rate_budget import RateBudgetState
-            RateBudgetState.restore(self._rate_budget_state,self.config.rigid_tree.max_rate_multiplier)
         allocation = birth_allocation(self.config)
         if (ckpt.get('current_frame', 0) >= 1 and
                 ckpt.get('birth_allocation', 'clone_small_v1') != allocation):
@@ -767,6 +1045,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self.config.rigid_tree.spatial_gate.start_step):
             raise ValueError('Different motion image schedules are replay-only')
         self._freeze_base()
+        from .sequence_extension import relocate_checkpoint_reference
+        ckpt = relocate_checkpoint_reference(
+            ckpt, self.config.rigid_tree.spatial_gate.reference_layout)
         if (version != 1 or
                 saved_config_with_default_motion_lr(ckpt['rigid_tree_config']) !=
                 asdict(self.config.rigid_tree)):
@@ -778,16 +1059,18 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             saved_config = {**saved_config, 'effective_motion_observations': False}
         if isinstance(saved_config, dict):
             saved_config = dict(saved_config)
+            saved_config.setdefault('ablation_motion_only', False)
+            saved_config.setdefault('stable_tail_covariance_backward', False)
             saved_config.setdefault('motion_coarse_to_fine', False)
             saved_config.setdefault('photometric_loss', 'l1')
             saved_config.setdefault('opacity_update', asdict(OpacityUpdateConfig()))
             saved_config['opacity_update'] = {**asdict(OpacityUpdateConfig()), **saved_config['opacity_update']}
             saved_config['feature_dc_update'] = {
                 **asdict(FeatureDCUpdateConfig()), **saved_config.get('feature_dc_update', {})}
+            saved_config['regional_logscale'] = {**asdict(RegionalLogScaleConfig()), **saved_config.get('regional_logscale', {})}
             saved_config['logscale_update'] = {
                 **asdict(LogScaleUpdateConfig()), **saved_config.get('logscale_update', {})}
-            saved_config['full_update'] = {
-                **asdict(FullUpdateConfig()), **saved_config.get('full_update', {})}
+            saved_config['full_update'] = normalize_full_update_config(saved_config.get('full_update', {}))
             opacity = saved_config.pop('old_opacity', {})
             if opacity.get('enabled', False) or ckpt.get('old_opacity_delta') is not None:
                 raise ValueError('Opacity-correction checkpoints are replay-only')
@@ -797,9 +1080,18 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if isinstance(saved_config, dict) and isinstance(saved_config.get('birth'), dict):
             saved_config = {**saved_config, 'birth': {
                 **asdict(BirthConfig()), **saved_config['birth']}}
-        if saved_config != asdict(self.config):
-            raise ValueError('Rigid-tree checkpoint needs the same module configuration')
+        requested_config = asdict(self.config)
         state = ckpt['rigid_tree_frame']
+        validate_early_point_checkpoint(getattr(self.config.full_update, 'point_training_schedule', 'standard'),
+                                        state, ckpt.get('global_step', 0))
+        color_resume = False
+        early_resume = early_schedule_resume_allowed(saved_config, requested_config, state, getattr(self.trainer, '_verified_prefix_plan', None))
+        scale_resume = regional_scale_resume_allowed(saved_config, requested_config, state, getattr(self.trainer, '_verified_prefix_plan', None))
+        if saved_config != requested_config and self.config.full_update.resume_from_finalized_200:
+            color_resume = verified_color_resume_allowed(saved_config, requested_config, state,
+                ckpt.get('global_step'), getattr(self.trainer, '_verified_prefix_plan', None))
+        if saved_config != requested_config and not color_resume and not scale_resume and not early_resume:
+            raise ValueError('Rigid-tree checkpoint needs the same module configuration; color-only changes require a verified finalized 200-step prefix')
         self.frame_prepared = state['prepared']
         self.frame_finalized = state['finalized']
         self.motion_committed = state['motion_committed']
@@ -839,8 +1131,19 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.motion.restore(ckpt['rigid_tree_motion'])
             if self.config.opacity_update.enabled:
                 self.opacity_update.restore(ckpt.get('quantized_opacity_update'), self.device)
-            if self.config.feature_dc_update.enabled:
-                self.feature_dc_update.restore(ckpt.get('quantized_feature_dc_update'), self.device)
+            if self.config.feature_dc_update.enabled and not (color_resume and ckpt.get('quantized_feature_dc_update') is None):
+                if isinstance(self.feature_dc_update, RegionalFeatureDCUpdate):
+                    self.feature_dc_update.restore(ckpt.get('quantized_feature_dc_update'), self.device,
+                                                   self.motion.optimizer)
+                    if self.feature_dc_update.ready and not torch.equal(self.feature_dc_update.owner, self.motion.owner):
+                        raise ValueError('Regional DC checkpoint ownership differs from its motion cut')
+                else:
+                    self.feature_dc_update.restore(ckpt.get('quantized_feature_dc_update'), self.device)
+            if getattr(self.config, 'regional_logscale', RegionalLogScaleConfig()).enabled and not ((color_resume or scale_resume) and ckpt.get('regional_logscale_update') is None):
+                self.regional_logscale.restore(ckpt.get('regional_logscale_update'), self.device, self.motion.optimizer)
+                self.regional_logscale.disabled_for_frame = bool(ckpt.get('regional_logscale_disabled_for_frame', False))
+                if self.regional_logscale.ready and not torch.equal(self.regional_logscale.owner, self.motion.owner):
+                    raise ValueError('Regional scale checkpoint owner differs from motion cut')
             if self.config.logscale_update.enabled:
                 self.logscale_update.restore(ckpt.get('quantized_logscale_update'), self.device,
                                              self.motion.optimizer)
@@ -853,6 +1156,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self.full_attribute_update = FullAttributeUpdate(self.config.full_update)
                 self.full_attribute_update.restore(ckpt.get('full_attribute_update'),
                     self.motion.optimizer, self.device, len(self.gaussians._xyz))
+                if getattr(self, 'regional_logscale', None) is not None:
+                    self.full_attribute_update.regional_scale_symbols = self.regional_logscale.point_symbols
         if ckpt['births'] is not None and not uses_early_replacement(self.config):
             self.births = BirthGaussianModel(self.config.sh_degree)
             self.births.restore(ckpt['births'], self.config.gaussian_stage2)
@@ -878,13 +1183,15 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 raise ValueError('Post-fit admission checkpoint lost its held-out training cameras')
             if self.frame_prepared:
                 self._early_attach_opacity()
+            regional_start = 100 if self.config.full_update.early_joint_repair else 200
             if (self.full_update_active and self.config.full_update.regional_repair and
-                    self.frame_prepared and not self.frame_finalized and self.early_shared_steps >= 200):
+                    self.frame_prepared and not self.frame_finalized and self.early_shared_steps >= regional_start):
                 saved = ckpt.get('regional_attribute_repair_state')
                 if saved is None:
                     raise ValueError('Regional attribute checkpoint lost its step-200 selection')
                 self._plan_regional_attribute_state = BirthTransaction.tensor_tree(saved, self.device)
-                self._plan_validate_regional_attribute_state(self._plan_regional_attribute_state)
+                self._plan_validate_regional_attribute_state(self._plan_regional_attribute_state,
+                    attributes_only=(self.config.full_update.early_joint_repair and self.early_shared_steps < 200))
             if (getattr(self.config.birth, 'regional_alpha_repair', False) and
                     not getattr(self, 'full_update_active', False) and self.frame_prepared and
                     not self.frame_finalized and self.early_shared_steps >= 200):
@@ -916,6 +1223,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def prepare_frame(self):
         if self.frame_prepared:
             return
+        cache = getattr(self, '_training_ssim_cache', None)
+        if cache is not None:
+            cache.clear()
         if self.current_frame < 1:
             raise ValueError('Rigid motion starts after the shared first frame')
         if uses_early_replacement(self.config) and (
@@ -942,8 +1252,6 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         xyz, rotation = self.gaussians._xyz.detach(), self.gaussians._rotation.detach()
         if previous_rows is None and self.current_frame > 1:
             previous_rows = torch.arange(len(xyz), device=xyz.device)
-        if getattr(self.config.birth,'frame_training_plan',False):
-            self._plan_setup_rate_budget()
         Module._configure_full_update_motion(self, self.current_frame)
         self.motion.setup(xyz, rotation, self.datamodule.cameras_extent,
                           frame_index=self.current_frame, previous_rows=previous_rows)
@@ -980,6 +1288,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self._plan_admission_camera_names=None
         self._plan_regional_alpha_state=None
         self._plan_regional_attribute_state=None
+        self._plan_early_point_state=None
         self._plan_error_owner=None
         self._plan_phase_started=None;self._plan_timed_phase=None
         self.birth_control = dict(clone_added=0, split_added=0, pruned=0,
@@ -992,20 +1301,28 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             logscale_update.reset()
         if self.opacity_update is not None:
             self.opacity_update.setup(self.gaussians._opacity)
+        if getattr(self, 'regional_logscale', None) is not None:
+            self.regional_logscale.setup(self.gaussians._scaling)
         if self.feature_dc_update is not None:
             self.feature_dc_update.setup(self.gaussians._features_dc)
+            if isinstance(self.feature_dc_update, RegionalFeatureDCUpdate) and not self.config.feature_dc_update.post_motion_only:
+                self.feature_dc_update.bind_live(self.motion, self.motion.optimizer)
         if uses_early_replacement(self.config):
             self._early_attach_opacity()
         self.full_attribute_update = None
         if getattr(self, 'full_update_active', False):
             self.full_attribute_update = FullAttributeUpdate(self.config.full_update)
             args = self.config.gaussian
+            rates = _full_attribute_learning_rates(args)
             self.full_attribute_update.setup(self.full_update_reference(), self.motion.optimizer,
-                (args.scaling_lr, args.feature_lr, args.feature_lr / 20.))
+                tuple(rates[name] for name in FULL_ATTRIBUTE_FIELDS))
+            if getattr(self, 'regional_logscale', None) is not None:
+                self.full_attribute_update.regional_scale_symbols = self.regional_logscale.point_symbols
 
     def pre_training_step(self):
         if getattr(self.config.birth,'frame_training_plan',False):
-            supported_colour = not self.config.feature_dc_update.enabled
+            supported_colour = (not self.config.feature_dc_update.enabled or
+                self.config.feature_dc_update.sharing == 'spatial_region')
             if (not self.config.rigid_tree.spatial_gate.frame_training_plan or
                     self.config.birth.radiance_mode != 'adaptive_residual_birth' or
                     self.config.rigid_tree.amplitude_refit_steps or
@@ -1031,6 +1348,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def begin_next_frame(self):
         if not self.frame_finalized:
             raise ValueError('Cannot advance before quantized finalization')
+        cache = getattr(self, '_training_ssim_cache', None)
+        if cache is not None:
+            cache.clear()
         self.frame_prepared = False
         self.frame_finalized = False
         self.motion_committed = False
@@ -1064,6 +1384,61 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             self.datamodule.cameras_extent, reference,
             source_rows=self.births.source_rows)
 
+    def _begin_shared_training_views(self, step):
+        # This plan samples one gate per step and has no newborns. All views
+        # therefore see the same motion graph until the shared Adam update.
+        if (not regional_attribute_repair_active(self) or not fitting_old_motion(self) or
+                self.motion.proposal_image_weight or self.motion.predictor_image_weight or
+                (self.early_initialized and len(self.births._xyz))):
+            return False
+        if getattr(self, '_shared_training_pose', None) is not None:
+            raise ValueError('A shared training pose is already active')
+        # These diagnostic steps inspect gradients after the first view.
+        mode = 'shared' if step in (201, 250, 300) else 'proxy'
+        self._shared_training_pose = dict(step=int(step), pose=self.motion(step, training=True),
+                                          attributes=None, mode=mode, proxy_pairs=[])
+        return mode
+
+    def _finish_shared_training_views(self):
+        state = self._shared_training_pose
+        # Each proxy accumulated the four image gradients; traverse the
+        # shared gate/attribute graph only once.
+        pairs = [(original, proxy.grad) for original, proxy in state['proxy_pairs']
+                 if proxy.grad is not None]
+        if pairs:
+            torch.autograd.backward([item[0] for item in pairs], [item[1] for item in pairs])
+
+    def _end_shared_training_views(self):
+        self._shared_training_pose = None
+
+    def _render_opacity_alpha(self):
+        # Color-only repair freezes opacity after motion. Render the exact
+        # decoder logit -> sigmoid path in that phase: direct alpha-grid
+        # rendering can differ by an ULP and cross the rasterizer cutoff.
+        color = getattr(getattr(self.config, 'full_update', None), 'color_only', False)
+        frozen = (regional_attribute_repair_active(self) and color and
+                  self.trainer.global_step > self.motion_steps)
+        update = self.opacity_update
+        if ((regional_attribute_repair_active(self) and
+             self.trainer.global_step > self.motion_steps) or
+                (getattr(self.config, 'ablation_motion_only', False) and self.motion_committed)):
+            # The codec materializes alpha through CPU logit, followed by the
+            # renderer's device sigmoid. Use those exact forward values while
+            # keeping the original quantized-alpha straight-through gradient.
+            alpha = update.alphas()
+            decoded = update.canonical_logits().to(device=alpha.device, dtype=alpha.dtype).sigmoid()
+            return decoded + (alpha - alpha.detach())
+        if not frozen:
+            return update.alphas()
+        if update.delta.requires_grad:
+            raise ValueError('Decoded opacity cache requires frozen opacity')
+        cached = getattr(self, '_frozen_decoded_alpha_cache', None)
+        if cached is None or cached[0] != self.current_frame or cached[1] is not update:
+            decoded = update.canonical_logits().to(device=update.reference.device).sigmoid()
+            cached = (self.current_frame, update, decoded)
+            self._frozen_decoded_alpha_cache = cached
+        return cached[2]
+
     def forward(self, viewpoint, training=False, old_only=False, proposal_only=False,
                 predictor_only=False, collect_error_stats=False):
         auxiliary = proposal_only or predictor_only
@@ -1074,6 +1449,12 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         effective = getattr(self.config, 'effective_motion_observations', False)
         previous_collection = getattr(self.renderer, 'collect_contributions', False)
         previous_error_collection = getattr(self.renderer, 'collect_error_stats', False)
+        previous_stable_backward = getattr(self.renderer, 'stable_backward', False)
+        stable_tail = getattr(self.config, 'stable_tail_covariance_backward', False)
+        if stable_tail:
+            self.renderer.stable_backward = bool(
+                training and self.frame_prepared and not self.frame_finalized and
+                regional_attribute_repair_active(self) and self.trainer.global_step > self.motion_steps)
         early_pose=None
         birth_view=None
         if effective:
@@ -1083,66 +1464,99 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if collect_error_stats:
             self.renderer.collect_error_stats = True
         try:
-            if fitting_old_motion(self):
-                xyz, rotation = (self.motion.predictor_pose() if predictor_only else
-                                 self.motion.proposal_pose() if proposal_only else
-                                 self.motion(self.trainer.global_step, training=training))
-                self.gaussians.rigid_xyz = xyz
-                self.gaussians.rigid_rotation = rotation
-                if getattr(self, 'opacity_update', None) is not None:
+            shared = (getattr(self, '_shared_training_pose', None)
+                      if training and not auxiliary and not old_only else None)
+            if shared is not None and shared['step'] != self.trainer.global_step:
+                raise ValueError('Shared training pose belongs to a different step')
+            if shared is not None and shared['attributes'] is not None:
+                for name, value in shared['attributes'].items():
+                    setattr(self.gaussians, name, value)
+            else:
+                if fitting_old_motion(self):
+                    xyz, rotation = (shared['pose'] if shared is not None else
+                                     self.motion.predictor_pose() if predictor_only else
+                                     self.motion.proposal_pose() if proposal_only else
+                                     self.motion(self.trainer.global_step, training=training))
+                    if (self.motion_committed and self.trainer.global_step > self.motion_steps and
+                            getattr(self.config.full_update, 'shared_region_orientation', False)):
+                        rotation = decoder_exact_rotation(self.motion, rotation)
+                    self.gaussians.rigid_xyz = xyz
+                    self.gaussians.rigid_rotation = rotation
+                    if getattr(self, 'opacity_update', None) is not None:
+                        if self.config.opacity_update.mode=='alpha':
+                            self.gaussians.rigid_alpha = Module._render_opacity_alpha(self)
+                        else:
+                            self.gaussians.rigid_opacity = self.opacity_update()
+                        if auxiliary:
+                            # Fit the auxiliary motion field with the main
+                            # appearance solution, without fitting it twice.
+                            for field in ('rigid_alpha', 'rigid_opacity'):
+                                value = getattr(self.gaussians, field, None)
+                                if value is not None:
+                                    setattr(self.gaussians, field, value.detach())
+                elif (self.motion_committed and not self.frame_finalized and
+                        getattr(self, 'opacity_update', None) is not None and
+                        (self.config.opacity_update.joint_with_birth or self.config.birth.joint_old_opacity)):
                     if self.config.opacity_update.mode=='alpha':
-                        self.gaussians.rigid_alpha = self.opacity_update.alphas()
+                        self.gaussians.rigid_alpha = Module._render_opacity_alpha(self)
                     else:
                         self.gaussians.rigid_opacity = self.opacity_update()
+                logscale_update = getattr(self, 'logscale_update', None)
+                if (logscale_update is not None and logscale_update.ready and
+                        not self.frame_finalized):
+                    self.gaussians.rigid_logscale = logscale_update.current_logscale(
+                        self.gaussians._scaling)
+                if (getattr(self, 'feature_dc_update', None) is not None and self.frame_prepared and
+                        not self.frame_finalized and
+                        not getattr(self, '_diagnostic_regional_dc_disabled', False) and
+                        (not isinstance(self.feature_dc_update, RegionalFeatureDCUpdate) or self.feature_dc_update.ready) and
+                        (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
+                    self.gaussians.rigid_sh_dc = self.feature_dc_update(training=training and not auxiliary)
                     if auxiliary:
-                        # Fit the auxiliary motion field with the main
-                        # appearance solution, without fitting it twice.
-                        for field in ('rigid_alpha', 'rigid_opacity'):
-                            value = getattr(self.gaussians, field, None)
-                            if value is not None:
-                                setattr(self.gaussians, field, value.detach())
-            elif (self.motion_committed and not self.frame_finalized and
-                    getattr(self, 'opacity_update', None) is not None and
-                    (self.config.opacity_update.joint_with_birth or self.config.birth.joint_old_opacity)):
-                if self.config.opacity_update.mode == 'alpha':
-                    self.gaussians.rigid_alpha = self.opacity_update.alphas()
-                else:
-                    self.gaussians.rigid_opacity = self.opacity_update()
-            logscale_update = getattr(self, 'logscale_update', None)
-            if (logscale_update is not None and logscale_update.ready and
-                    not self.frame_finalized):
-                self.gaussians.rigid_logscale = logscale_update.current_logscale(
-                    self.gaussians._scaling)
-            if (getattr(self, 'feature_dc_update', None) is not None and self.frame_prepared and
-                    not self.frame_finalized and
-                    (not self.motion_committed or self.config.feature_dc_update.joint_with_birth)):
-                self.gaussians.rigid_sh_dc = self.feature_dc_update()
-                if auxiliary:
-                    self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
-            full = getattr(self, 'full_attribute_update', None)
-            if getattr(self, 'full_update_active', False) and full is not None and not self.frame_finalized:
-                dc = getattr(self.gaussians, 'rigid_sh_dc', None)
-                if dc is None:
-                    dc = self.gaussians._features_dc
-                values = full.apply(dict(logscale=self.gaussians._scaling,
-                    sh_dc=dc, sh_rest=self.gaussians._features_rest))
-                if auxiliary:
-                    values = {name: value.detach() for name, value in values.items()}
-                self.gaussians.rigid_logscale = values['logscale']
-                self.gaussians.rigid_sh_dc = values['sh_dc']
-                self.gaussians.rigid_sh_rest = values['sh_rest']
+                        self.gaussians.rigid_sh_dc = self.gaussians.rigid_sh_dc.detach()
+                full = getattr(self, 'full_attribute_update', None)
+                full_active = getattr(self, 'full_update_active', False)
+                zero_frozen = (full_active and full is not None and
+                               self.trainer.global_step <= self.motion_steps and full.initial_zero_frozen())
+                if full_active and full is not None and not self.frame_finalized and not zero_frozen:
+                    dc = getattr(self.gaussians, 'rigid_sh_dc', None)
+                    if dc is None:
+                        dc = self.gaussians._features_dc
+                    shared_scale = getattr(self, 'regional_logscale', None)
+                    scale = shared_scale() if shared_scale is not None and shared_scale.ready else self.gaussians._scaling
+                    values = full.apply(dict(logscale=scale,
+                        sh_dc=dc, sh_rest=self.gaussians._features_rest))
+                    if auxiliary:
+                        values = {name: value.detach() for name, value in values.items()}
+                    self.gaussians.rigid_logscale = values['logscale']
+                    self.gaussians.rigid_sh_dc = values['sh_dc']
+                    self.gaussians.rigid_sh_rest = values['sh_rest']
+                if shared is not None:
+                    attributes = {name: getattr(self.gaussians, name, None) for name in
+                        ('rigid_xyz', 'rigid_rotation', 'rigid_alpha', 'rigid_opacity',
+                         'rigid_sh_dc', 'rigid_sh_rest', 'rigid_logscale')}
+                    if shared['mode'] == 'proxy':
+                        for name, value in attributes.items():
+                            if value is not None and value.requires_grad:
+                                proxy = value.detach().requires_grad_(True)
+                                shared['proxy_pairs'].append((value, proxy))
+                                attributes[name] = proxy
+                                setattr(self.gaussians, name, proxy)
+                    shared['attributes'] = attributes
             if (uses_early_replacement(self.config) and getattr(self,'early_initialized',False) and
                     not self.motion_committed and not old_only):
                 xyz=self.gaussians.rigid_xyz
                 q=self.gaussians.rigid_rotation
                 self.births.bind_source_pose(xyz,q,detach=False)
                 early_pose=(xyz,q)
-                birth_view=self.make_birth_view(reference=self._adaptive_reference())
+                birth_view=(self.make_birth_view(reference=self._adaptive_reference())
+                            if len(self.births._xyz) else None)
                 self.renderer.gaussians=(MergedGaussianModel([self.gaussians,birth_view])
                     if birth_view is not None else self.gaussians)
             if self.motion_committed and not self.frame_finalized and not old_only:
-                birth_view = (self.make_birth_view(reference=self._adaptive_reference())
-                              if self.config.birth.joint_old_opacity else self.make_birth_view())
+                if len(self.births._xyz):
+                    birth_view = (self.make_birth_view(reference=self._adaptive_reference())
+                                  if self.config.birth.joint_old_opacity else self.make_birth_view())
                 old_view = self.gaussians
                 transaction = getattr(self, 'birth_transaction', None)
                 if transaction is not None and transaction.fixed_reference is not None:
@@ -1160,6 +1574,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                         self.config.birth.densification_stats_steps + 1)):
                 probe = self.gaussians._features_dc.detach().requires_grad_(True)
                 self.gaussians.rigid_sh_dc = probe
+            if getattr(self, '_capture_regional_full_debug', False):
+                g = self.gaussians
+                self._regional_full_debug = {name: getattr(g, name).detach().cpu().clone() for name in
+                    ('get_xyz', 'get_rotation', 'get_scaling', 'get_opacity', 'get_features')}
             package = self.renderer(viewpoint, self.background)
             if (training and not auxiliary and self.config.birth.storage_loss_enabled and
                     self.config.birth.radiance_mode=='adaptive_residual_birth'):
@@ -1182,10 +1600,34 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self.renderer.collect_contributions = previous_collection
             if collect_error_stats:
                 self.renderer.collect_error_stats = previous_error_collection
+            if stable_tail:
+                self.renderer.stable_backward = previous_stable_backward
+
+    @torch.no_grad()
+    def _temporal_repair_weights(self, viewpoint):
+        frame = self.current_frame
+        if frame < 1:
+            raise ValueError('Temporal repair requires a previous frame')
+        cache = getattr(self, '_repair_temporal_cache', None)
+        if cache is None or cache['frame'] != frame:
+            lag = self.config.full_update.repair_temporal_lag
+            previous = self.datamodule.scene.train_dataset.get_frame_dataset(max(0, frame - lag))
+            cache = self._repair_temporal_cache = dict(frame=frame, dataset=previous, weights={})
+        name = Path(viewpoint.path).name
+        if name not in cache['weights']:
+            previous = cache['dataset']
+            indices = [i for i, item in enumerate(previous.items) if Path(item.path).name == name]
+            if len(indices) != 1:
+                raise ValueError(f'Previous training frame has no unique camera: {name}')
+            old_image = previous[indices[0]].image.to(device=viewpoint.image.device,
+                                                       dtype=viewpoint.image.dtype)
+            cfg = self.config.full_update
+            cache['weights'][name] = temporal_repair_weights(viewpoint.image, old_image,
+                cfg.repair_temporal_weight, cfg.repair_temporal_scale)
+        return cache['weights'][name]
 
     def training_step(self, viewpoint, step, regularization_weight=1.):
-        collect = step == 200 and regional_attribute_repair_active(self)
-        package = self.forward(viewpoint, training=True, collect_error_stats=collect)
+        package = self.forward(viewpoint, training=True)
         adaptive_rate_view=package.pop('_adaptive_birth_rate_view',None)
         image = package['render']
         factor = motion_image_factor(step, self.motion_steps,
@@ -1195,36 +1637,42 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         metric = getattr(self.config, 'photometric_loss', 'l1')
         if (self.motion_committed or (uses_early_replacement(self.config) and self.early_initialized)) and self.config.birth.photometric_loss is not None:
             metric = self.config.birth.photometric_loss
+        cache = getattr(self, '_training_ssim_cache', None)
+        if cache is None:
+            cache = self._training_ssim_cache = _TrainingSSIMCache()
         image_loss = motion_photometric_loss(image, viewpoint.image,
-                                             self.config.lambda_dssim, factor, metric=metric)
-        if collect:
-            stats = package.pop('regional_error_stats', None)
-            if stats is None:
-                raise ValueError('Step-200 renderer did not return native regional error statistics')
-            error_map = (image.detach()-viewpoint.image.detach()).abs().mean(0)
-            numerator, denominator = stats.accumulate(error_map)
-            count = len(self.gaussians._xyz)
-            if (numerator.shape != (count,) or denominator.shape != (count,) or
-                    numerator.requires_grad or denominator.requires_grad):
-                raise ValueError('Step-200 regional evidence must match the old-GS layout')
-            if self._plan_error_owner is None:
-                self._plan_error_owner = self.motion.owner.detach().clone()
-            elif not torch.equal(self._plan_error_owner, self.motion.owner):
-                raise ValueError('Step-200 gate owners changed between training views')
-            package['regional_error_evidence'] = dict(camera=Path(str(viewpoint.path)).name,
-                numerator=numerator.detach(), denominator=denominator.detach(),
-                total_pixel_l1_sum=error_map.sum(dtype=torch.float64).detach(),
-                image_pixel_count=error_map.numel())
+                                             self.config.lambda_dssim, factor, metric=metric, cache=cache)
         loss = image_loss
+        full_cfg = getattr(self.config, 'full_update', None)
+        mix = ((full_cfg.repair_rmse_mix if step > self.motion_steps else full_cfg.motion_rmse_mix)
+               if full_cfg is not None else 0.)
+        temporal_objective = bool((regional_attribute_repair_active(self) or
+                                   getattr(self.config, 'ablation_motion_only', False)) and mix > 0)
+        if temporal_objective:
+            if full_cfg.repair_temporal_weight:
+                weights = self._temporal_repair_weights(viewpoint)
+                repair_rmse = weighted_repair_rmse(image, viewpoint.image, weights)
+            else:
+                repair_rmse = stabilized_rmse(image, viewpoint.image)
+            loss = (1 - mix) * image_loss + mix * repair_rmse
         # Leave scalar diagnostics on device until all views have finished.
         # Converting each one to float would synchronize CUDA before backward.
+        early = uses_early_replacement(self.config) and self.early_initialized
+        if early:
+            squared_error = (image.detach() - viewpoint.image.detach()).square()
+            channel_mse = squared_error.view(image.shape[0], -1).mean(1, keepdim=True)
+            image_psnr = (20 * torch.log10(1. / torch.sqrt(channel_mse))).mean()
+        else:
+            image_psnr = psnr(image.detach(), viewpoint.image).detach()
         metrics = dict(image_loss=image_loss.detach(), motion_image_factor=factor,
-                       psnr=psnr(image.detach(), viewpoint.image).detach(),
+                       psnr=image_psnr,
                        gs=len(self.gaussians._xyz) +
                        (len(self.births._xyz) if self.motion_committed else 0))
-        if uses_early_replacement(self.config) and self.early_initialized:
+        if temporal_objective:
+            metrics['repair_rmse'] = repair_rmse.detach()
+        if early:
             metrics['gs']=len(self.gaussians._xyz)+len(self.births.parent_rows)
-            error=(image-viewpoint.image).square().mean(0)
+            error=squared_error.mean(0)
             weight=self.early_focus_weights.get(Path(viewpoint.path).name)
             metrics['early_batch_mse']=error.mean().detach()
             if weight is not None:
@@ -1234,7 +1682,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if proposal_weight:
             proposal = self.forward(viewpoint, training=True, proposal_only=True)['render']
             proposal_loss = motion_photometric_loss(proposal, viewpoint.image,
-                                                    self.config.lambda_dssim, factor, metric=metric)
+                                                    self.config.lambda_dssim, factor, metric=metric, cache=cache)
             loss = loss + proposal_weight * proposal_loss
             metrics['proposal_image_loss'] = proposal_loss.detach()
         predictor_weight = (getattr(self.motion, 'predictor_image_weight', 0.)
@@ -1242,7 +1690,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if predictor_weight:
             prediction = self.forward(viewpoint, training=True, predictor_only=True)['render']
             prediction_loss = motion_photometric_loss(prediction, viewpoint.image,
-                self.config.lambda_dssim, factor, metric=metric)
+                self.config.lambda_dssim, factor, metric=metric, cache=cache)
             loss = loss + predictor_weight * prediction_loss
             metrics['predictor_image_loss'] = prediction_loss.detach()
         if fitting_old_motion(self) and regularization_weight:
@@ -1258,9 +1706,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 width=self.config.rigid_tree.sparse_rate_width_bins)
             loss = loss + regularization_weight * terms['loss']
         if (regularization_weight and getattr(self, 'feature_dc_update', None) is not None and
+                (not isinstance(self.feature_dc_update, RegionalFeatureDCUpdate) or self.feature_dc_update.ready) and
                 (not self.motion_committed or
                  (not self.frame_finalized and self.config.feature_dc_update.joint_with_birth))):
-            terms = self.feature_dc_update.rate_terms(self._rate_byte_price(step),
+            terms = self.feature_dc_update.rate_terms(self._rate_byte_price(step) * self.config.full_update.shared_dc_rate_scale,
                 width=self.config.rigid_tree.sparse_rate_width_bins)
             loss = loss + regularization_weight * terms['loss']
         logscale_update = getattr(self, 'logscale_update', None)
@@ -1268,10 +1717,14 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 logscale_update.ready and not self.frame_finalized):
             terms = logscale_update.rate_terms(self._rate_byte_price(step))
             loss = loss + regularization_weight * terms['loss']
+        shared_scale = getattr(self, 'regional_logscale', None)
+        if regularization_weight and shared_scale is not None and shared_scale.ready and not self.frame_finalized:
+            loss = loss + regularization_weight * shared_scale.rate_terms(self._rate_byte_price(step) * self.config.full_update.shared_dc_rate_scale)['loss']
         full = getattr(self, 'full_attribute_update', None)
         if (regularization_weight and getattr(self, 'full_update_active', False) and full is not None and
-                full.config.storage_loss_enabled and not self.frame_finalized):
-            terms = full.rate_terms(self._rate_byte_price(step))
+                full.config.storage_loss_enabled and not self.frame_finalized and
+                not (step <= self.motion_steps and full.initial_zero_frozen())):
+            terms = full.rate_terms(self._rate_byte_price(step) * self.config.full_update.point_dc_rate_scale)
             loss = loss + regularization_weight * terms['loss']
         if (self.motion_committed and regularization_weight and len(self.births._xyz) and
                 self.config.birth.alpha_sparsity_weight):
@@ -1378,9 +1831,18 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def transaction_training_view(self, step, index, count):
         views = self.transaction_camera_views()
         names = self.birth_transaction.fit_names
-        camera = ((step-self.motion_steps-1)*count+index) % len(names)
+        if count != 1 or index != 0 or not names:
+            raise ValueError('Birth fitting requires one random training view per step')
+        start = 71 if uses_early_replacement(self.config) else self.motion_steps + 1
+        if step < start:
+            raise ValueError('Birth fitting view requested before its training phase')
+        epoch, position = divmod(step - start, len(names))
+        data_config = getattr(self.datamodule, 'config', None)
+        seed = int(getattr(data_config, 'training_view_seed', None) or 0)
+        generator = torch.Generator().manual_seed(seed + 1000003 * self.current_frame + epoch)
+        camera = int(torch.randperm(len(names), generator=generator)[position])
         name = names[camera]
-        return views[name], self.birth_transaction.fit_names.index(name)
+        return views[name], camera
 
 
     @torch.no_grad()
@@ -1604,12 +2066,34 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
     def finalize_frame(self):
         if self.frame_finalized:
             return
+        forward_check = None
+        cache = getattr(self, '_frozen_decoded_alpha_cache', None)
+        if cache is not None and cache[0] == self.current_frame and cache[1] is self.opacity_update:
+            actual = self.opacity_update.canonical_logits().to(device=self.opacity_update.reference.device).sigmoid()
+            if not torch.equal(cache[2], actual):
+                raise ValueError('Frozen decoded opacity changed after it was cached')
+        if self.full_update_active or getattr(self.config, 'ablation_motion_only', False) or getattr(self, 'color_verify_forward', False):
+            if not self.full_update_active and not getattr(self.config, 'ablation_motion_only', False):
+                raise ValueError('Forward/decode check requires full attribute updates')
+            views = self.transaction_camera_views()
+            camera = getattr(self.trainer, 'diagnostic_train_camera', None) or sorted(views)[0]
+            if camera not in views or camera == 'cam00.png':
+                raise ValueError('Forward/decode check requires a training camera')
+            full_debug = bool(self.config.full_update.regional_full_point_budget)
+            self._capture_regional_full_debug = full_debug
+            before = self.forward(views[camera], training=True)['render'].detach().clamp(0, 1).clone()
+            debug_before = getattr(self, '_regional_full_debug', None) if full_debug else None
+            self._capture_regional_full_debug = False
+            forward_check = dict(camera=camera, before=before)
         if uses_early_replacement(self.config) and (
                 self.trainer.global_step not in (200,300) or self.early_shared_steps!=self.trainer.global_step):
             raise ValueError('Early replacement manifest requires a truthful single shared-Adam global200/300 ledger')
         if getattr(self.config.birth,'frame_training_plan',False):
-            if self.trainer.global_step != 300:
-                raise ValueError('Frame plan can only encode after step300 cleanup')
+            stop_at_motion = (getattr(self.config, 'ablation_motion_only', False) or
+                              (self.full_update_active and self.config.full_update.stop_after_motion))
+            expected_step = 200 if stop_at_motion else 300
+            if self.trainer.global_step != expected_step:
+                raise ValueError(f'Frame plan can only encode after step{expected_step}')
             self.gaussians._opacity.copy_(self.opacity_update.canonical_logits().to(self.device))
         if self.opacity_update is not None:
             self.opacity_update.finish()
@@ -1619,6 +2103,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if logscale_update is not None and logscale_update.ready:
             logscale_update.finish()
         old_raw = model_raw(self.gaussians)
+        shared_scale = getattr(self, 'regional_logscale', None)
+        if shared_scale is not None and shared_scale.ready:
+            shared_scale.finish()
         logscale_reference = old_raw['logscale'].detach().clone()
         if logscale_update is not None and logscale_update.ready:
             old_raw['logscale'] = logscale_update.canonical_logscale(
@@ -1663,6 +2150,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 logscale_reference).to(raw['logscale'])
             if not torch.equal(raw['logscale'][:len(expected_logscale)], expected_logscale):
                 raise ValueError('Materialized old log-scale differs from its sparse packet')
+        shared_scale_info = None
+        if shared_scale is not None and shared_scale.ready:
+            shared_scale_info = shared_scale.export(stream_dir / f'regscale_{self.current_frame:03d}.bin', self.current_frame)
         opacity_info = None
         if self.opacity_update is not None:
             opacity_info = self.opacity_update.export(
@@ -1679,12 +2169,54 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 raise ValueError('Materialized old DC differs from its shared color packet')
         full_info = None
         if full_reference is not None:
+            selected = self._plan_regional_attribute_state['eligible'].detach().cpu()
+            if selected.dtype != torch.bool or selected.shape != (len(full_reference['sh_dc']),):
+                raise ValueError('Invalid gradient-probed full-attribute selection')
+            if int(selected.sum()) > regional_point_budget(self, len(selected)):
+                raise ValueError('Gradient-probed full-attribute selection exceeds its point budget')
+            for name, symbols in full.symbols().items():
+                if bool(symbols[~selected].ne(0).any()):
+                    raise ValueError(f'Full attribute {name} changed outside the selection')
+            sparse_color = (self.config.full_update.sparse_color_stream_v2 or
+                            self.config.full_update.sparse_color_logscale_v3)
+            if sparse_color:
+                from .model.full_attribute_update import validate_sparse_color_selection
+                selected = self._plan_regional_attribute_state['eligible'].detach().cpu()
+                if selected.dtype != torch.bool or selected.shape != (len(full_reference['sh_dc']),):
+                    raise ValueError('Invalid sparse color training selection')
+                allowed = ('sh_dc', 'logscale') if self.config.full_update.sparse_color_logscale_v3 else ('sh_dc',)
+                validate_sparse_color_selection(full.symbols(), selected, self.config.full_update.color_point_budget, allowed)
+            if self.config.full_update.regional_full_point_budget:
+                selected = self._plan_regional_attribute_state['eligible'].detach().cpu()
+                selected_count = int(selected.sum())
+                if (selected_count > self.config.full_update.regional_full_point_budget or
+                        10 * selected_count >= len(selected)):
+                    raise ValueError('Full-attribute selection must be below 10 percent and within point budget')
+                for name, symbols in full.symbols().items():
+                    if bool(symbols[~selected].ne(0).any()):
+                        raise ValueError(f'Full attribute {name} changed outside the selection')
             full_info = full.export(stream_dir / f'fullattr_{self.current_frame:03d}.bin',
-                                    full_reference, self.current_frame)
+                                    full_reference, self.current_frame, sparse_only=sparse_color)
             expected_full = full.canonical(full_reference)
             for name in FULL_ATTRIBUTE_FIELDS:
                 if not torch.equal(raw[name][:len(expected_full[name])].cpu(), expected_full[name]):
                     raise ValueError(f'Materialized old {name} differs from its full attribute packet')
+        point_mask_info = None
+        if (self.full_update_active and self.config.full_update.color_only and
+                self.config.full_update.color_point_budget and
+                not (self.config.full_update.sparse_color_stream_v2 or self.config.full_update.sparse_color_logscale_v3) and
+                getattr(self, 'color_drift_branch', None) not in ('none', 'shared')):
+            from .model.color_point_mask import encode_color_point_mask, decode_color_point_mask
+            mask = self._plan_regional_attribute_state['eligible'].detach().cpu().numpy()
+            if int(mask.sum()) > self.config.full_update.color_point_budget:
+                raise ValueError('Color point mask exceeded its budget')
+            packet = encode_color_point_mask(mask, int(self.current_frame))
+            if packet is not None:
+                path = stream_dir / f'pointmask_{self.current_frame:03d}.bin'
+                path.write_bytes(packet)
+                if (decode_color_point_mask(packet, int(self.current_frame), len(mask)) != mask).any():
+                    raise ValueError('Color point mask packet did not round-trip')
+                point_mask_info = dict(path=str(path), archive_bytes=len(packet), selected_points=int(mask.sum()))
         decoded = self.motion.codec_previous_state
         prior = self.motion.frame_reference_state
         old_count = len(self.motion.owner)
@@ -1767,10 +2299,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             if (not getattr(self, 'full_update_active', False) and
                     getattr(self.config.birth, 'keep_incumbent_alpha_after_motion', False)):
                 manifest['training_step_accounting']['old_opacity'] = 200
-            if self.full_update_active and self.config.full_update.regional_repair:
+            if self.full_update_active:
                 factor = self.motion._motion_lr_factor(200)
                 rates = dict(
-                    xyz=self.config.rigid_tree.gs_translation_lr * factor,
+                    xyz=self.config.rigid_tree.gs_translation_lr * factor * self.config.full_update.gradient_position_lr_scale,
                     rotation=self.config.rigid_tree.gs_rotation_lr * factor,
                     opacity=self.config.opacity_update.learning_rate * (
                         factor if self.config.opacity_update.decay_with_motion else 1.),
@@ -1780,39 +2312,128 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 final_rates = {**rates, 'logscale': rates['logscale'] * factor,
                                'sh_dc': rates['sh_dc'] * factor,
                                'sh_rest': rates['sh_rest'] * factor}
+                info = self.birth_control['regional_attribute_repair']
                 manifest['birth_events'] = []
+                probe_count = self.config.full_update.probe_views_per_round
+                probe_steps = list(regional_probe_steps(self))
+                early = self.config.full_update.early_joint_repair
+                if early:
+                    at_201 = self.config.rigid_tree.motion_lr_final_ratio ** (100 / 199)
+                    rates = {**rates, **{key: rates[key] * at_201 for key in ('logscale', 'sh_dc', 'sh_rest')}}
+                repair_steps = 100 - sum(step > 200 for step in probe_steps)
+                early_attribute_steps = 100 - sum(step <= 200 for step in probe_steps) if early else 0
                 manifest['training_step_accounting'] = dict(
-                    global_iterations=300, shared_adam_steps=self.early_shared_steps,
-                    shared_gate=100, fixed_gate_residual=50, joint_gate_residual=30,
-                    final_motion=20, fixed_region_selected_gs_repair=100,
-                    old_opacity_all_rows_steps=100, old_opacity_regional_repair_steps=100,
-                    old_attribute_regional_repair_steps=100, birth_steps=[], cleanup_steps=[],
-                    newborn_updates=[], extra_SGD_steps=0)
+                    global_iterations=300, shared_adam_steps=self.early_shared_steps - len(probe_steps),
+                    shared_gate=self.config.rigid_tree.shared_discovery_steps,
+                    joint_gate_residual_early=100-self.config.rigid_tree.shared_discovery_steps,
+                    fixed_gate_residual=50 - sum(101 <= step <= 150 for step in probe_steps),
+                    joint_gate_residual=30, final_motion=20,
+                    fixed_region_selected_gs_repair=repair_steps,
+                    old_opacity_all_rows_steps=100 - sum(step <= 200 for step in probe_steps),
+                    old_opacity_regional_repair_steps=repair_steps,
+                    old_attribute_regional_repair_steps=repair_steps + early_attribute_steps,
+                    gradient_probe_steps=probe_steps,
+                    birth_steps=[], cleanup_steps=[], newborn_updates=[], extra_SGD_steps=0)
                 manifest['regional_attribute_repair'] = dict(
-                    selection_step=200, selected_count=self.birth_control['regional_attribute_repair']['selected_count'],
-                    selected_fraction=self.birth_control['regional_attribute_repair']['selected_fraction'],
-                    shared_region_and_gate_frozen_after=200,
-                    diagnostic_sidecar=self.birth_control['regional_attribute_repair']['diagnostics'],
+                    selection_step=([100 + probe_count] if early else [200 + probe_count, 250 + probe_count]), train_attributes=True,
+                    selected_count=info['selected_count'], selected_fraction=info['selected_fraction'],
+                    selection_rounds=info['selection_rounds'], shared_region_and_gate_frozen_after=200,
+                    diagnostic_sidecar=info['diagnostics'],
+                    selection=f'{1 if early else 2} rounds of {probe_count} single-view image-gradient probes',
                     motion_learning_rate_factor=factor,
-                    attribute_learning_rate_schedule='base * final_ratio ** ((step - 201) / 99)',
+                    position_learning_rate_scale=self.config.full_update.gradient_position_lr_scale,
+                    attribute_learning_rate_schedule=('base * final_ratio ** ((step - 101) / 199)' if early else
+                        'base * final_ratio ** ((step - 201) / 99)'),
                     learning_rates_step_201=rates, learning_rates_step_300=final_rates,
-                    reference='previous decoded frame', attribute_packet='shortest of FUA1/FUA2/FUA3 or absent for zero')
+                    reference='previous decoded frame',
+                    attribute_packet='shortest of FUA1/FUA2/FUA3 or absent for zero')
+        if getattr(self.config, 'ablation_motion_only', False):
+            manifest['birth_events'] = []
+            manifest['training_step_accounting'] = dict(
+                global_iterations=200, shared_adam_steps=self.early_shared_steps,
+                shared_gate=self.config.rigid_tree.shared_discovery_steps,
+                joint_gate_residual_early=100-self.config.rigid_tree.shared_discovery_steps,
+                fixed_gate_residual=50, joint_gate_residual=30, final_motion=20,
+                motion_optimizer_steps=200, old_opacity_all_rows_steps=100,
+                sparse_attribute_update_steps=0, gradient_probe_steps=[],
+                birth_steps=[], cleanup_steps=[], newborn_updates=[], extra_SGD_steps=0)
+            manifest['motion_only_ablation'] = dict(
+                sparse_attribute_repair=False, per_point_motion_residual=True,
+                quantized_opacity_update=True, train_views_per_step=1)
+        if getattr(self, 'gate_refine_image_ste', False):
+            manifest['gate_refine_image_ste'] = 'hard cut forward; candidate-total path-probability gate derivative at steps 151-180'
         if self.opacity_update is not None:
             manifest.update(opacity_update=Path(opacity_info['path']).name if opacity_info else None,
                             opacity_update_timing='before_births')
         if getattr(self, 'feature_dc_update', None) is not None:
             manifest.update(feature_dc_update=Path(feature_info['path']).name if feature_info else None,
                             feature_dc_update_timing='before_births')
+        if shared_scale is not None:
+            manifest.update(regional_logscale_update=(Path(shared_scale_info['path']).name if shared_scale_info else None), regional_logscale_update_timing='before_full_attribute_update')
         if logscale_update is not None:
             manifest.update(logscale_update=(Path(logscale_info['path']).name
                                              if logscale_info else None),
                             logscale_update_timing='before_births')
+        if self.full_update_active and self.config.full_update.color_only and self.config.full_update.color_point_budget:
+            selected=self._plan_regional_attribute_state['eligible']
+            if self.config.full_update.sparse_color_logscale_v3:
+                manifest['color_stream_version'] = 3
+                manifest['color_attribute_fields'] = ['sh_dc', 'logscale']
+            elif self.config.full_update.sparse_color_stream_v2:
+                manifest['color_stream_version'] = 2
+            else:
+                manifest['color_point_mask'] = Path(point_mask_info['path']).name if point_mask_info else None
+                manifest['color_point_mask_count'] = int(selected.sum()) if getattr(self, 'color_drift_branch', None) not in ('none', 'shared') else 0
+            manifest['color_point_budget'] = self.config.full_update.color_point_budget
+            manifest['color_drift_branch'] = getattr(self, 'color_drift_branch', None) or 'shared_point'
         if full_reference is not None:
             manifest.update(full_update=True,
                 full_attribute_update=Path(full_info['path']).name if full_info else None,
                 full_attribute_update_timing='after_regional_dc_before_births')
+        if isinstance(getattr(self, 'feature_dc_update', None), RegionalFeatureDCUpdate):
+            dc_start = 201 if self.config.feature_dc_update.post_motion_only else 1
+            manifest['regional_dc_update'] = dict(start_step=dc_start, end_step=300,
+                reference='previous decoded GS DC', ownership='live motion cut, frozen by step200' if dc_start == 1 else 'frozen step200 motion owners',
+                tail_learning_rate_scale=self.config.feature_dc_update.tail_learning_rate_scale,
+                eligible_regions=int(self.feature_dc_update.allowed.sum()),
+                active_regions=int(self.feature_dc_update.symbols().ne(0).any(-1).sum()),
+                zero_region_update_is_implicit=True, point_dc_reference='after regional DC')
+            shared_on=getattr(self, 'color_drift_branch', None) not in ('none', 'point')
+            manifest['regional_dc_update']['trainable'] = shared_on
+            manifest['training_step_accounting']['regional_dc_steps'] = (301 - dc_start) if shared_on else 0
         manifest_path = stream_dir / f'frame_{self.current_frame:03d}.json'
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        # The manifest is transmitted per frame; whitespace is not needed
+        # for parsing and every field remains available to the decoder.
+        manifest_path.write_text(json.dumps(manifest, separators=(',', ':')))
+        if self.full_update_active:
+            # Commit precisely what an independent receiver reconstructed, not
+            # merely an algebraically equivalent training-side quantization.
+            prior_raw = getattr(self, '_plan_diagnostic_reference', None)
+            if prior_raw is None:
+                raise ValueError('Bounded attribute updates require the previous decoded raw-state snapshot')
+            from scripts.replay_rigid_tree import decode_frame
+            replayed_state, replayed_raw = decode_frame(stream_dir, self.current_frame, prior, prior_raw)
+            if replayed_state.digest().hex() != manifest['decoded_state_sha256'] or reference_digest(replayed_raw) != raw_digest:
+                raise ValueError('Bounded attribute packet replay differs from the materialized training state')
+            for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
+                target = getattr(self.gaussians, attr)
+                target.copy_(replayed_raw[name].to(device=target.device, dtype=target.dtype))
+            self.motion.codec_previous_state = replayed_state
+        if forward_check is not None:
+            self._capture_regional_full_debug = bool(self.config.full_update.regional_full_point_budget)
+            after=self.forward(views[forward_check['camera']],training=False)['render'].detach().clamp(0,1)
+            debug_after = getattr(self, '_regional_full_debug', None) if self._capture_regional_full_debug else None
+            self._capture_regional_full_debug = False
+            difference=(forward_check.pop('before')-after).abs()
+            forward_check['max_abs'] = float(difference.max())
+            forward_check['mean_abs'] = float(difference.mean())
+            forward_check['tolerance'] = 1e-5
+            if not bool(torch.isfinite(difference).all()) or forward_check['max_abs'] > forward_check['tolerance']:
+                if self.config.full_update.regional_full_point_budget:
+                    path = Path(self.output_dir) / f'full_forward_debug_{self.current_frame:03d}.pth'
+                    torch.save(dict(before=debug_before, after=debug_after, camera=forward_check['camera'],
+                                    max_abs=forward_check['max_abs'], mean_abs=forward_check['mean_abs']), path)
+                raise ValueError(f"Training forward image differs from decoded-state image: max={forward_check['max_abs']}, mean={forward_check['mean_abs']}")
         self.frame_report = dict(frame=self.current_frame,
             initial_reference=self.initial_reference,
             region_count=int(self.motion.owner.unique().numel()),
@@ -1825,7 +2446,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             previous_count=len(prior.xyz), retired_count=retired_count,
             total_count=len(raw['xyz']), motion=motion_info, birth=birth_info,
             opacity_update=opacity_info, feature_dc_update=feature_info,
-            logscale_update=logscale_info,
+            logscale_update=logscale_info, regional_logscale_update=shared_scale_info, color_point_mask=point_mask_info, forward_decode_check=forward_check,
             motion_observation_diagnostics=dict(
                 kind=('actual_compositing' if self.config.effective_motion_observations else 'frustum'),
                 frustum_samples=self.birth_control.get('motion_frustum_samples', 0),
@@ -1838,7 +2459,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 (opacity_info['archive_bytes'] if opacity_info else 0) +
                 (feature_info['archive_bytes'] if feature_info else 0) +
                 (logscale_info['archive_bytes'] if logscale_info else 0) +
-                (full_info['archive_bytes'] if full_info else 0),
+                (shared_scale_info['archive_bytes'] if shared_scale_info else 0) +
+                (full_info['archive_bytes'] if full_info else 0) +
+                (point_mask_info['archive_bytes'] if point_mask_info else 0),
             shared_reference_bytes=self.trainer.decoder_reference_path.stat().st_size,
             materialized_sha256=raw_digest,
             decoder_reference=manifest['reference'],
@@ -1863,10 +2486,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 'pose, opacity, logscale, DC and higher-order SH updates; shared first frame counted once.')
         if full_reference is not None:
             self.frame_report['full_attribute_update'] = full_info
-            terms = full.rate_terms(self._rate_byte_price(self.total_steps))
+            terms = full.rate_terms(self._rate_byte_price(self.total_steps) * self.config.full_update.point_dc_rate_scale)
             self.frame_report['full_attribute_rate_diagnostics'] = {
                 'storage_loss_enabled': full.config.storage_loss_enabled,
-                'byte_price': self._rate_byte_price(self.total_steps),
+                'byte_price': self._rate_byte_price(self.total_steps) * self.config.full_update.point_dc_rate_scale,
                 'raw_bytes_surrogate': float(terms['raw_bytes_surrogate']),
                 'l1_loss': float(terms['l1_loss']),
                 'loss': float(terms['loss']),
@@ -1876,11 +2499,22 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                            for name, item in terms['fields'].items()}}
             self.frame_report['semantics'] = ('Spatial gate motion and quantized births; '
                 'keyframe old log-scale, DC and higher-order SH use an additional coded delta.')
+        if self.full_update_active and self.config.full_update.color_only and not self.config.full_update.stop_after_motion:
+            self.frame_report['semantics'] = ('Motion and opacity frozen after step200; quantized regional DC and selected point attributes fitted through step300; previous decoded frame used as reference.')
+        if self.full_update_active and self.config.full_update.stop_after_motion:
+            self.frame_report['semantics'] = ('Spatial gate motion and opacity through step200; '
+                'fixed population; no post-motion updates; shared first frame counted once.')
+        if getattr(self.config, 'ablation_motion_only', False):
+            self.frame_report['semantics'] = ('200 steps of shared gate motion, per-point motion residuals '
+                'and quantized opacity updates; no sparse attribute repair or births.')
         if getattr(self.config.birth,'frame_training_plan',False):
             self.frame_report['packet_bytes'] = self.frame_report['encoded_bytes']
             self.frame_report['manifest_bytes'] = manifest_path.stat().st_size
             self.frame_report['encoded_bytes'] += manifest_path.stat().st_size
             self.frame_report['complete_dynamic_update_bytes'] = self.frame_report['encoded_bytes']
+        if isinstance(getattr(self, 'feature_dc_update', None), RegionalFeatureDCUpdate):
+            terms = self.feature_dc_update.rate_terms(self._rate_byte_price(self.total_steps) * self.config.full_update.shared_dc_rate_scale)
+            self.frame_report['regional_dc_rate_diagnostics'] = {k:float(v) for k,v in terms.items()}
 
     @torch.no_grad()
     def validation_step(self, viewpoint, idx, loader_idx):
@@ -1899,8 +2533,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                        psnr=float(psnr(image, viewpoint.image)),
                        ssim=float(ssim(image, viewpoint.image)))
         if self.config.lpips_required:
-            metrics['lpips'] = float(lpips(image, viewpoint.image,
-                                          net_type='vgg').mean())
+            cache = getattr(self, '_lpips_eval_cache', None)
+            if cache is None:
+                cache = self._lpips_eval_cache = _LPIPSEvalCache()
+            metrics['lpips'] = float(cache(image, viewpoint.image).mean())
         return metrics
 
     def validation_end(self, results, num_loaders=1):

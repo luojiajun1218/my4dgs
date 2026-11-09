@@ -13,13 +13,13 @@ import numpy as np
 import torch
 
 from pipeline.adaptive_birth import AdaptiveBirthController
-from pipeline.frame_plan import FramePlanController, effective_final_joint_refine_steps, fitting_old_motion
+from pipeline.frame_plan import (FramePlanController, effective_final_joint_refine_steps,
+                                 fitting_old_motion, frame_plan_phase)
 from pipeline.model.adaptive_birth_storage import newborn_storage_terms
 from pipeline.model.birth_quantization import RAW_FIELDS, RAW_ATTRIBUTES, QuantizedNewGaussianView, model_raw, reference_digest
 from pipeline.model.early_replacement_model import _logits
 from pipeline.model.frame_plan_birth import FramePlanBirthModel, nearest_old_references
 from pipeline.model.gaussian import BirthGaussianModel
-from pipeline.model.rate_budget import RateBudgetState
 from pipeline.model.sparse_logscale import LogScaleUpdateConfig, MotionSupportLogScaleUpdate
 from pipeline.model.sparse_updates import QuantizedOpacityUpdate, OpacityUpdateConfig
 from pipeline.model.spatial_gated_motion import SpatialGatedMotion
@@ -71,7 +71,6 @@ def controller_fixture(directory,budget=False,shared_colour=False):
     m.config.lambda_dssim = .2
     motion = motion_fixture()
     cfg = motion.config
-    cfg.target_update_bytes=100 if budget else 0
     m.config.rigid_tree = cfg
     m.motion = SpatialGatedMotion(cfg)
     m.motion.setup(m.gaussians._xyz, m.gaussians._rotation, 1., frame_index=1)
@@ -98,7 +97,6 @@ def controller_fixture(directory,budget=False,shared_colour=False):
     m.prepare_frame = lambda: None
     m.pre_training_step = MethodType(Module.pre_training_step, m)
     m._early_attach_opacity()
-    m._plan_setup_rate_budget()
     return m, views
 
 
@@ -106,6 +104,33 @@ class FramePlanMotionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
+
+    def test_logged_phase_matches_region_repair_and_other_tail_modes(self):
+        birth = NS(frame_training_plan=True, keep_incumbent_fixed_after_motion=False,
+                   keep_incumbent_alpha_after_motion=False)
+        gate = NS(final_joint_refine_steps=0)
+        module = NS(full_update_active=True, config=NS(birth=birth,
+                    full_update=NS(regional_repair=True), rigid_tree=NS(spatial_gate=gate)))
+        trainer = NS(module=module)
+        expected = [(1,'shared_gate'),(100,'shared_gate'),(101,'fixed_gate_residual'),
+                    (150,'fixed_gate_residual'),(151,'joint_gate_residual'),
+                    (180,'joint_gate_residual'),(181,'fixed_gate_motion'),
+                    (200,'fixed_gate_motion'),(201,'regional_attribute_repair'),
+                    (300,'regional_attribute_repair')]
+        for step, phase in expected:
+            self.assertEqual(frame_plan_phase(module,step),phase)
+            self.assertEqual(Trainer._phase_name(trainer,step),phase)
+        birth.keep_incumbent_fixed_after_motion=True
+        self.assertEqual(Trainer._phase_name(trainer,201),'regional_attribute_repair')
+        module.full_update_active=False
+        self.assertEqual(Trainer._phase_name(trainer,201),'newborn_fixed_incumbent')
+        birth.keep_incumbent_alpha_after_motion=True
+        self.assertEqual(Trainer._phase_name(trainer,201),'newborn_old_alpha')
+        birth.keep_incumbent_fixed_after_motion=False
+        gate.final_joint_refine_steps=20
+        self.assertEqual(Trainer._phase_name(trainer,280),'newborn_old_alpha')
+        self.assertEqual(Trainer._phase_name(trainer,281),'final_joint_refine')
+        self.assertEqual(Trainer._phase_name(trainer,300),'final_joint_refine')
 
     def test_boundaries_freeze_parameters_and_do_not_accumulate_frozen_adam(self):
         model = motion_fixture()
@@ -553,12 +578,10 @@ class FramePlanControllerTests(unittest.TestCase):
             m.birth_control['early_replacement'] = {}
             m.early_birth_updates = 0
             m.finalize_frame = Mock()
-            m._plan_update_rate_budget = Mock()
             for frame in (1, 2, 3, 4, 99):
                 m.current_frame = frame
                 m._plan_finish()
             self.assertEqual(m.finalize_frame.call_count, 5)
-            self.assertEqual(m._plan_update_rate_budget.call_count, 5)
 
     def test_sampling_is_reproducible_without_touching_global_rng(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -649,6 +672,30 @@ def checkpoint_harness(module):
 class FramePlanPersistenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):torch.set_num_threads(2)
+
+    def test_checkpoint_restores_when_reference_layout_is_verified_after_move(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(BirthGaussianModel, 'training_setup', cpu_gaussian_setup):
+            model, _ = controller_fixture(directory)
+            checkpoint_harness(model)
+            old = '/previous/reference_frame0.npz'
+            model.config.rigid_tree.spatial_gate.reference_layout = old
+            checkpoint = dict(global_step=1, current_frame=1)
+            Module.on_save_checkpoint(model, checkpoint)
+
+            reference = Path(directory) / 'reference_frame0.npz'
+            reference.write_bytes(b'verified reference')
+            entry = dict(file=reference.name, original_path=old, original_resolved_path=old,
+                         sha256=hashlib.sha256(reference.read_bytes()).hexdigest())
+            (reference.parent / 'manifest.json').write_text(
+                json.dumps({'files': {'reference_layout': entry}}))
+            restored, _ = controller_fixture(directory)
+            checkpoint_harness(restored)
+            restored.config.rigid_tree.spatial_gate.reference_layout = str(reference)
+            Module.on_load_checkpoint(restored, checkpoint)
+            self.assertEqual(checkpoint['rigid_tree_config']['spatial_gate']['reference_layout'], old)
+            self.assertEqual(restored.config.rigid_tree.spatial_gate.reference_layout, str(reference))
 
     def test_real_module_checkpoint_cleanup200_250_and_final_cpu_packets(self):
         for tail_steps in (0,20):
@@ -764,16 +811,12 @@ class FramePlanPersistenceTests(unittest.TestCase):
             self.assertIsNone(manifest.get('feature_dc_update'))
             self.assertEqual(m.frame_report['retired_count'],3)
             self.assertEqual(m.frame_report['birth_count'],4)
-            self.assertEqual(m._rate_budget_state['last_frame'],1)
-            self.assertGreater(m.frame_report['rate_budget']['next_multiplier'],1.)
-            self.assertEqual(m.motion.rate_multiplier,1.)
             checkpoint={"current_frame":1,"global_step":300}
             Module.on_save_checkpoint(m,checkpoint)
             resumed,_=controller_fixture(directory,budget=True)
             resumed.config.rigid_tree.spatial_gate.final_joint_refine_steps=tail_steps
             checkpoint_harness(resumed)
             Module.on_load_checkpoint(resumed,copy.deepcopy(checkpoint))
-            self.assertEqual(resumed._rate_budget_state,m._rate_budget_state)
             self.assertEqual(m.frame_report['complete_dynamic_update_bytes'],sum(
                 p.stat().st_size for p in stream_dir.iterdir() if p.suffix in ('.bin','.json')))
             # Previous newborns now become ordinary old rows; new frame has
@@ -785,7 +828,7 @@ class FramePlanPersistenceTests(unittest.TestCase):
             self.assertFalse(m.motion.gs_translation.requires_grad)
             self.assertTrue((m.motion.gs_translation==0).all())
             self.assertEqual(len(m.motion.optimizer.state),0)
-            self.assertGreater(m.motion.rate_multiplier,1.)
+            self.assertEqual(m.motion.effective_rate_loss_weight, m.config.rigid_tree.rate_loss_weight)
 
 
 class NoisyRenderer(EvidenceRenderer):
@@ -1150,79 +1193,6 @@ class FixedIncumbentTests(unittest.TestCase):
             decoded2, raw2 = decode_frame(second_dir, 2, previous_state, previous)
             self.assertEqual(decoded2.digest(), resumed.motion.codec_previous_state.digest())
             self.assertEqual(reference_digest(raw2), resumed.frame_report['materialized_sha256'])
-
-
-class RateBudgetTests(unittest.TestCase):
-    def test_previous_bytes_change_next_weight_and_update_is_idempotent(self):
-        state=RateBudgetState()
-        report=state.update(1,75000,50000,.25,64.)
-        self.assertEqual(report['used_multiplier'],1.)
-        self.assertGreater(report['next_multiplier'],1.)
-        saved=state.capture()
-        self.assertEqual(report,state.update(1,75000,50000,.25,64.))
-        self.assertEqual(saved,state.capture())
-        restored=RateBudgetState.restore(saved,64.)
-        second=restored.update(2,25000,50000,.25,64.)
-        self.assertEqual(second['used_multiplier'],report['next_multiplier'])
-        self.assertLess(second['next_multiplier'],second['used_multiplier'])
-        self.assertEqual(restored.total_bytes,100000)
-        self.assertEqual(second['mean_complete_bytes'],50000)
-        self.assertEqual(state.frames,1)
-        with self.assertRaises(ValueError):state.update(0,75000,50000,.25,64.)
-        with self.assertRaises(ValueError):state.update(3,75000,50000,.25,64.)
-        with self.assertRaises(ValueError):state.update(1,75001,50000,.25,64.)
-
-    def test_multiplier_bounds_and_invalid_history(self):
-        state=RateBudgetState()
-        state.update(1,10**9,50000,10.,4.)
-        self.assertAlmostEqual(state.multiplier,4.)
-        state.update(2,1,50000,10.,4.)
-        self.assertEqual(state.multiplier,1.)
-        capped=RateBudgetState()
-        capped.update(1,10**9,50000,10.,100.)
-        RateBudgetState.restore(capped.capture(),100.)
-        capped.update(2,10**9,50000,10.,100.)
-        RateBudgetState.restore(capped.capture(),100.)
-        for field,value in (('frames',-1),('last_frame',9),('log_multiplier',math.inf)):
-            bad=state.capture();bad[field]=value
-            with self.subTest(field=field),self.assertRaises(ValueError):RateBudgetState.restore(bad,4.)
-
-    def test_motion_multiplier_is_checkpointed_and_prices_loss_without_config_mutation(self):
-        model=motion_fixture();model.prepare_plan_step(151)
-        with torch.no_grad():model.gs_translation[:,0]=.01
-        base=model.loss_terms(151,diagnostics=False)['rate_loss'].detach()
-        model.rate_multiplier=3.
-        changed=model.loss_terms(151,diagnostics=False)['rate_loss'].detach()
-        torch.testing.assert_close(changed,base*3)
-        original=model.config.rate_loss_weight
-        restored=type(model)(copy.deepcopy(model.config));restored.restore(copy.deepcopy(model.capture()))
-        self.assertEqual(restored.rate_multiplier,3.)
-        self.assertEqual(restored.config.rate_loss_weight,original)
-
-    def test_initial_multiplier_validation_and_first_frame_warm_start(self):
-        from types import SimpleNamespace as NS
-        from pipeline.frame_plan import FramePlanController
-        model=motion_fixture();cfg=model.config
-        for value in (True,.5,65.,math.inf):
-            cfg.initial_rate_multiplier=value
-            with self.assertRaisesRegex(ValueError,'initial_rate_multiplier'):
-                cfg.validate()
-        cfg.initial_rate_multiplier=2.
-        with self.assertRaisesRegex(ValueError,'initial_rate_multiplier'):
-            cfg.validate()
-        cfg.target_update_bytes=50000;cfg.validate()
-        harness=NS(config=NS(rigid_tree=cfg),motion=model,current_frame=1,
-                   _rate_budget_state=None,frame_report={'encoded_bytes':75000})
-        FramePlanController._plan_setup_rate_budget(harness)
-        self.assertEqual(model.rate_multiplier,2.)
-        self.assertEqual(harness._rate_budget_state['frames'],0)
-        FramePlanController._plan_update_rate_budget(harness)
-        report=harness.frame_report['rate_budget']
-        self.assertEqual(report['used_multiplier'],2.)
-        self.assertEqual(report['initial_multiplier'],2.)
-        harness.current_frame=2
-        FramePlanController._plan_setup_rate_budget(harness)
-        self.assertEqual(model.rate_multiplier,report['next_multiplier'])
 
 
 class SurvivalStorageTests(unittest.TestCase):

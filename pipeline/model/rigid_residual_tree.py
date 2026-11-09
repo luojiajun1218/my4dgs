@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import math
 from typing import Optional
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -19,6 +20,7 @@ class RigidTreeConfig:
     region_count: int = 9
     motion_steps: int = 100
     birth_steps: int = 100
+    shared_discovery_steps: int = 100
     motion_xyz_step_extent: float = 5e-6
     motion_rotation_step_rad: float = 5e-5
     gs_xyz_step_extent: float = 5e-6
@@ -33,10 +35,6 @@ class RigidTreeConfig:
     adam_betas: tuple = (0.9, 0.999)
     adam_eps: float = 1e-8
     rate_loss_weight: float = 0.01
-    target_update_bytes: int = 0
-    initial_rate_multiplier: float = 1.0
-    rate_controller_gain: float = 0.25
-    max_rate_multiplier: float = 64.0
     differentiable_rate_support: bool = False
     sparse_rate_width_bins: float = 1.0
     proximal_gs_regularization: bool = False
@@ -60,22 +58,11 @@ class RigidTreeConfig:
 
     def validate(self):
         self.spatial_gate.validate(self.motion_steps)
-        if (isinstance(self.target_update_bytes,bool) or not isinstance(self.target_update_bytes,int)
-                or self.target_update_bytes < 0):
-            raise ValueError('target_update_bytes must be a nonnegative integer')
-        if self.target_update_bytes and (not self.spatial_gate.frame_training_plan or self.rate_loss_weight <= 0):
-            raise ValueError('Actual-byte feedback needs the frame plan and a positive base rate weight')
-        for name,minimum in (('rate_controller_gain',0.),('max_rate_multiplier',1.)):
-            value=getattr(self,name)
-            if (isinstance(value,bool) or not isinstance(value,(int,float)) or
-                    not math.isfinite(value) or value < minimum or
-                    (name=='rate_controller_gain' and value==0)):
-                raise ValueError(f'{name} has an invalid finite positive value')
-        initial=self.initial_rate_multiplier
-        if (isinstance(initial,bool) or not isinstance(initial,(int,float)) or
-                not math.isfinite(initial) or not 1 <= initial <= self.max_rate_multiplier or
-                (initial != 1 and not self.target_update_bytes)):
-            raise ValueError('initial_rate_multiplier requires byte feedback and must fit controller bounds')
+        if (isinstance(self.shared_discovery_steps, bool) or
+                not isinstance(self.shared_discovery_steps, int) or
+                not 1 <= self.shared_discovery_steps <= 100 or
+                (self.shared_discovery_steps != 100 and not (self.spatial_gate.frame_training_plan and self.spatial_gate.shared_discovery))):
+            raise ValueError('Shared discovery steps must be 1..100 and require frame-plan shared discovery')
         if not isinstance(self.rotation_updates, bool):
             raise ValueError('rotation_updates must be boolean')
         if (isinstance(self.amplitude_refit_steps, bool) or
@@ -176,9 +163,13 @@ RETIRED_TREE_CONFIG_FIELDS = frozenset(('post_birth_motion_steps', 'fixed_suppor
 def saved_config_with_default_motion_lr(saved_config):
     if not isinstance(saved_config, dict):
         return saved_config
+    if saved_config.get('target_update_bytes', 0) or saved_config.get('initial_rate_multiplier', 1.) != 1.:
+        raise ValueError('Feedback-trained motion checkpoints are replay-only')
+    retired_feedback = {'target_update_bytes', 'initial_rate_multiplier', 'rate_controller_gain',
+                        'min_rate_multiplier', 'max_rate_multiplier'}
     normalized = {**asdict(RigidTreeConfig()), **{
         name: value for name, value in saved_config.items()
-        if name not in RETIRED_TREE_CONFIG_FIELDS}}
+        if name not in RETIRED_TREE_CONFIG_FIELDS and name not in retired_feedback}}
     # Older implicit-depth checkpoints used three levels; a new training
     # default must not reinterpret their saved layout.
     normalized['spatial_gate'] = {**asdict(SpatialGateConfig()), 'max_depth': 3,
@@ -240,8 +231,20 @@ def _identity(count, ref):
 
 
 def _topological_order(parents):
-    values = (parents.detach().cpu().tolist() if torch.is_tensor(parents)
-              else list(parents))
+    if (torch.is_tensor(parents) and parents.ndim == 1 and
+            parents.dtype in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64)):
+        # Breadth-first spatial trees put every parent before its children.
+        # In that case the general traversal below produces exactly 1..N-1.
+        values_array = parents.detach().cpu().numpy()
+        if not len(values_array) or values_array[0] != -1:
+            raise ValueError('Region zero must be the identity root')
+        tail = values_array[1:]
+        if np.all(tail >= 0) and np.all(tail < np.arange(1, len(values_array))):
+            return list(range(1, len(values_array)))
+        values = values_array.tolist()
+    else:
+        values = (parents.detach().cpu().tolist() if torch.is_tensor(parents)
+                  else list(parents))
     if not values or values[0] != -1:
         raise ValueError('Region zero must be the identity root')
     order = []
@@ -330,6 +333,16 @@ def _id_lengths(count, reference):
     for threshold in (128, 16384, 2097152, 268435456):
         length = length + (index >= threshold).to(reference.dtype)
     return length
+
+
+def _point_id_lengths(count, reference):
+    """Approximate each sparse point-ID gap as one byte, independent of row ID.
+
+    Motion packets encode gaps between active IDs, not absolute IDs. One byte
+    is a fixed approximation (large gaps may require more), so equivalent
+    residuals do not receive different prices because of their row numbers.
+    """
+    return reference.new_ones(count)
 
 
 def compose_pose(base_xyz, base_rotation, owner, parents, pivots,
@@ -421,7 +434,7 @@ class MotionBase(nn.Module):
 
     @property
     def effective_rate_loss_weight(self):
-        return self.config.rate_loss_weight*getattr(self,'rate_multiplier',1.)
+        return self.config.rate_loss_weight
 
 
     def materialized_pose(self, step=None):
@@ -451,7 +464,7 @@ class MotionBase(nn.Module):
         """Choose both, translation, rotation, or zero by Adam-metric L0 cost.
 
         The local quadratic uses Adam's bias-corrected second moment as its
-        diagonal metric. Candidates pay actual sparse block and row-ID bytes,
+        diagonal metric. Candidates pay estimated sparse block and row-ID bytes,
         normalized by raw six-float motion bytes. A region starts at row one
         because the identity root never carries a stored motion block.
         """
@@ -612,10 +625,8 @@ class MotionBase(nn.Module):
         if saved_config_with_default_motion_lr(packet['config']) != asdict(self.config):
             raise ValueError('Spatial motion checkpoint configuration differs')
         self.rate_multiplier=float(packet.get('rate_multiplier',1.))
-        if (not math.isfinite(self.rate_multiplier) or self.rate_multiplier < 1 or
-                (self.rate_multiplier > self.config.max_rate_multiplier and
-                 not math.isclose(self.rate_multiplier,self.config.max_rate_multiplier,rel_tol=1e-12))):
-            raise ValueError('Invalid saved rate multiplier')
+        if self.rate_multiplier != 1.:
+            raise ValueError('Feedback-trained motion checkpoints are replay-only')
         from .rigid_tree_codec import DecodedState
         state = packet['codec_previous_state']
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
@@ -650,7 +661,7 @@ class MotionBase(nn.Module):
         if self.observations is None:
             self.observations = torch.zeros(len(self.base_xyz), dtype=torch.long, device=self.base_xyz.device)
         self._region_id_lengths = _id_lengths(len(self.parents) - 1, self.base_xyz)
-        self._gs_id_lengths = _id_lengths(len(self.base_xyz), self.base_xyz)
+        self._gs_id_lengths = _point_id_lengths(len(self.base_xyz), self.base_xyz)
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
         self.frame_reference_state = (None if reference is None else
                                       DecodedState.restore(reference))

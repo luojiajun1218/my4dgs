@@ -20,6 +20,7 @@ output 中历史结果仅用于读取；目录可能包含软链接，不修改�
 ## 项目结构与模块组织
 
 `main.py` 是训练入口，默认使用 `--pipeline=my4dgs`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。`pipeline/__init__.py` 为 `libgs` 提供加载入口，`_compat.py` 兼容旧的 `pipeline.ReCon-GS` 导入，无需保留中间目录。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
+不要没事就写test文件，非必要不写test文件
 
 ## 构建、测试与开发命令
 

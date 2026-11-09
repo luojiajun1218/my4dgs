@@ -93,10 +93,14 @@ def decode_opacity_delta(packet, reference, *, frame_index=None):
     reference = _reference(reference)
     packet = bytes(packet)
     layout_body = None
+    parsed = None
     if packet[:4] in OPACITY_MAGICS:
         layout, raw_length = unpack_layout(packet, OPACITY_MAGICS,
                                            max_raw_bytes=HEADER.size + MAX_BODY_BYTES)
-        raw = decode_opacity_layout(layout, raw_length)
+        # The planar decoder already validates and materializes its rows and
+        # symbols. Reuse them only after the original packet CRC is checked.
+        parsed = {}
+        raw = decode_opacity_layout(layout, raw_length, parsed=parsed)
         packet, layout_body = raw[:HEADER.size], raw[HEADER.size:]
     if len(packet) < HEADER.size:
         raise ValueError('Truncated opacity header')
@@ -123,23 +127,27 @@ def decode_opacity_delta(packet, reference, *, frame_index=None):
     prefix = HEADER.pack(magic, frame, count, nonzero, step, length, 0, prior)
     if zlib.crc32(prefix + body) != checksum:
         raise ValueError('Opacity checksum mismatch')
-    rows, values, offset, previous = [], [], 0, -1
-    for _ in range(nonzero):
-        gap, offset = _read_varint(body, offset)
-        row = previous + gap
-        if gap < 1 or row >= count or offset + 2 > len(body):
-            raise ValueError('Invalid, duplicate or truncated opacity row')
-        value = struct.unpack_from('<h', body, offset)[0]
-        if value == 0:
-            raise ValueError('Sparse opacity packet contains a zero update')
-        rows.append(row)
-        values.append(value)
-        offset += 2
-        previous = row
-    if offset != len(body):
-        raise ValueError('Unexpected opacity body trailer')
-    rows = torch.tensor(rows, dtype=torch.long, device=reference.device)
-    values = torch.tensor(values, dtype=torch.int16, device=reference.device)
+    if parsed is None:
+        rows, values, offset, previous = [], [], 0, -1
+        for _ in range(nonzero):
+            gap, offset = _read_varint(body, offset)
+            row = previous + gap
+            if gap < 1 or row >= count or offset + 2 > len(body):
+                raise ValueError('Invalid, duplicate or truncated opacity row')
+            value = struct.unpack_from('<h', body, offset)[0]
+            if value == 0:
+                raise ValueError('Sparse opacity packet contains a zero update')
+            rows.append(row)
+            values.append(value)
+            offset += 2
+            previous = row
+        if offset != len(body):
+            raise ValueError('Unexpected opacity body trailer')
+        rows = torch.tensor(rows, dtype=torch.long, device=reference.device)
+        values = torch.tensor(values, dtype=torch.int16, device=reference.device)
+    else:
+        rows = torch.from_numpy(parsed['rows']).to(device=reference.device)
+        values = torch.from_numpy(parsed['symbols'].reshape(-1)).to(device=reference.device)
     logits = reference.clone()
     mode = next(mode for mode, identifier in MODES.items() if identifier == magic)
     if mode == 'alpha_canonical':

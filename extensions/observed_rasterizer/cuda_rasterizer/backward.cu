@@ -148,7 +148,12 @@ __global__ void computeCov2DCUDA(int P,
 	const float h_x, float h_y,
 	const float tan_fovx, float tan_fovy,
 	const float* view_matrix,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	const double* dL_dconics,
+	const float4* rendered_conic,
+#else
 	const float* dL_dconics,
+#endif
 	float3* dL_dmeans,
 	float* dL_dcov)
 {
@@ -162,7 +167,11 @@ __global__ void computeCov2DCUDA(int P,
 	// Fetch gradients, recompute 2D covariance and relevant 
 	// intermediate forward results needed in the backward.
 	float3 mean = means[idx];
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	double3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };
+#else
 	float3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };
+#endif
 	float3 t = transformPoint4x3(mean, view_matrix);
 	
 	const float limx = 1.3f * tan_fovx;
@@ -191,6 +200,21 @@ __global__ void computeCov2DCUDA(int P,
 
 	glm::mat3 T = W * J;
 
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	// Reuse the conic computed by the forward pass. The equivalent inverse
+	// derivative avoids recomputing a nearly singular float32 determinant.
+	// Double accumulation also limits cancellation among pixel gradients.
+	const double A = rendered_conic[idx].x;
+	const double B = rendered_conic[idx].y;
+	const double C = rendered_conic[idx].z;
+	const double inv_det = A * C - B * B;
+	const double correction = 1.0 / (1.0 + 0.0000001 * inv_det * inv_det);
+	double dL_da = -correction * (A*A*dL_dconic.x + 2*A*B*dL_dconic.y + B*B*dL_dconic.z);
+	double dL_db = -2*correction * (A*B*dL_dconic.x + (A*C+B*B)*dL_dconic.y + B*C*dL_dconic.z);
+	double dL_dc = -correction * (B*B*dL_dconic.x + 2*B*C*dL_dconic.y + C*C*dL_dconic.z);
+
+	// Leave nonfinite gradients visible to the caller.
+#else
 	glm::mat3 cov2D = glm::transpose(T) * glm::transpose(Vrk) * T;
 
 	// Use helper variables for 2D covariance entries. More compact.
@@ -203,13 +227,16 @@ __global__ void computeCov2DCUDA(int P,
 	float denom2inv = 1.0f / ((denom * denom) + 0.0000001f);
 
 	if (denom2inv != 0)
+#endif
 	{
+#ifndef MY4DGS_STABLE_COVARIANCE_BACKWARD
 		// Gradients of loss w.r.t. entries of 2D covariance matrix,
 		// given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
 		// e.g., dL / da = dL / d_conic_a * d_conic_a / d_a
 		dL_da = denom2inv * (-c * c * dL_dconic.x + 2 * b * c * dL_dconic.y + (denom - a * c) * dL_dconic.z);
 		dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
 		dL_db = denom2inv * 2 * (b * c * dL_dconic.x - (denom + 2 * b * b) * dL_dconic.y + a * b * dL_dconic.z);
+#endif
 
 		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
 		// given gradients w.r.t. 2D covariance matrix (diagonal).
@@ -226,11 +253,13 @@ __global__ void computeCov2DCUDA(int P,
 		dL_dcov[6 * idx + 2] = 2 * T[0][0] * T[0][2] * dL_da + (T[0][0] * T[1][2] + T[0][2] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][2] * dL_dc;
 		dL_dcov[6 * idx + 4] = 2 * T[0][2] * T[0][1] * dL_da + (T[0][1] * T[1][2] + T[0][2] * T[1][1]) * dL_db + 2 * T[1][1] * T[1][2] * dL_dc;
 	}
+#ifndef MY4DGS_STABLE_COVARIANCE_BACKWARD
 	else
 	{
 		for (int i = 0; i < 6; i++)
 			dL_dcov[6 * idx + i] = 0;
 	}
+#endif
 
 	// Gradients of loss w.r.t. upper 2x3 portion of intermediate matrix T
 	// cov2D = transpose(T) * transpose(Vrk) * T;
@@ -410,7 +439,11 @@ renderCUDA(
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
 	float3* __restrict__ dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	double4* __restrict__ dL_dconic2D,
+#else
 	float4* __restrict__ dL_dconic2D,
+#endif
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
@@ -572,7 +605,12 @@ void OBSERVED_BACKWARD::preprocess(
 	const float tan_fovx, float tan_fovy,
 	const glm::vec3* campos,
 	const float3* dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	const double* dL_dconic,
+	const float4* rendered_conic,
+#else
 	const float* dL_dconic,
+#endif
 	glm::vec3* dL_dmean3D,
 	float* dL_dcolor,
 	float* dL_dcov3D,
@@ -595,6 +633,9 @@ void OBSERVED_BACKWARD::preprocess(
 		tan_fovy,
 		viewmatrix,
 		dL_dconic,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+		rendered_conic,
+#endif
 		(float3*)dL_dmean3D,
 		dL_dcov3D);
 
@@ -634,7 +675,11 @@ void OBSERVED_BACKWARD::render(
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
 	float3* dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	double4* dL_dconic2D,
+#else
 	float4* dL_dconic2D,
+#endif
 	float* dL_dopacity,
 	float* dL_dcolors)
 {

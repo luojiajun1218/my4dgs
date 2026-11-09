@@ -116,6 +116,7 @@ def early_controller_fixture(directory):
         if name.startswith('_early_') and callable(value):
             setattr(m, name, MethodType(value, m))
     for name in ('_rate_byte_price', '_opacity_rate_price', 'make_birth_view', 'forward', 'transaction_training_view',
+                 '_begin_shared_training_views', '_finish_shared_training_views', '_end_shared_training_views',
                  'post_training_step', '_commit_opacity_and_retire'):
         setattr(m, name, MethodType(getattr(Module, name), m))
     m._early_attach_opacity()

@@ -11,13 +11,14 @@ import lzma
 import math
 import struct
 import zlib
+from zipfile import ZIP_LZMA, ZipFile
 
 import numpy as np
 import torch
 
 from .rigid_residual_tree import (compose_pose,
                                   region_pivots, _topological_order)
-from .spatial_gate import (compose_spatial_pose, spatial_owner, spatial_state_route,
+from .spatial_gate import (compose_spatial_pose, spatial_owner, spatial_route, spatial_state_route,
                            SPATIAL_ROUTING_FIELDS, validate_spatial_routing,
                            spatial_accumulate)
 from .sparse_integer_codec import (MOTION_MAGICS, pack_layout, unpack_layout,
@@ -147,11 +148,55 @@ class DecodedState:
     def from_reference(cls, packet):
         def read(name):
             return torch.from_numpy(packet[name].copy()) if name in packet else None
-        return cls(read('xyz'), read('rotation'), read('owner').long(),
-                   read('parents').long(), int(packet['frame_index']),
-                   spatial_paths=read('spatial_paths'), spatial_open=read('spatial_open'),
-                   spatial_centers=read('spatial_centers'),
-                   **{name: read(name) for name in SPATIAL_ROUTING_FIELDS})
+        xyz, rotation, owner = read('xyz'), read('rotation'), read('owner')
+        parents, paths = read('parents').long(), read('spatial_paths')
+        opened, centers = read('spatial_open'), read('spatial_centers')
+        routing = {name: read(name) for name in SPATIAL_ROUTING_FIELDS}
+        if 'spatial_derived_depth' in packet:
+            value = np.asarray(packet['spatial_derived_depth'])
+            if (value.ndim != 0 or value.dtype.kind not in 'iu' or
+                    owner is not None or paths is not None):
+                raise ValueError('Invalid derived spatial reference metadata')
+            depth = int(value)
+            if (not 1 <= depth <= 5 or centers is None or opened is None or
+                    opened.dtype != torch.bool or opened.shape != parents.shape or
+                    len(parents) != sum(8 ** level for level in range(depth + 1))):
+                raise ValueError('Invalid derived spatial reference layout')
+            paths = spatial_route(xyz, centers, depth, routing=routing)
+            owner = spatial_owner(paths, opened)
+        if owner is None:
+            raise ValueError('Reference has no Gaussian ownership')
+        return cls(xyz, rotation, owner.long(), parents, int(packet['frame_index']),
+                   spatial_paths=paths, spatial_open=opened, spatial_centers=centers,
+                   **routing)
+
+
+def compact_reference_fields(fields):
+    """Omit routes and owners only when the stored reference reproduces them exactly."""
+    result = dict(fields)
+    if any(name not in fields for name in
+           ('owner', 'spatial_paths', 'spatial_open', 'spatial_centers')):
+        return result
+    state = DecodedState.from_reference(fields)
+    _validate_state(state)
+    depth = state.spatial_paths.shape[1]
+    if not 1 <= depth <= 5:
+        return result
+    paths = spatial_state_route(state.xyz, state)
+    if (torch.equal(paths, state.spatial_paths) and
+            torch.equal(spatial_owner(paths, state.spatial_open), state.owner)):
+        result.pop('owner')
+        result.pop('spatial_paths')
+        result['spatial_derived_depth'] = np.array(depth, dtype=np.uint8)
+    return result
+
+
+def write_reference_npz(path, fields):
+    """Write a NumPy-compatible archive using lossless ZIP LZMA members."""
+    with ZipFile(path, mode='w', compression=ZIP_LZMA, allowZip64=True) as archive:
+        for name, value in fields.items():
+            with archive.open(f'{name}.npy', mode='w', force_zip64=True) as member:
+                np.lib.format.write_array(member, np.asanyarray(value), allow_pickle=False)
 
 
 def _uvar(value):
@@ -710,7 +755,7 @@ def decode_motion(payload, prior_state):
     if mode == 0:
         if count != len(prior_state.xyz):
             raise ValueError('Identity mapping has wrong count')
-        rows = list(range(count))
+        rows = torch.arange(count, dtype=torch.long)
     elif mode == 1:
         deleted_count = reader.integer()
         if deleted_count != len(prior_state.xyz) - count:
@@ -724,10 +769,10 @@ def decode_motion(payload, prior_state):
             deleted.add(previous)
         if len(deleted) != deleted_count:
             raise ValueError('Duplicate deleted row')
-        rows = [row for row in range(len(prior_state.xyz)) if row not in deleted]
+        rows = torch.tensor([row for row in range(len(prior_state.xyz)) if row not in deleted],
+                            dtype=torch.long)
     else:
         raise ValueError('Unknown survivor mapping mode')
-    rows = torch.tensor(rows, dtype=torch.long)
     base_xyz = prior_state.xyz[rows].detach().cpu().float()
     base_rotation = prior_state.rotation[rows].detach().cpu().float()
     prior_owner = prior_state.owner[rows].detach().cpu().long()
@@ -768,18 +813,24 @@ def decode_motion(payload, prior_state):
                 raise ValueError('Invalid parent edit')
             parents[node] = parent
             last = node
-    _topological_order(parents)
+    # The prior state was already validated. A spatial packet without parent
+    # edits keeps an exact clone of that topology, so no second walk is needed.
+    if not (spatial and parent_count == 0):
+        _topological_order(parents)
     owner = prior_owner.clone()
     paths, opened = None, None
     if spatial:
         if not torch.equal(parents, prior_state.parents):
             raise ValueError('Spatial candidate tree cannot be reparented')
         bits = reader.take((regions + 7) // 8)
-        opened = torch.tensor([bool(bits[node // 8] & (1 << (node % 8)))
-                               for node in range(regions)])
-        paths = prior_state.spatial_paths[rows].clone()
-        if prior_state.spatial_centers is not None:
-            paths = spatial_state_route(prior_state.xyz[rows], prior_state)
+        opened = torch.from_numpy(np.unpackbits(np.frombuffer(bits, dtype=np.uint8),
+                                               bitorder='little')[:regions].astype(np.bool_))
+        if prior_state.spatial_centers is None:
+            paths = prior_state.spatial_paths[rows].clone()
+        else:
+            # base_xyz already is the exact survivor selection used for pose
+            # composition; avoid gathering those positions and paths twice.
+            paths = spatial_state_route(base_xyz, prior_state)
         if not bool(opened[0]) or bool(opened[paths[:, -1]].any()):
             raise ValueError('Invalid spatial gate frontier')
         owner = spatial_owner(paths, opened)

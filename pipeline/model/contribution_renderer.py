@@ -7,7 +7,8 @@ from .contribution_rasterizer import GaussianRasterizer, RegionalErrorStats
 
 class _CollectingRasterizer:
     def __init__(self, settings, renderer):
-        self.rasterizer = GaussianRasterizer(settings)
+        self.rasterizer = (GaussianRasterizer(settings, stable_backward=True)
+                           if renderer.stable_backward else GaussianRasterizer(settings))
         self.renderer = renderer
 
     def __call__(self, **kwargs):
@@ -21,6 +22,7 @@ class _CollectingRasterizer:
 
 
 class ContributionRenderer(Renderer):
+    stable_backward = False
     collect_contributions = False
     last_contributions = None
     collect_error_stats = False
@@ -28,7 +30,7 @@ class ContributionRenderer(Renderer):
 
     def create_rasterizer(self, viewpoint, bg_color, scaling_modifier):
         native = super().create_rasterizer(viewpoint, bg_color, scaling_modifier)
-        if self.collect_contributions or self.collect_error_stats:
+        if self.collect_contributions or self.collect_error_stats or self.stable_backward:
             return _CollectingRasterizer(native.raster_settings, self)
         return native
 

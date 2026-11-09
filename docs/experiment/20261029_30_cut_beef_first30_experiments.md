@@ -89,7 +89,7 @@ python main.py --config=config/cut_roasted_beef_first30_legacy_20261029.yaml
 
 ### 代码与配置
 
-- `scripts/run_first_frame.py` 增加独立输出目录、SH 阶数和首帧步数覆盖参数，候选不会复用历史实验目录。
+- 当时的 `scripts/run_first_frame.py` 增加独立输出目录、SH 阶数和首帧步数覆盖参数，候选不会复用历史实验目录；该脚本现已清理。
 - `pipeline/frame_plan.py` 在新生点确定最近旧点参考后，将该参考的 `sh_rest` 复制为新生点初值。由于同一个旧点也是 packet predictor，出生时高阶 SH 残差为零；DC 仍由责任加权训练图像颜色初始化并编码。
 - `tests/test_frame_plan.py` 增加 SH3 新生点零高阶残差及无损继承检查，并更新两轮出生生命周期断言。相关 240 项测试全部通过。
 - 首帧配置：`config/cut_roasted_beef_frame0_sh3_goal_20261030.yaml`。

@@ -36,6 +36,37 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
         raise ValueError(f"Removed ABCD/periodic attribute policies: {removed}. "
                          "Remove these keys and start a new experiment from the shared first frame.")
 
+    full_update = oc.select(args, "module.full_update", default={}) or {}
+    if oc.select(args, "module.rigid_tree.target_update_bytes", default=0) != 0:
+        raise ValueError("Byte-budget feedback is retired; set a fixed module.rigid_tree.rate_loss_weight")
+    if (oc.select(args, "module.rigid_tree.initial_rate_multiplier", default=1) != 1 or
+            oc.select(args, "module.rigid_tree.min_rate_multiplier", default=1) != 1):
+        raise ValueError("Rate multipliers are retired; use a fixed rate_loss_weight")
+    if full_update.get("enabled", False):
+        supported = {"enabled", "gradient_position_lr_scale", "audit_camera_sequence",
+                     "gradient_diagnostics", "logscale_step", "sh_dc_step", "sh_rest_step",
+                     "storage_loss_enabled", "per_attribute_l1_weight", "point_dc_rate_scale",
+                     "probe_views_per_round", "probe_opacity_weight", "point_budget_fraction", "repair_temporal_weight",
+                     "repair_temporal_scale", "repair_temporal_lag", "repair_rmse_mix", "motion_rmse_mix",
+                     "early_joint_repair", "early_probe_attribute_only", "shared_region_orientation"}
+        unsupported = sorted(set(full_update) - supported)
+        if unsupported:
+            raise ValueError(f"Retired full-update training options: {unsupported}. "
+                             "Use the two-round gradient-probed plan.")
+    retired = [name for name in ("learnable_gate", "point_gate_enabled",
+                                 "gate_probability_weighted_proximal",
+                                 "temporal_focus_strength", "tail_rmse_mix")
+               if full_update.get(name, False)]
+    if retired:
+        raise ValueError(f"Removed learnable attribute-repair options: {retired}. "
+                         "Use the image-based regional repair configuration instead.")
+    retired_resume = [name for name in ("resume_allow_repair_gate_change",
+                                        "resume_allow_temporal_focus_change",
+                                        "resume_allow_tail_rmse_change")
+                      if args.get(name, False)]
+    if retired_resume:
+        raise ValueError(f"Removed attribute-repair resume options: {retired_resume}")
+
     # libgs retains valid strings after trying to call typing.Optional itself.
     # Silence only these known Path/str conversion notices, not other warnings.
     with warnings.catch_warnings():
@@ -44,6 +75,9 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
             message=r"(?:Try|Failed) to cast '.*' to typing\.Optional\[(?:pathlib\.Path|str)\]$",
         )
         cfg, args = to_structured(args, Config)
+    normalize_views = getattr(cfg.trainer, 'use_single_training_view', None)
+    if cfg.mode == 'train' and normalize_views is not None:
+        normalize_views()
     if flags.FLAGS.print:
         print(to_yaml(cfg))
         sys.exit(0)

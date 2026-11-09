@@ -46,6 +46,52 @@ def _hash(path):
     return digest.hexdigest()
 
 
+def relocate_checkpoint_reference(checkpoint, reference_layout):
+    """Accept a moved layout only when its migration manifest proves its bytes."""
+    config = checkpoint.get('rigid_tree_config')
+    if not isinstance(config, dict) or not isinstance(config.get('spatial_gate'), dict):
+        return checkpoint
+    previous = config['spatial_gate'].get('reference_layout')
+    if not isinstance(previous, str) or not isinstance(reference_layout, str) or previous == reference_layout:
+        return checkpoint
+    reference = Path(reference_layout)
+    manifest = reference.parent / 'manifest.json'
+    if not reference.is_file() or not manifest.is_file():
+        return checkpoint
+    try:
+        entry = json.loads(manifest.read_text())['files']['reference_layout']
+        valid_origin = previous in (entry['original_path'], entry['original_resolved_path'])
+        expected_hash = entry['sha256']
+        valid_name = entry['file'] == reference.name
+    except (OSError, ValueError, KeyError, TypeError):
+        return checkpoint
+    if not valid_origin or not valid_name:
+        return checkpoint
+    if not isinstance(expected_hash, str) or _hash(reference) != expected_hash:
+        raise ValueError('Relocated reference layout does not match its recorded SHA256')
+
+    module = checkpoint.get('rigid_tree_module_config')
+    module_config = module.get('rigid_tree') if isinstance(module, dict) else None
+    motion = checkpoint.get('rigid_tree_motion')
+    motion_config = motion.get('config') if isinstance(motion, dict) else None
+    for saved in (module_config, motion_config):
+        if saved is not None and (not isinstance(saved, dict) or
+                not isinstance(saved.get('spatial_gate'), dict) or
+                saved['spatial_gate'].get('reference_layout') != previous):
+            return checkpoint
+
+    def changed(saved):
+        return {**saved, 'spatial_gate': {**saved['spatial_gate'],
+                                         'reference_layout': reference_layout}}
+
+    relocated = {**checkpoint, 'rigid_tree_config': changed(config)}
+    if module_config is not None:
+        relocated['rigid_tree_module_config'] = {**module, 'rigid_tree': changed(module_config)}
+    if motion_config is not None:
+        relocated['rigid_tree_motion'] = {**motion, 'config': changed(motion_config)}
+    return relocated
+
+
 def _plain_config(value):
     # asdict preserves OmegaConf containers loaded by the actual CLI.
     if OmegaConf.is_config(value):
@@ -175,8 +221,24 @@ def validate_sequence_extension(checkpoint, current_data_config,
         raise ValueError('Sequence extension needs more frames or an explicit incomplete prefix for recovery')
     expected_data = {**old_data, 'extra_dataset_kwargs': {
         **old_data['extra_dataset_kwargs'], 'num_frames': new_frames}}
+    old_root = Path(old_data['root']).absolute()
+    new_root = Path(current_data_config['root']).absolute()
+    relocated = old_root != new_root
+    if relocated:
+        # A separate symlink view can extend a dataset without changing the
+        # historical view. Every prefix image and shared calibration file is
+        # checked against the original target below.
+        expected_data['root'] = current_data_config['root']
     if expected_data != current_data_config:
-        raise ValueError('Only num_frames may change in the data configuration')
+        raise ValueError('Only num_frames and an equivalent symlink dataset root may change')
+    if relocated:
+        for relative in ('sparse/0/cameras.bin', 'sparse/0/images.bin',
+                         'sparse/0/points3D.bin', 'points3D.ply', 'test_split.txt'):
+            old_path, new_path = old_root / relative, new_root / relative
+            if old_path.is_file() or new_path.is_file():
+                if (not old_path.is_file() or not new_path.is_file() or
+                        old_path.resolve(strict=True) != new_path.resolve(strict=True)):
+                    raise ValueError('Relocated dataset changed a shared calibration asset')
     old_trainer = {**old_trainer}
     old_trainer.setdefault('stage_image_camera', None)
     old_trainer.setdefault('motion_views_per_step', 1)
@@ -195,6 +257,9 @@ def validate_sequence_extension(checkpoint, current_data_config,
     config = checkpoint.get('rigid_tree_config') or {}
     terminal_step = config.get('motion_steps', 0) + config.get('birth_steps', 0)
     terminal_step += config.get('post_birth_motion_steps', 0)
+    if (checkpoint.get('birth_allocation') == 'frame_training_plan_v1' and
+            (checkpoint.get('rigid_tree_module_config') or {}).get('full_update', {}).get('stop_after_motion') is True):
+        terminal_step = config.get('motion_steps', 0)
     if config.get('online_flat_clustering'):
         terminal_step += config.get('post_partition_steps', 0)
     allocation = checkpoint.get('birth_allocation')
@@ -333,6 +398,14 @@ def validate_sequence_extension(checkpoint, current_data_config,
             resolved = Path(filename).resolve(strict=True)
             if not resolved.is_file():
                 raise ValueError('Dataset image is not a file')
+            if relocated:
+                try:
+                    relative_image = Path(filename).absolute().relative_to(new_root)
+                    original_image = (old_root / relative_image).resolve(strict=True)
+                except (ValueError, OSError) as error:
+                    raise ValueError('Relocated image does not map to the original dataset') from error
+                if original_image != resolved:
+                    raise ValueError('Relocated dataset changed a prefix image')
             stat = resolved.stat()
         except OSError as error:
             raise ValueError('Missing prefix image in current dataset') from error
@@ -353,12 +426,26 @@ def validate_sequence_extension(checkpoint, current_data_config,
                                f'frame_summary/frame_{frame:03d}.json'))
         for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity'),
                             ('feature_dc_update', 'shdc'),
-                            ('logscale_update', 'logscale')):
+                            ('logscale_update', 'logscale'),
+                            ('full_attribute_update', 'fullattr')):
             name = manifest.get(field)
             if name is not None:
                 if name != f'{stem}_{frame:03d}.bin':
                     raise ValueError('Unexpected prefix attribute packet name')
+                if field == 'full_attribute_update' and (
+                        manifest.get('full_update') is not True or
+                        manifest.get('full_attribute_update_timing') != 'after_regional_dc_before_births'):
+                    raise ValueError('Prefix full attributes have an invalid decode order')
                 relative_files.add(f'frame_storage/rigid_tree/{name}')
+        diagnostic = (manifest.get('regional_attribute_repair') or {}).get('diagnostic_sidecar')
+        if diagnostic is not None:
+            permitted = {
+                f'frame_diagnostics/regional_attribute_repair/frame_{frame:03d}_step_200.npz',
+                f'frame_diagnostics/learnable_attribute_gate/frame_{frame:03d}.npz',
+            }
+            if diagnostic not in permitted:
+                raise ValueError('Unexpected regional repair diagnostic path')
+            relative_files.add(diagnostic)
         region = f'region_statistics/frame_{frame:03d}.json'
         if (source / region).exists():
             relative_files.add(region)

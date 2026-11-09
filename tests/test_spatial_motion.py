@@ -1157,6 +1157,30 @@ class JointSpatialMotionTests(unittest.TestCase):
         torch.testing.assert_close(spatial_state_route(inside, reference),
             spatial_route(inside, reference.spatial_centers, 3), rtol=0, atol=0)
 
+    def test_fast_nearest_supported_leaves_preserves_ties_and_fallback(self):
+        from pipeline.model import spatial_gate
+        if spatial_gate._scipy_cdist is None:
+            self.skipTest('SciPy fast distance path unavailable')
+        random = np.random.default_rng(19)
+        points = random.uniform(-4, 4, size=(73, 3)).astype(np.float32).astype(np.float64)
+        points[0] = (0., 0., 0.)
+        centers = random.uniform(10, 20, size=(139, 3)).astype(np.float32).astype(np.float64)
+        centers[:3] = [[-1., 0., 0.], [1., 0., 0.], [-1., 0., 0.]]
+        nodes = np.arange(len(centers), dtype=np.int64) + 100
+        actual = spatial_gate._nearest_supported_leaves(points, centers, nodes)
+        with patch.object(spatial_gate, '_scipy_cdist', None):
+            fallback = spatial_gate._nearest_supported_leaves(points, centers, nodes)
+        np.testing.assert_array_equal(actual, fallback)
+        self.assertEqual(actual[0], nodes[0])
+        cdist = spatial_gate._scipy_cdist
+        def rounded_distance(query, representatives, metric):
+            result = cdist(query, representatives, metric=metric)
+            result[0, 0] = np.nextafter(result[0, 0], np.inf)
+            return result
+        with patch.object(spatial_gate, '_scipy_cdist', rounded_distance):
+            rounded = spatial_gate._nearest_supported_leaves(points[:1], centers, nodes)
+        self.assertEqual(rounded[0], nodes[0])
+
     def test_routing_reference_is_shared_once_restored_and_digest_bound(self):
         reference = self.model().frame_reference_state
         packet = {key: value.numpy() if torch.is_tensor(value) else np.asarray(value)
@@ -1169,6 +1193,31 @@ class JointSpatialMotionTests(unittest.TestCase):
         changed = copy.deepcopy(reference)
         changed.spatial_leaf_centers[0, 0] += .01
         self.assertNotEqual(changed.digest(), reference.digest())
+
+    def test_derived_reference_roundtrips_far_points_and_falls_back_when_routes_differ(self):
+        reference = self.model().frame_reference_state
+        packet = {key: value.numpy() if torch.is_tensor(value) else np.asarray(value)
+                  for key, value in reference.capture().items() if value is not None}
+        compact = CODEC.compact_reference_fields(packet)
+        self.assertNotIn('owner', compact)
+        self.assertNotIn('spatial_paths', compact)
+        self.assertEqual(DecodedState.from_reference(compact).digest(), reference.digest())
+        for bad_depth in (np.array(0), np.array(6), np.array(3.0)):
+            with self.subTest(depth=bad_depth), self.assertRaises(ValueError):
+                DecodedState.from_reference({**compact, 'spatial_derived_depth': bad_depth})
+        with self.assertRaises(ValueError):
+            DecodedState.from_reference({**compact, 'owner': packet['owner']})
+
+        other = ((reference.spatial_paths != reference.spatial_paths[0]).any(1)
+                 .nonzero(as_tuple=True)[0][0])
+        paths = reference.spatial_paths.clone()
+        paths[0] = paths[other]
+        changed = {**packet, 'spatial_paths': paths.numpy(),
+                   'owner': spatial_owner(paths, reference.spatial_open).numpy()}
+        fallback = CODEC.compact_reference_fields(changed)
+        self.assertNotIn('spatial_derived_depth', fallback)
+        self.assertIn('spatial_paths', fallback)
+        self.assertIn('owner', fallback)
 
     def test_first_dynamic_frame_closes_gates_and_both_motion_fields_learn(self):
         model = self.model()
@@ -2107,6 +2156,32 @@ class SpatialInitializationTests(unittest.TestCase):
         model.setup(xyz, q, extent=2., frame_index=1)
         return model
 
+    def test_routing_matches_scalar_oracle_at_and_around_split_planes(self):
+        rng = np.random.default_rng(20261105)
+        depth = 5
+        centers = rng.normal(size=(sum(8 ** i for i in range(depth)), 3)).astype(np.float32)
+        boundary = centers[:64].copy()
+        points = np.concatenate((rng.normal(size=(256, 3)).astype(np.float32), boundary,
+            np.nextafter(boundary, np.float32(np.inf)),
+            np.nextafter(boundary, np.float32(-np.inf))))
+        expected = []
+        for point in points:
+            parent, code, offset, path = 0, 0, 1, []
+            for level in range(depth):
+                octant = sum((1 << axis) for axis in range(3)
+                             if point[axis] >= centers[parent, axis])
+                code = code * 8 + octant
+                parent = offset + code
+                path.append(parent)
+                offset += 8 ** (level + 1)
+            expected.append(path)
+        actual = LAYOUT.spatial_route(torch.from_numpy(points), torch.from_numpy(centers), depth)
+        np.testing.assert_array_equal(actual.numpy(), np.asarray(expected, dtype=np.int64))
+        self.assertEqual(tuple(LAYOUT.spatial_route(torch.empty((0, 3)),
+            torch.from_numpy(centers), depth).shape), (0, depth))
+        with self.assertRaises(ValueError):
+            LAYOUT.spatial_route(torch.empty((0, 3)), torch.empty((0, 3)), 0)
+
     def test_farther_outliers_cannot_move_supported_split_planes(self):
         xyz = self.cloud()
         pushed = xyz.clone()
@@ -2301,6 +2376,33 @@ class ProximalGSRegularizationTests(unittest.TestCase):
         model.config.proximal_gs_regularization = True
         model.config.differentiable_rate_support = True
         return model
+
+    def test_point_block_pricing_does_not_depend_on_absolute_id(self):
+        model = SpatialGatedMotion(copy.deepcopy(self.model().config))
+        count = 16385
+        generator = torch.Generator().manual_seed(9)
+        xyz = torch.rand((count, 3), generator=generator) * 2 - 1
+        rotation = torch.zeros(count, 4)
+        rotation[:, 0] = 1
+        model.setup(xyz, rotation, 2., frame_index=1)
+        self.assertEqual(model._gs_id_lengths[[127, 128, 16383, 16384]].tolist(),
+                         [1., 1., 1., 1.])
+
+        # Put two identical blocks on opposite sides of the old 16384 index
+        # boundary. Their gain is between the former 8- and 10-byte prices.
+        translation, rotation = model.gs_translation, model.gs_rotation
+        with torch.no_grad():
+            translation.zero_()
+            translation[[127, 16384], 0] = .01
+        model.last_step = 20
+        price = model.effective_rate_loss_weight / model.rate_normalization_bytes
+        metric = 2 * (9 * price) / .01**2
+        variance = (metric - model.config.adam_eps)**2 * (1 - model.config.adam_betas[1])
+        model.optimizer.state[translation] = dict(step=torch.tensor(1.),
+            exp_avg=torch.zeros_like(translation), exp_avg_sq=torch.full_like(translation, variance))
+        model._proximal_blocks(translation, rotation, model.gs_steps[:3], model.gs_steps[3:],
+                               model._gs_id_lengths, 1., 1., 0)
+        self.assertTrue(bool(translation[[127, 16384], 0].ne(0).all()))
 
     def test_regularizers_train_regions_and_gates_but_not_gs_adam_moments(self):
         model = self.model()
@@ -2546,6 +2648,46 @@ class DepthFiveGPUStreamTests(unittest.TestCase):
             actual = player.capture_raw()
             self.assertEqual(player.capture_state(actual).digest(), decoded.digest())
             self.assertEqual(reference_digest(actual), reference_digest(expected))
+
+
+# ----- Spatial topology ordering -----
+
+import random
+
+
+from pipeline.model.rigid_residual_tree import _topological_order
+
+
+class TopologicalOrderTests(unittest.TestCase):
+    def test_breadth_first_tree_returns_exact_existing_order(self):
+        for dtype in (torch.int16, torch.int32, torch.int64):
+            parents=torch.tensor([-1,0,0,1,1,2,2],dtype=dtype)
+            self.assertEqual(_topological_order(parents),list(range(1,7)))
+        self.assertEqual(_topological_order(torch.tensor([-1])),[])
+
+    def test_arbitrary_valid_numbering_keeps_depth_first_order(self):
+        parents=torch.tensor([-1,2,0,4,2])
+        self.assertEqual(_topological_order(parents),[2,1,4,3])
+        self.assertEqual(_topological_order(parents.tolist()),[2,1,4,3])
+
+    def test_invalid_roots_parents_and_cycles_are_still_rejected(self):
+        for values in ([],[0],[-1,-1],[-1,1],[-1,2,1],[-1,99]):
+            with self.subTest(values=values),self.assertRaises(ValueError):
+                _topological_order(torch.tensor(values,dtype=torch.long))
+
+    def test_random_permuted_trees_preserve_parent_before_child(self):
+        generator=random.Random(20261105)
+        for _ in range(50):
+            count=generator.randrange(2,100)
+            original=[-1]+[generator.randrange(node) for node in range(1,count)]
+            permutation=[0]+generator.sample(range(1,count),count-1)
+            parents=[-1]*count
+            for old in range(1,count):
+                parents[permutation[old]]=permutation[original[old]]
+            order=_topological_order(torch.tensor(parents,dtype=torch.long))
+            self.assertEqual(set(order),set(range(1,count)))
+            index={node:i for i,node in enumerate([0,*order])}
+            self.assertTrue(all(index[parents[node]]<index[node] for node in range(1,count)))
 
 
 if __name__ == "__main__":

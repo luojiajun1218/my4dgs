@@ -15,7 +15,6 @@ from .model.early_replacement_model import _rotate
 from .model.residual_birth import RawView
 from .model.support_reincarnation_proposal import _native_responsibility, _sample
 from .model.adaptive_birth_storage import newborn_storage_terms
-from .model.rate_budget import RateBudgetState
 from .model.residual_support_geometry import residual_support_seed,residual_support_opacity
 
 
@@ -38,34 +37,20 @@ def regional_attribute_repair_active(module):
                 getattr(getattr(module.config, 'full_update', None), 'regional_repair', False))
 
 
-def gate_owner_error_decisions(owner, numerator, denominator, *, threshold, min_support, min_views):
-    """Decide on actual gate owners from separately normalized train views."""
-    owner = torch.as_tensor(owner).detach().cpu().long()
-    numerator = torch.as_tensor(numerator).detach().cpu().double()
-    denominator = torch.as_tensor(denominator).detach().cpu().double()
-    if (owner.ndim != 1 or numerator.ndim != 2 or numerator.shape != denominator.shape or
-            numerator.shape[0] < min_views or not len(owner) or
-            bool(((owner < 0) | (owner >= numerator.shape[1])).any()) or
-            not bool(torch.isfinite(numerator).all() & torch.isfinite(denominator).all()) or
-            bool((numerator < 0).any() | (denominator < 0).any()) or
-            not math.isfinite(threshold) or threshold <= 0 or
-            not math.isfinite(min_support) or min_support <= 0 or
-            isinstance(min_views, bool) or not isinstance(min_views, int) or min_views < 2):
-        raise ValueError('Invalid gate-owner regional error evidence')
-    regions = torch.unique(owner, sorted=True)
-    numer, denom = numerator[:, regions], denominator[:, regions]
-    reliable = denom >= min_support
-    counts = reliable.sum(0)
-    per_view = torch.where(reliable, numer / denom.clamp_min(1e-30), torch.zeros_like(numer))
-    score = per_view.sum(0) / counts.clamp_min(1)
-    score[counts < min_views] = float('nan')
-    selected = (counts >= min_views) & (score > threshold)
-    region_mask = torch.zeros(numerator.shape[1], dtype=torch.bool)
-    region_mask[regions] = selected
-    return dict(region_id=regions, region_numerator=numer, region_denominator=denom,
-                region_view_reliable=reliable, region_reliable_count=counts,
-                region_score=score, region_selected=selected,
-                eligible=region_mask[owner])
+def gradient_probe_step(module, step):
+    return bool(regional_attribute_repair_active(module) and step in regional_probe_steps(module))
+
+
+def regional_probe_steps(module):
+    count = getattr(module.config.full_update, 'probe_views_per_round', 2)
+    if getattr(module.config.full_update, 'early_joint_repair', False):
+        return tuple(range(101, 101 + count))
+    return tuple(range(201, 201 + count)) + tuple(range(251, 251 + count))
+
+
+def regional_point_budget(module, count):
+    fraction = getattr(module.config.full_update, 'point_budget_fraction', None)
+    return min(1000, count // 10) if fraction is None else int(count * fraction)
 
 
 def fitting_old_motion(module):
@@ -88,8 +73,31 @@ def _fixed_incumbent(module, step):
 
 
 def _fixed_old_alpha(module, step):
-    return bool(_fixed_incumbent(module, step) and not
-                getattr(module.config.birth, 'keep_incumbent_alpha_after_motion', False))
+    color_only = (regional_attribute_repair_active(module) and step > 200 and
+                  getattr(module.config.full_update, 'color_only', False))
+    return bool(color_only or (_fixed_incumbent(module, step) and not
+                getattr(module.config.birth, 'keep_incumbent_alpha_after_motion', False)))
+
+
+def frame_plan_phase(module, step):
+    """Name the actual optimization phase consistently in timings and logs."""
+    tree = getattr(module.config, 'rigid_tree', None)
+    discovery_steps = getattr(tree, 'shared_discovery_steps', 100)
+    if step <= discovery_steps:
+        return 'shared_gate'
+    if step <= 100:
+        return 'joint_gate_residual_early'
+    if step <= 150:
+        return 'fixed_gate_residual'
+    if step <= 180:
+        return 'joint_gate_residual'
+    if step <= 200:
+        return 'fixed_gate_motion'
+    if final_joint_scheduled(module, step):
+        return 'final_joint_refine'
+    if regional_attribute_repair_active(module):
+        return 'regional_attribute_repair'
+    return 'newborn_fixed_incumbent' if _fixed_old_alpha(module, step) else 'newborn_old_alpha'
 
 
 def regional_alpha_repair_active(module):
@@ -98,52 +106,86 @@ def regional_alpha_repair_active(module):
 
 
 class FramePlanController:
+    @torch.no_grad()
+    def _plan_gradient_probe(self, step, package):
+        state = self._plan_regional_attribute_state
+        count = len(state['eligible'])
+        score = torch.zeros(count, device=self.device)
+        scales = {}
+        early_attributes = (getattr(self.config.full_update, 'early_joint_repair', False) and
+                            getattr(self.config.full_update, 'early_probe_attribute_only', False))
+        for name, parameter in self._regional_attribute_parameters().items():
+            if early_attributes and name not in ('logscale', 'sh_dc', 'sh_rest'):
+                continue
+            grad = parameter.grad
+            if grad is None:
+                scales[name] = None
+                continue
+            magnitude = grad.detach().reshape(count, -1).norm(dim=1)
+            if not torch.isfinite(magnitude).all():
+                raise ValueError(f'Non-finite gradient during point probe: {name}')
+            positive = magnitude[magnitude > 0]
+            if positive.numel():
+                scale = positive.median().clamp_min(1e-20)
+                score.add_(magnitude / scale)
+                scales[name] = float(scale)
+            else:
+                scales[name] = None
+        views_per_round = getattr(self.config.full_update, 'probe_views_per_round', 2)
+        if views_per_round == 4 and getattr(self.config.full_update, 'probe_opacity_weight', True):
+            alpha = self._render_opacity_alpha().detach().reshape(-1)
+            if alpha.shape != (count,) or not bool(torch.isfinite(alpha).all()):
+                raise ValueError('Probe opacity does not match the old GS layout')
+            score *= alpha.clamp(0, 1).sqrt()
+        previous = state.get('probe_score')
+        state['probe_score'] = score if previous is None else previous + score
+        state.setdefault('probe_steps', []).append(int(step))
+        self.birth_control['regional_attribute_repair'].setdefault('probes', []).append(dict(
+            step=int(step), camera=str(self._plan_step_views[0].path), median_gradient=scales))
+        info = self.birth_control['regional_attribute_repair']
+        info['selection_only_views'] = len(info['probes'])
+        info['training_views_at_selection'] = len({item['camera'] for item in info['probes']})
+        self.motion.optimizer.zero_grad(set_to_none=True)
+        early = getattr(self.config.full_update, 'early_joint_repair', False)
+        finish_steps = (100 + views_per_round,) if early else (200 + views_per_round, 250 + views_per_round)
+        if step in finish_steps:
+            first_round = early or step == 200 + views_per_round
+            start = 101 if early else 201 if first_round else 251
+            if state['probe_steps'] != list(range(start, start + views_per_round)):
+                raise ValueError('Gradient probe steps are incomplete or out of order')
+            scores = state.pop('probe_score')
+            state['probe_steps'] = []
+            eligible = state['eligible']
+            available = (~eligible) & (scores > 0)
+            total_budget = regional_point_budget(self, count)
+            # Reserve half the budget for the second probe. If the first
+            # probe has fewer visible candidates, the second can use the rest.
+            round_limit = (total_budget if early else (total_budget + 1) // 2) if first_round else total_budget - int(eligible.sum())
+            budget = max(0, min(round_limit, total_budget - int(eligible.sum()), int(available.sum())))
+            if budget:
+                ranked = torch.argsort(scores.masked_fill(~available, -1), descending=True, stable=True)
+                eligible[ranked[:budget]] = True
+            info = self.birth_control['regional_attribute_repair']
+            info['selection_step'] = int(step)
+            info['selected_count'] = int(eligible.sum())
+            info['selected_fraction'] = info['selected_count'] / count if count else 0.
+            info.setdefault('selection_rounds', []).append(dict(step=int(step), added=budget,
+                selected_count=info['selected_count']))
+
     def _regional_attribute_parameters(self):
         return dict(xyz=self.motion.gs_translation, rotation=self.motion.gs_rotation,
                     opacity=self.opacity_update.delta,
                     **self.full_attribute_update.parameters)
 
     @torch.no_grad()
-    def _plan_select_regional_attributes(self, packages):
-        if self._plan_regional_attribute_state is not None:
-            raise ValueError('Regional attribute selection already exists for this frame')
+    def _plan_snapshot_regional_attributes(self, eligible):
         count = len(self.gaussians._xyz)
         identity = torch.arange(count, device=self.device)
         if (not torch.equal(self.motion.previous_rows, identity) or
                 not torch.equal(self.opacity_update.rows, identity)):
-            raise ValueError('Regional attribute repair requires an unchanged old-GS layout')
-        evidence = [package.get('regional_error_evidence') for package in packages]
-        if (len(evidence) != 4 or any(item is None for item in evidence) or
-                not torch.equal(self.motion.owner, self._plan_error_owner)):
-            raise ValueError('Step-200 evidence must contain four views of the unchanged gate owners')
-        cameras = [item['camera'] for item in evidence]
-        expected = [Path(str(view.path)).name for view in self._plan_step_views]
-        if cameras != expected or len(set(cameras)) != 4 or 'cam00.png' in cameras:
-            raise ValueError('Step-200 evidence must use exactly the four sampled training cameras')
-        point_numerator = torch.stack([item['numerator'] for item in evidence])
-        point_denominator = torch.stack([item['denominator'] for item in evidence])
-        if point_numerator.shape != (4, count) or point_denominator.shape != (4, count):
-            raise ValueError('Regional evidence lost the pre-update GS layout')
-        indices = self.motion.owner[None].expand(4, -1)
-        numerator = point_numerator.new_zeros(4, len(self.motion.parents)).scatter_add_(1, indices, point_numerator)
-        denominator = point_denominator.new_zeros(4, len(self.motion.parents)).scatter_add_(1, indices, point_denominator)
-        cfg = self.config.birth
-        decisions = gate_owner_error_decisions(self.motion.owner, numerator, denominator,
-            threshold=cfg.regional_color_l1_threshold, min_support=cfg.regional_color_min_support,
-            min_views=cfg.regional_color_min_views)
-        eligible = decisions.pop('eligible').to(self.device)
-        node = decisions['region_id']
-        decisions['region_parent'] = self.motion.parents.detach().cpu()[node]
-        decisions['region_depth'] = (node[:, None] >= torch.tensor([1, 9, 73, 585, 4681])).sum(1)
-        total_l1 = torch.stack([item['total_pixel_l1_sum'] for item in evidence]).cpu().double()
-        assigned = point_numerator.double().sum(1).cpu()
-        support = point_denominator.double().sum(1).cpu()
-        raw_unassigned = total_l1 - assigned
-        tolerance = torch.maximum(total_l1.abs() * 1e-4, total_l1.new_full((4,), 1e-5))
-        if bool((raw_unassigned < -tolerance).any()):
-            raise ValueError('Regional error contributions exceed the full-image L1 beyond numerical tolerance')
-        unassigned = raw_unassigned.clamp_min(0)
-        pixel_count = np.asarray([item['image_pixel_count'] for item in evidence], dtype=np.int64)
+            raise ValueError('Regional attribute repair needs the unchanged old-GS layout')
+        if eligible.dtype != torch.bool or eligible.shape != (count,) or eligible.device != identity.device:
+            raise ValueError('Regional attribute repair selection must match the old-GS layout')
         snapshots = {}
         for name, parameter in self._regional_attribute_parameters().items():
             if len(parameter) != count:
@@ -152,39 +194,40 @@ class FramePlanController:
             snapshots[name] = dict(value=parameter.detach().clone(), moments={
                 key: value.detach().clone() for key, value in adam.items()
                 if torch.is_tensor(value) and value.shape == parameter.shape})
-        self._plan_regional_attribute_state = dict(eligible=eligible, parameters=snapshots)
-        directory = Path(self.output_dir) / 'frame_diagnostics' / 'regional_attribute_repair'
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f'frame_{int(self.current_frame):03d}_step_200.npz'
-        temporary = path.with_suffix('.tmp.npz')
-        np.savez_compressed(temporary, **{name: value.numpy() for name, value in decisions.items()},
-            point_owner=self.motion.owner.detach().cpu().numpy(), eligible_rows=eligible.cpu().numpy(),
-            point_numerator=point_numerator.cpu().numpy(), point_denominator=point_denominator.cpu().numpy(),
-            total_pixel_l1_sum=total_l1.numpy(), assigned_l1_sum=assigned.numpy(),
-            assigned_talpha_sum=support.numpy(), unassigned_l1_sum=unassigned.numpy(),
-            image_pixel_count=pixel_count,
-            camera_names=np.asarray(cameras), threshold=np.asarray(cfg.regional_color_l1_threshold),
-            min_support=np.asarray(cfg.regional_color_min_support),
-            min_views=np.asarray(cfg.regional_color_min_views))
-        temporary.replace(path)
-        sidecar = str(path.relative_to(self.output_dir))
-        self._plan_error_owner = None
-        selected_count = int(eligible.sum())
-        self.birth_control['regional_attribute_repair'] = dict(
-            selection_step=200, selected_count=selected_count, total_count=count,
-            selected_fraction=selected_count / count if count else 0.,
-            selected_regions=int(decisions['region_selected'].sum()),
-            region_count=len(decisions['region_id']), grouping='motion.owner at step 200',
-            measurement='step-200 four training views before Adam; mask and anchors after Adam',
-            diagnostics=sidecar, camera_names=cameras,
-            per_view=[dict(camera=camera, total_pixel_l1_sum=float(total_l1[i]),
-                assigned_l1_sum=float(assigned[i]), assigned_talpha_sum=float(support[i]),
-                image_pixel_count=int(pixel_count[i]), unassigned_l1_sum=float(unassigned[i]))
-                for i, camera in enumerate(cameras)],
-            threshold=cfg.regional_color_l1_threshold, min_support=cfg.regional_color_min_support,
-            min_views=cfg.regional_color_min_views, invariant_checks=[])
+        self._plan_regional_attribute_state = dict(
+            eligible=eligible, parameters=snapshots)
+        scale_shared = getattr(self, 'regional_logscale', None)
+        if scale_shared is not None:
+            scale_shared.bind(self.motion.owner, len(self.motion.parents), torch.unique(self.motion.owner), self.motion.optimizer)
+        shared = getattr(self, 'feature_dc_update', None)
+        if (shared is not None and shared.regional and
+                not (self.config.full_update.early_joint_repair and not self.motion_committed)):
+            if shared.ready:
+                shared.freeze_owner()
+            else:
+                shared.bind(self.motion.owner, len(self.motion.parents),
+                            torch.unique(self.motion.owner), self.motion.optimizer)
 
-    def _plan_validate_regional_attribute_state(self, state):
+    @torch.no_grad()
+    def _plan_select_regional_attributes(self, packages):
+        if self._plan_regional_attribute_state is not None:
+            raise ValueError('Regional attribute selection already exists for this frame')
+        count = len(self.gaussians._xyz)
+        self._plan_snapshot_regional_attributes(torch.zeros(count, dtype=torch.bool, device=self.device))
+        self.birth_control['regional_attribute_repair'] = dict(
+            selection_step=None, selected_count=0, total_count=count, selected_fraction=0.,
+            grouping=('one early round of single-view gradient probes' if
+                      self.config.full_update.early_joint_repair else
+                      'two rounds of single-view gradient probes'), training_views_at_selection=0,
+            selection_only_views=0, measurement=(('logscale and SH only; ' if
+                getattr(self.config.full_update, 'early_probe_attribute_only', False) else '') +
+                ('per-attribute median-normalized image gradient '
+                'and sqrt opacity; no explicit visibility weighting' if (self.config.full_update.probe_views_per_round == 4 and
+                getattr(self.config.full_update, 'probe_opacity_weight', True)) else
+                'per-attribute median-normalized image gradient')),
+            diagnostics=None, invariant_checks=[])
+
+    def _plan_validate_regional_attribute_state(self, state, *, attributes_only=False):
         parameters = self._regional_attribute_parameters()
         count = len(self.gaussians._xyz)
         if (not isinstance(state, dict) or not torch.is_tensor(state.get('eligible')) or
@@ -197,6 +240,8 @@ class FramePlanController:
             raise ValueError('Regional attribute checkpoint changed the old-GS layout')
         frozen = ~state['eligible']
         for name, parameter in parameters.items():
+            if attributes_only and name not in self.full_attribute_update.parameters:
+                continue
             saved = state['parameters'][name]
             if (not isinstance(saved, dict) or not torch.is_tensor(saved.get('value')) or
                     saved['value'].shape != parameter.shape or
@@ -212,13 +257,16 @@ class FramePlanController:
                     raise ValueError(f'Regional attribute checkpoint changed frozen {name} moments')
 
     @torch.no_grad()
-    def _plan_mask_regional_attribute_gradients(self):
+    def _plan_mask_regional_attribute_gradients(self, *, attributes_only=False):
         state = self._plan_regional_attribute_state
         if state is None:
             raise ValueError('Regional attribute training lost its step-200 selection')
-        for parameter in self._regional_attribute_parameters().values():
+        frozen = ~state['eligible']
+        parameters = (self.full_attribute_update.parameters if attributes_only else self._regional_attribute_parameters())
+        for parameter in parameters.values():
             if parameter.grad is not None:
-                parameter.grad[~state['eligible']] = 0
+                mask = frozen.reshape((-1,) + (1,) * (parameter.grad.ndim - 1))
+                parameter.grad.masked_fill_(mask, 0)
 
     @torch.no_grad()
     def _plan_record_regional_image_gradients(self, step, viewpoint):
@@ -238,22 +286,26 @@ class FramePlanController:
                  fields=fields))
 
     @torch.no_grad()
-    def _plan_restore_regional_attribute_frozen_rows(self, step):
+    def _plan_restore_regional_attribute_frozen_rows(self, step, *, attributes_only=False):
         state = self._plan_regional_attribute_state
-        frozen = ~state['eligible']
+        eligible = state['eligible']
         for name, parameter in self._regional_attribute_parameters().items():
+            if attributes_only and name not in self.full_attribute_update.parameters:
+                continue
             saved = state['parameters'][name]
-            parameter[frozen] = saved['value'][frozen]
+            mask = eligible.reshape((-1,) + (1,) * (parameter.ndim - 1))
+            # Fixed-shape selection preserves frozen rows without nonzero's CUDA synchronization.
+            torch.where(mask, parameter, saved['value'], out=parameter)
             for key, value in self.motion.optimizer.state.get(parameter, {}).items():
                 if torch.is_tensor(value) and value.shape == parameter.shape:
                     baseline = saved['moments'].get(key)
                     if baseline is None:
                         baseline = saved['moments'][key] = torch.zeros_like(value)
-                    value[frozen] = baseline[frozen]
-        if step in (201, 250, 251, 300):
+                    torch.where(mask, value, baseline, out=value)
+        if not attributes_only and step in (201, 250, 251, 300):
             self._plan_validate_regional_attribute_state(state)
             self.birth_control['regional_attribute_repair']['invariant_checks'].append(
-                dict(step=step, frozen_count=int(frozen.sum()), frozen_values_equal=True,
+                dict(step=step, frozen_count=int((~eligible).sum()), frozen_values_equal=True,
                      frozen_adam_moments_equal=True))
 
     def _plan_validate_regional_alpha_state(self, state):
@@ -393,33 +445,6 @@ class FramePlanController:
                 max_frozen_moment_change=float(state['max_frozen_moment_change']),
                 scope='cumulative after each step Adam and opacity proximal; only currently surviving frozen old rows'))
 
-    def _plan_setup_rate_budget(self):
-        cfg=self.config.rigid_tree
-        if not cfg.target_update_bytes:
-            self.motion.rate_multiplier=1.
-            return
-        packet=getattr(self,'_rate_budget_state',None)
-        state=(RateBudgetState(log_multiplier=math.log(cfg.initial_rate_multiplier),
-                               last_multiplier=cfg.initial_rate_multiplier)
-               if packet is None else
-               RateBudgetState.restore(packet,cfg.max_rate_multiplier))
-        if self.current_frame!=state.last_frame+1:
-            raise ValueError('Frame budget state does not precede the current frame')
-        self.motion.rate_multiplier=state.multiplier
-        self._rate_budget_state=state.capture()
-
-    def _plan_update_rate_budget(self):
-        cfg=self.config.rigid_tree
-        if not cfg.target_update_bytes:
-            return
-        state=RateBudgetState.restore(self._rate_budget_state,cfg.max_rate_multiplier)
-        report=state.update(int(self.current_frame),int(self.frame_report['encoded_bytes']),
-            cfg.target_update_bytes,cfg.rate_controller_gain,cfg.max_rate_multiplier)
-        report['initial_multiplier']=cfg.initial_rate_multiplier
-        report['effective_rate_weight']=self.motion.effective_rate_loss_weight
-        self.frame_report['rate_budget']=report
-        self._rate_budget_state=state.capture()
-
     def frame_plan_training_views(self, step, count):
         # Existing per-frame cache loads training images once; it does not render them.
         cached = self.transaction_camera_views()
@@ -433,17 +458,50 @@ class FramePlanController:
                 if not names or len(names) != 4 or any(name not in cached for name in names):
                     raise ValueError('Post-fit admission needs its four saved training-camera names')
                 dataset = [view for name, view in cached.items() if name not in names]
-        if count != 4 or len(dataset) < count:
-            raise ValueError('Frame plan requires four distinct training views per step')
-        # Stateless seeded sampling also reproduces exact camera sets on resume.
         seed = int(self.datamodule.config.training_view_seed or 0)
-        generator = torch.Generator().manual_seed(seed+1000003*self.current_frame+int(step))
-        indices = torch.randperm(len(dataset), generator=generator)[:count].tolist()
+        if count == 1:
+            if len(dataset) < 2 or not 1 <= step <= 300:
+                raise ValueError('Single-view frame plan needs two training cameras and a valid step')
+            # Each optimization step uses one camera; shuffle once per full
+            # camera cycle, deterministically from the frame and seed.
+            epoch, position = divmod(int(step) - 1, len(dataset))
+            generator = torch.Generator().manual_seed(seed + 1000003*self.current_frame + epoch)
+            order = torch.randperm(len(dataset), generator=generator).tolist()
+            indices = [order[position]]
+            if gradient_probe_step(self, step) and self.config.full_update.probe_views_per_round == 4:
+                if len(dataset) < 4:
+                    raise ValueError('Four-view probes need at least four training cameras')
+                start = 101 if self.config.full_update.early_joint_repair else 201 if step < 251 else 251
+                generator = torch.Generator().manual_seed(seed + 1000003*self.current_frame + 500000 + start)
+                indices = [torch.randperm(len(dataset), generator=generator).tolist()[step - start]]
+            auxiliary_count = 0
+            if step in (200, 250) and (admission or
+                    getattr(self.config.birth, 'regional_color_birth', False)):
+                auxiliary_count = 3
+            if auxiliary_count and len(dataset) <= auxiliary_count:
+                raise ValueError('Regional selection needs distinct training cameras')
+            # Additional cameras provide selection evidence only; they are not
+            # returned to the optimizer and do not perform another backward.
+            indices.extend(order[(position + offset) % len(order)]
+                           for offset in range(1, auxiliary_count + 1))
+        elif count == 4 and len(dataset) >= count:
+            # Preserve the historical four-view sampler and checkpoint behavior.
+            generator = torch.Generator().manual_seed(seed+1000003*self.current_frame+int(step))
+            indices = torch.randperm(len(dataset), generator=generator)[:count].tolist()
+        else:
+            raise ValueError('Frame plan requires one or four distinct training views per step')
         self._plan_step_views = [dataset[i] for i in indices]
         names = [Path(str(view.path)).name for view in self._plan_step_views]
-        if len(set(names)) != count or 'cam00.png' in names:
+        if len(set(names)) != len(indices) or 'cam00.png' in names:
             raise ValueError('Frame plan sampled duplicate or held-out training cameras')
-        return self._plan_step_views
+        if (regional_attribute_repair_active(self) and
+                (getattr(self.config.full_update, 'point_training_schedule', 'standard') != 'standard' or
+                 self.config.full_update.audit_camera_sequence)):
+            if count != 1:
+                raise ValueError('Recorded point experiments require one optimization view per step')
+            self.birth_control.setdefault('point_schedule_camera_trace', []).append(
+                dict(step=int(step), camera=names[0]))
+        return self._plan_step_views[:count]
 
     def _plan_record_phase_time(self):
         started = getattr(self,'_plan_phase_started',None)
@@ -460,19 +518,13 @@ class FramePlanController:
         tail = final_joint_scheduled(self, step)
         full = bool(getattr(self, 'full_update_active', False))
         regional = regional_attribute_repair_active(self)
-        frozen = _fixed_incumbent(self, step)
         alpha_frozen = _fixed_old_alpha(self, step)
-        phase = ('final_joint_refine' if tail else
-                 'shared_gate' if step <= 100 else 'fixed_gate_residual' if step <= 150 else
-                 'joint_gate_residual' if step <= 180 else 'fixed_gate_motion' if step <= 200 else
-                 'regional_attribute_repair' if regional else
-                 'newborn_fixed_incumbent' if alpha_frozen else 'newborn_old_alpha')
+        phase = frame_plan_phase(self, step)
         if getattr(self,'_plan_timed_phase',None) != phase:
             self._plan_record_phase_time()
         if getattr(self,'_plan_phase_started',None) is None:
             self._plan_timed_phase = phase
             self._plan_phase_started = time.perf_counter()
-        self._early_attach_opacity()
         if not self.motion_committed or tail or full:
             self.motion.prepare_plan_step(step)
         update = self.opacity_update
@@ -485,21 +537,32 @@ class FramePlanController:
         hook = getattr(self, 'full_update_prepare_step', None)
         if hook is not None:
             hook(step)
+        if step > 200 and regional_attribute_repair_active(self):
+            self.motion.optimizer.param_groups[2]['lr'] = (self.config.rigid_tree.gs_translation_lr *
+                self.motion._motion_lr_factor(200) * self.config.full_update.gradient_position_lr_scale)
 
     @torch.no_grad()
     def _plan_post_step(self, packages, step):
         if step != self.early_shared_steps+1 or not 1 <= step <= 300:
             raise ValueError('Frame plan requires one shared Adam update per iteration')
+        if gradient_probe_step(self, step):
+            self._plan_gradient_probe(step, packages[0])
+            self.early_shared_steps += 1
+            return
         if regional_alpha_repair_active(self) and step > 200:
             self._plan_regional_alpha_mask_gradient(step)
-        if regional_attribute_repair_active(self) and step > 200:
-            self._plan_mask_regional_attribute_gradients()
+        early_repair = (regional_attribute_repair_active(self) and
+                        getattr(self.config.full_update, 'early_joint_repair', False))
+        if regional_attribute_repair_active(self) and (step > 200 or (early_repair and step > 100)):
+            self._plan_mask_regional_attribute_gradients(attributes_only=step <= 200)
         tail_start = 301-effective_final_joint_refine_steps(self)
         full = bool(getattr(self, 'full_update_active', False))
+        shared = getattr(self, 'feature_dc_update', None)
         frozen = _fixed_incumbent(self, step)
         alpha_frozen = _fixed_old_alpha(self, step)
-        boundaries = (1,100,101,150,151,180,181,200,201,250,251,300)
-        if step in boundaries or (tail_start <= 300 and step in (tail_start-1,tail_start)):
+        boundaries = (1,50,51,100,101,150,151,180,181,200,201,250,251,300)
+        diagnostic_steps = step in boundaries or (tail_start <= 300 and step in (tail_start-1,tail_start))
+        if diagnostic_steps and getattr(getattr(self.config, 'full_update', None), 'gradient_diagnostics', True):
             parameters = {name: getattr(self.motion,name) for name in
                           ('gate_logits','region_translation','gs_translation','region_rotation','gs_rotation')}
             parameters['old_alpha'] = self.opacity_update.delta
@@ -507,6 +570,9 @@ class FramePlanController:
             if full_attributes is not None and full:
                 parameters.update({f'old_full_{name}': parameter for name, parameter in
                                    full_attributes.parameters.items()})
+            shared = getattr(self, 'feature_dc_update', None)
+            if shared is not None and shared.regional and shared.ready:
+                parameters['regional_dc'] = shared.delta
             if (getattr(self, 'logscale_update', None) is not None and
                     self.logscale_update.ready):
                 parameters['old_logscale'] = self.logscale_update.delta
@@ -560,14 +626,16 @@ class FramePlanController:
                 perform_step=False, external_state=self.motion.optimizer.state.get(self.opacity_update.delta, {}))
         if regional_alpha_repair_active(self) and step > 200:
             self._plan_regional_alpha_restore(step)
-        if regional_attribute_repair_active(self) and step > 200:
-            self._plan_restore_regional_attribute_frozen_rows(step)
+        if regional_attribute_repair_active(self) and (step > 200 or (early_repair and step > 100)):
+            self._plan_restore_regional_attribute_frozen_rows(step, attributes_only=step <= 200)
         self.early_shared_steps += 1
         if self.early_initialized:
             self.births.project_parameters()
             self.early_birth_updates += 1
         if getattr(self.config.birth, 'regional_color_birth', False) and step in (100, 150, 180):
             self._plan_record_stage(step, 'old_only', old_only=True)
+        if early_repair and step == 100:
+            self._plan_select_regional_attributes(packages)
         if step == 200:
             xyz, rotation = self.motion.decoded_survivor_pose()
             self.gaussians.apply_selected_motion(xyz.to(self.device), rotation.to(self.device))
@@ -589,15 +657,44 @@ class FramePlanController:
                 reference_distance='0.5 squared position/extent + 0.5 mean squared RGB DC; ties lowest old row',
                 storage_loss=dict(units='surrogate bytes; not compressed bytes',
                                   enabled=bool(self.config.birth.storage_loss_enabled)))
+            if getattr(self.config, 'ablation_motion_only', False):
+                self.birth_control['early_replacement'].update(mode='motion_only_ablation',
+                    birth_steps=[], cleanup_steps=[], colour_initialization=None,
+                    reference_distance=None)
+                self._plan_finish()
+                return
             if regional_attribute_repair_active(self):
                 self.birth_control['early_replacement'].update(mode='regional_attribute_repair',
                     birth_steps=[], cleanup_steps=[], colour_initialization=None,
                     reference_distance=None)
-                self._plan_select_regional_attributes(packages)
+                if early_repair:
+                    if shared is not None and shared.regional and not shared.ready:
+                        shared.bind(self.motion.owner, len(self.motion.parents),
+                                    torch.unique(self.motion.owner), self.motion.optimizer)
+                    # Motion and opacity remain trainable for every point until
+                    # step 200; freeze them relative to this committed state.
+                    state = self._plan_regional_attribute_state
+                    for name, parameter in self._regional_attribute_parameters().items():
+                        if name in self.full_attribute_update.parameters:
+                            continue
+                        adam = self.motion.optimizer.state.get(parameter, {})
+                        state['parameters'][name] = dict(value=parameter.detach().clone(), moments={
+                            key: value.detach().clone() for key, value in adam.items()
+                            if torch.is_tensor(value) and value.shape == parameter.shape})
+                    self._plan_validate_regional_attribute_state(state)
+                else:
+                    self._plan_select_regional_attributes(packages)
         if regional_attribute_repair_active(self):
             if step in (200, 250, 300):
                 self._plan_record_stage(step, f'regional_repair_{step}', old_only=True)
-            if step == 300:
+            if step == 300 and shared is not None and shared.regional and shared.ready:
+                # A read-only final-image intervention, not a retrained ablation.
+                self._diagnostic_regional_dc_disabled = True
+                try:
+                    self._plan_record_stage(step, 'regional_dc_off', old_only=True)
+                finally:
+                    self._diagnostic_regional_dc_disabled = False
+            if step == 300 or (step == 200 and self.config.full_update.stop_after_motion):
                 self.full_update_finish_pose_attributes()
                 self._plan_finish()
             return
@@ -1001,7 +1098,7 @@ class FramePlanController:
         self.birth_control['phase_timing_scope'] = 'synchronized wall seconds; includes topology events; excludes checkpoint writes and final encoding'
         self.motion.record_final_diagnostics()
         tail_steps = effective_final_joint_refine_steps(self)
-        self.birth_control['early_replacement'].update(global_iterations=300, motion_iterations=200+tail_steps,
+        self.birth_control['early_replacement'].update(global_iterations=self.total_steps, motion_iterations=200+tail_steps,
             final_joint_refine_steps=tail_steps,
             configured_final_joint_refine_steps=self.config.rigid_tree.spatial_gate.final_joint_refine_steps,
             incumbent_fixed_after_motion=getattr(self.config.birth, 'keep_incumbent_fixed_after_motion', False),
@@ -1009,8 +1106,9 @@ class FramePlanController:
             actual_birth_cohorts=len(self.births.cohorts),
             birth_updates_by_cohort=[300-batch['birth_step'] for batch in self.births.cohorts])
         if regional_attribute_repair_active(self):
-            self.birth_control['early_replacement'].update(motion_iterations=300,
-                newborn_iterations=0, incumbent_fixed_after_motion=False)
+            self.birth_control['early_replacement'].update(
+                motion_iterations=(200 if self.config.full_update.color_only else self.total_steps),
+                newborn_iterations=0, incumbent_fixed_after_motion=self.config.full_update.color_only)
         self.finalize_frame()
         if getattr(self.config.birth, 'regional_postfit_admission', False):
             from .regional_birth_admission import verify_encoded_admission
@@ -1018,4 +1116,3 @@ class FramePlanController:
         recorder = getattr(self.trainer, 'record_frame_plan_decoded', None)
         if recorder is not None:
             recorder()
-        self._plan_update_rate_budget()

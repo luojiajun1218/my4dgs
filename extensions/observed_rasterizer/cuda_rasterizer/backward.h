@@ -33,7 +33,11 @@ namespace OBSERVED_BACKWARD
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
 		float3* dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+		double4* dL_dconic2D,
+#else
 		float4* dL_dconic2D,
+#endif
 		float* dL_dopacity,
 		float* dL_dcolors);
 
@@ -53,7 +57,12 @@ namespace OBSERVED_BACKWARD
 		const float tan_fovx, float tan_fovy,
 		const glm::vec3* campos,
 		const float3* dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+		const double* dL_dconics,
+		const float4* rendered_conic,
+#else
 		const float* dL_dconics,
+#endif
 		glm::vec3* dL_dmeans,
 		float* dL_dcolor,
 		float* dL_dcov3D,

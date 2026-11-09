@@ -360,7 +360,11 @@ void ObservedCudaRasterizer::Rasterizer::backward(
 	char* img_buffer,
 	const float* dL_dpix,
 	float* dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+	double* dL_dconic,
+#else
 	float* dL_dconic,
+#endif
 	float* dL_dopacity,
 	float* dL_dcolor,
 	float* dL_dmean3D,
@@ -403,7 +407,11 @@ void ObservedCudaRasterizer::Rasterizer::backward(
 		imgState.n_contrib,
 		dL_dpix,
 		(float3*)dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+		(double4*)dL_dconic,
+#else
 		(float4*)dL_dconic,
+#endif
 		dL_dopacity,
 		dL_dcolor), debug)
 
@@ -427,6 +435,9 @@ void ObservedCudaRasterizer::Rasterizer::backward(
 		(glm::vec3*)campos,
 		(float3*)dL_dmean2D,
 		dL_dconic,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+		geomState.conic_opacity,
+#endif
 		(glm::vec3*)dL_dmean3D,
 		dL_dcolor,
 		dL_dcov3D,

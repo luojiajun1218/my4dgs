@@ -7,6 +7,11 @@ from typing import Optional
 import torch
 import numpy as np
 
+try:
+    from scipy.spatial.distance import cdist as _scipy_cdist
+except ImportError:  # Decoding remains available without the optional fast path.
+    _scipy_cdist = None
+
 
 SPATIAL_ROUTING_FIELDS = ('spatial_support_ball', 'spatial_leaf_centers',
                           'spatial_leaf_nodes')
@@ -15,7 +20,7 @@ SPATIAL_ROUTING_FIELDS = ('spatial_support_ball', 'spatial_leaf_centers',
 @dataclass
 class SpatialGateConfig:
     enabled: bool = True
-    max_depth: int = 4
+    max_depth: int = 5
     initialization: str = 'median'
     initialization_distance_quantile: float = 0.999
     reference_layout: Optional[str] = None
@@ -329,13 +334,46 @@ def validate_spatial_routing(routing, depth):
     return True
 
 
+def _nearest_supported_leaves(points, representatives, leaf_nodes):
+    """Find nearest leaves with bounded memory and the codec's stable tie rule."""
+    nearest = np.empty(len(points), dtype=np.int64)
+    for start in range(0, len(points), 32):
+        query = points[start:start + 32]
+        if _scipy_cdist is None:
+            distances = np.zeros((len(query), len(representatives)), dtype=np.float64)
+            for axis in range(3):
+                delta = query[:, axis, None] - representatives[None, :, axis]
+                distances += delta * delta
+            indices = distances.argmin(axis=1)
+        else:
+            distances = _scipy_cdist(query, representatives, metric='sqeuclidean')
+            indices = distances.argmin(axis=1)
+            # Recompute near ties in the original operation order. This keeps
+            # the lowest leaf ID on exact ties even if a platform rounds the
+            # compiled distance calculation slightly differently.
+            best = distances[np.arange(len(query)), indices]
+            bound = best.copy()
+            for _ in range(8):
+                bound = np.nextafter(bound, np.inf)
+            close = distances <= bound[:, None]
+            for row in np.flatnonzero(close.sum(axis=1) > 1):
+                candidates = np.flatnonzero(close[row])
+                exact = np.zeros(len(candidates), dtype=np.float64)
+                for axis in range(3):
+                    delta = query[row, axis] - representatives[candidates, axis]
+                    exact += delta * delta
+                indices[row] = candidates[exact.argmin()]
+        nearest[start:start + len(query)] = leaf_nodes[indices]
+    return nearest
+
+
 def spatial_route(xyz, centers, depth, *, routing=None):
     """CPU routing from shared float32 decoded positions and static planes.
 
     Equality belongs to the upper cell, matching reference construction.
     CPU evaluation on both sides avoids GPU boundary-rounding differences.
     """
-    if (xyz.ndim != 2 or xyz.shape[1] != 3 or
+    if (depth < 1 or xyz.ndim != 2 or xyz.shape[1] != 3 or
             centers.shape != (sum(8 ** level for level in range(depth)), 3) or
             not bool(torch.isfinite(xyz).all()) or
             not bool(torch.isfinite(centers).all())):
@@ -343,15 +381,18 @@ def spatial_route(xyz, centers, depth, *, routing=None):
     points = xyz.detach().cpu().float().numpy()
     planes = centers.detach().cpu().float().numpy()
     parent = np.zeros(len(points), dtype=np.int64)
-    codes, offset, paths = parent.copy(), 1, []
+    codes, offset = parent.copy(), 1
+    paths = np.empty((len(points), depth), dtype=np.int64)
     for level in range(depth):
-        side = points >= planes[parent]
-        octant = side[:, 0].astype(np.int64) + 2 * side[:, 1] + 4 * side[:, 2]
+        # Gather each plane coordinate directly: materializing an N-by-3
+        # plane array at every level is much slower for large reference sets.
+        octant = (points[:, 0] >= planes[parent, 0]).astype(np.int64)
+        octant += 2 * (points[:, 1] >= planes[parent, 1])
+        octant += 4 * (points[:, 2] >= planes[parent, 2])
         codes = 8 * codes + octant
         parent = offset + codes
-        paths.append(parent.copy())
+        paths[:, level] = parent
         offset += 8 ** (level + 1)
-    paths = np.stack(paths, axis=1)
     if routing and validate_spatial_routing(routing, depth):
         ball = routing['spatial_support_ball'].detach().cpu().numpy()
         representatives = routing['spatial_leaf_centers'].detach().cpu().double().numpy()
@@ -364,14 +405,8 @@ def spatial_route(xyz, centers, depth, *, routing=None):
         offsets = np.array([sum(8 ** item for item in range(level))
                             for level in range(1, depth + 1)], dtype=np.int64)
         shifts = 3 * np.arange(depth - 1, -1, -1)
-        for start in range(0, len(far), 32):
-            rows = far[start:start + 32]
-            distances = np.zeros((len(rows), len(representatives)), dtype=np.float64)
-            for axis in range(3):
-                delta = precise[rows, axis, None] - representatives[None, :, axis]
-                distances += delta * delta
-            nearest = leaf_nodes[distances.argmin(axis=1)] - first_leaf
-            paths[rows] = offsets + np.right_shift(nearest[:, None], shifts)
+        nearest = _nearest_supported_leaves(precise[far], representatives, leaf_nodes) - first_leaf
+        paths[far] = offsets + np.right_shift(nearest[:, None], shifts)
     return torch.from_numpy(paths)
 
 

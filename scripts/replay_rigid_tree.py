@@ -51,11 +51,25 @@ def decode_frame(directory: Path, frame: int, state, raw):
     birth_count = len(decoded.xyz) - old_count
     if any(len(value) != len(state.xyz) for value in raw.values()):
         raise ValueError('Previous raw attributes differ from decoded GS count')
-    current = {name: value[rows].clone() for name, value in raw.items()}
-    current['xyz'] = decoded.xyz[:old_count]
-    current['rotation'] = decoded.rotation[:old_count]
     import json
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    # Decoder survivor IDs are strictly ordered. If every old point survives,
+    # the mapping is identity, so do not gather and clone each full tensor.
+    # The decoded pose replaces xyz/rotation. A full-attribute packet creates
+    # independent output tensors for these three fields; defer their copies
+    # until that decoder rather than cloning each field twice.
+    all_survive = old_count == len(state.xyz)
+    full_will_copy = bool(manifest.get('full_attribute_update'))
+    current = {}
+    for name, value in raw.items():
+        if name == 'xyz':
+            current[name] = decoded.xyz[:old_count]
+        elif name == 'rotation':
+            current[name] = decoded.rotation[:old_count]
+        elif all_survive and full_will_copy and name in ('logscale', 'sh_dc', 'sh_rest'):
+            current[name] = value
+        else:
+            current[name] = value.clone() if all_survive else value.index_select(0, rows)
     timing = manifest.get('opacity_update_timing', 'after_births')
     if timing not in ('before_births', 'after_births'):
         raise ValueError('Unknown opacity update timing')
@@ -72,6 +86,22 @@ def decode_frame(directory: Path, frame: int, state, raw):
             owner=decoded.owner[:old_count], node_count=len(decoded.parents))
     elif (directory / f'shdc_{frame:03d}.bin').exists():
         raise ValueError('Unexpected DC feature packet absent from frame manifest')
+    region_scale = manifest.get('regional_logscale_update')
+    if region_scale is not None:
+        from pipeline.model.regional_logscale import decode_regional_logscale
+        if (region_scale != f'regscale_{frame:03d}.bin' or
+                manifest.get('regional_logscale_update_timing') != 'before_full_attribute_update'):
+            raise ValueError('Invalid regional scale packet timing or filename')
+        current['logscale'] = decode_regional_logscale((directory / region_scale).read_bytes(),
+            current['logscale'], frame_index=frame, owner=decoded.owner[:old_count],
+            node_count=len(decoded.parents))
+    elif (directory / f'regscale_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected regional scale packet')
+    color_version = manifest.get('color_stream_version')
+    if color_version is not None and (type(color_version) is not int or color_version not in (2, 3)):
+        raise ValueError('Unknown color stream version')
+    if color_version == 3 and manifest.get('logscale_update') is not None:
+        raise ValueError('Sparse attribute v3 forbids separate logscale packets')
     logscale_name = manifest.get('logscale_update')
     if logscale_name is not None:
         from pipeline.model.sparse_logscale import decode_logscale_delta
@@ -85,6 +115,33 @@ def decode_frame(directory: Path, frame: int, state, raw):
             allowed_rows=decoded.gs_translation_rows, frame_index=frame).logscale
     elif (directory / f'logscale_{frame:03d}.bin').exists():
         raise ValueError('Unexpected log-scale packet absent from frame manifest')
+    if color_version in (2, 3):
+        budget = manifest.get('color_point_budget')
+        if (type(budget) is not int or budget < 1 or
+                'color_point_mask' in manifest or 'color_point_mask_count' in manifest or
+                manifest.get('full_update') is not True or
+                'full_attribute_update' not in manifest or
+                manifest.get('full_attribute_update_timing') != 'after_regional_dc_before_births' or
+                (color_version == 2 and 'color_attribute_fields' in manifest) or
+                (color_version == 3 and manifest.get('color_attribute_fields') != ['sh_dc', 'logscale'])):
+            raise ValueError('Invalid sparse color stream manifest')
+    point_mask_name = manifest.get('color_point_mask')
+    point_mask = None
+    expected_mask = f'pointmask_{frame:03d}.bin'
+    if point_mask_name is not None:
+        from pipeline.model.color_point_mask import decode_color_point_mask
+        if point_mask_name != expected_mask:
+            raise ValueError('Color point mask filename differs from frame')
+        point_mask = torch.from_numpy(decode_color_point_mask((directory / point_mask_name).read_bytes(), frame, old_count))
+        if (int(point_mask.sum()) != manifest.get('color_point_mask_count') or
+                int(point_mask.sum()) > manifest.get('color_point_budget', -1)):
+            raise ValueError('Color point mask metadata differs from packet')
+    elif (directory / expected_mask).exists():
+        raise ValueError('Unexpected color point mask packet absent from manifest')
+    elif manifest.get('color_point_mask_count', 0):
+        raise ValueError('Nonempty color point mask is missing')
+    elif 'color_point_budget' in manifest and color_version not in (2, 3):
+        point_mask = torch.zeros(old_count, dtype=torch.bool)
     full_name = manifest.get('full_attribute_update')
     if full_name is not None:
         from pipeline.model.full_attribute_update import decode_full_attribute_delta
@@ -94,7 +151,14 @@ def decode_frame(directory: Path, frame: int, state, raw):
             raise ValueError('Full attributes must follow regional DC and precede newborn prediction')
         reference = {name: current[name] for name in ('logscale', 'sh_dc', 'sh_rest')}
         current.update(decode_full_attribute_delta((directory / full_name).read_bytes(),
-                                                   reference, frame_index=frame))
+                                                   reference, frame_index=frame,
+                                                   color_only_budget=budget if color_version in (2, 3) else None,
+                                                   allowed_fields=('sh_dc', 'logscale') if color_version == 3 else ('sh_dc',)))
+        if point_mask is not None and not torch.equal(current['sh_dc'][~point_mask], reference['sh_dc'][~point_mask]):
+            raise ValueError('Decoded point DC changed outside its transmitted mask')
+        if 'color_point_budget' in manifest and ((color_version != 3 and not torch.equal(current['logscale'], reference['logscale'])) or
+                not torch.equal(current['sh_rest'], reference['sh_rest'])):
+            raise ValueError('Color-only residual packet changed non-DC attributes')
     elif (directory / f'fullattr_{frame:03d}.bin').exists():
         raise ValueError('Unexpected full attribute packet absent from frame manifest')
     birth_file = directory / f'birth_{frame:03d}.bin'

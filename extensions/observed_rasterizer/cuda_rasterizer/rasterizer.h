@@ -74,7 +74,11 @@ namespace ObservedCudaRasterizer
 			char* image_buffer,
 			const float* dL_dpix,
 			float* dL_dmean2D,
+#ifdef MY4DGS_STABLE_COVARIANCE_BACKWARD
+			double* dL_dconic,
+#else
 			float* dL_dconic,
+#endif
 			float* dL_dopacity,
 			float* dL_dcolor,
 			float* dL_dmean3D,

@@ -13,11 +13,50 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .rigid_residual_tree import (MotionBase, _id_lengths, _integer,
+from .rigid_residual_tree import (MotionBase, _id_lengths, _point_id_lengths, _integer,
     _quantized, quaternion_multiply,
     rotation_vector_quaternion)
 from .spatial_gate import (spatial_layout, spatial_owner, spatial_state_route,
                           spatial_accumulate, SPATIAL_ROUTING_FIELDS)
+
+
+def predictor_cost(target, predictor, metric, steps, l1, byte_price, row_bytes):
+    """Return per-point envelope cost and the chosen quantized residual.
+
+    Try the same T/R block support choices as GS proximal sparsification. Hold
+    the chosen residual fixed in backward (the envelope derivative); only the
+    predictor learns here. Gates receive these costs through path probabilities.
+    """
+    target, metric = target.detach(), metric.detach()
+    with torch.no_grad():
+        difference = target - predictor.detach()
+        residual = difference.sign() * (difference.abs() - l1 / metric.clamp_min(1e-20)).clamp_min(0)
+        residual = (residual / steps).round().clamp(-32767, 32767) * steps
+        options = torch.stack((residual, torch.cat((residual[:, :3], residual[:, 3:] * 0), -1),
+            torch.cat((residual[:, :3] * 0, residual[:, 3:]), -1), residual * 0))
+        active_t = options[:, :, :3].ne(0).any(-1)
+        active_r = options[:, :, 3:].ne(0).any(-1)
+        byte_cost = ((active_t | active_r) * row_bytes + 6 * (active_t.int() + active_r.int()))
+        local = (.5 * metric * (predictor.detach()[None] + options - target[None]).square()).sum(-1)
+        local += (l1 * options.abs()).sum(-1) + byte_price * byte_cost
+        chosen = local.argmin(0)
+        rows = torch.arange(len(target), device=target.device)
+        selected = options[chosen, rows]
+        selected_bytes = byte_cost[chosen, rows]
+    distortion = (.5 * metric * (predictor + selected - target).square()).sum(-1)
+    penalty = (l1 * selected.abs()).sum(-1)
+    return distortion + penalty + byte_price * selected_bytes, selected, selected_bytes
+
+
+class _HardForwardGateProxy(torch.autograd.Function):
+    """Preserve the hard tensor bit-for-bit and add only the proxy's gradient."""
+    @staticmethod
+    def forward(ctx, hard, proxy):
+        return hard
+
+    @staticmethod
+    def backward(ctx, gradient):
+        return gradient, gradient
 
 
 def _hard_value_soft_gradient(hard, soft):
@@ -142,7 +181,7 @@ class SpatialGatedMotion(MotionBase):
     @property
     def shared_discovery_active(self):
         return self.config.spatial_gate.shared_discovery and (
-            self.last_step <= 100 if self.config.spatial_gate.frame_training_plan else not self._hard_gate_frozen)
+            self.last_step <= self.config.shared_discovery_steps if self.config.spatial_gate.frame_training_plan else not self._hard_gate_frozen)
 
     @property
     def refining_unselected_candidates(self):
@@ -169,8 +208,8 @@ class SpatialGatedMotion(MotionBase):
         for parameter, enabled in ((self.gate_logits, gate),
                 (self.region_translation, motion),
                 (self.region_rotation, motion and self.config.rotation_updates),
-                (self.gs_translation, motion and step >= 101),
-                (self.gs_rotation, motion and step >= 101 and self.config.rotation_updates)):
+                (self.gs_translation, motion and step > self.config.shared_discovery_steps),
+                (self.gs_rotation, motion and step > self.config.shared_discovery_steps and self.config.rotation_updates)):
             parameter.requires_grad_(enabled)
             if not enabled:
                 parameter.grad = None
@@ -591,7 +630,7 @@ class SpatialGatedMotion(MotionBase):
         self._make_optimizer()
         self.rate_reference_count = self.rate_reference_count or len(xyz)
         self._region_id_lengths = _id_lengths(count - 1, xyz)
-        self._gs_id_lengths = _id_lengths(len(xyz), xyz)
+        self._gs_id_lengths = _point_id_lengths(len(xyz), xyz)
         self.observations = torch.zeros(len(xyz), dtype=torch.long, device=xyz.device)
         self.pending_birth_sources = None
         self.topology_edits, self.last_metrics = [], {}
@@ -880,8 +919,13 @@ class SpatialGatedMotion(MotionBase):
 
     def forward(self, step, training=False):
         if training:
-            self.last_step = int(step)
-            self.prepare_plan_step(step)
+            # The frame-plan controller normally prepares the step before
+            # rendering. Preserve standalone/non-plan calls as well.
+            if not self.config.spatial_gate.frame_training_plan:
+                self.last_step = int(step)
+                self.prepare_plan_step(step)
+            elif self.last_step != int(step):
+                self.prepare_plan_step(step)
             self._prepare_amplitude_refit(step)
         if training and self.shared_discovery_active:
             translation, rotation_vector = self._stochastic_image_motion()
@@ -903,6 +947,21 @@ class SpatialGatedMotion(MotionBase):
             gt, gr = self._gs_motion(relaxed=relaxed)
             xyz = self.base_xyz + shared_t + gt
             rotation_vector = shared_r + gr
+            if (training and getattr(self, 'refine_image_gate_ste', False) and
+                    self.config.spatial_gate.frame_training_plan and 151 <= step <= 180):
+                if self._hard_gate_frozen or not self.shared_image_recode or self.hierarchical_private or self.private_full_motion:
+                    raise ValueError('Gate image STE requires the unfrozen physical-recoding frame plan')
+                # A path's alternatives use each candidate's quantized region
+                # motion plus the same quantized point residual. Only the
+                # gate receives this surrogate derivative; all motion-parameter
+                # derivatives remain those of the original hard forward.
+                weights = self._path_weights(self._gate_probabilities())
+                rt, rr = self._regional_predictions()
+                soft_t = (weights[..., None] * (rt[self.spatial_paths].detach() + gt.detach()[:, None, :])).sum(1)
+                xyz = _HardForwardGateProxy.apply(xyz, soft_t)
+                if self.config.rotation_updates:
+                    soft_r = (weights[..., None] * (rr[self.spatial_paths].detach() + gr.detach()[:, None, :])).sum(1)
+                    rotation_vector = _HardForwardGateProxy.apply(rotation_vector, soft_r)
         if not self.config.rotation_updates:
             return xyz, self.base_rotation
         rotation = quaternion_multiply(rotation_vector_quaternion(rotation_vector), self.base_rotation)
@@ -968,7 +1027,7 @@ class SpatialGatedMotion(MotionBase):
             self._predictor_fit_state = {name: value[rows].clone()
                                         for name, value in self._predictor_fit_state.items()}
         self.node_counts = torch.bincount(self.spatial_paths.flatten(), minlength=len(self.parents))
-        self._gs_id_lengths = _id_lengths(len(rows), self.base_xyz)
+        self._gs_id_lengths = _point_id_lengths(len(rows), self.base_xyz)
         self._survivor_mapping_bytes = self._count_survivor_mapping_bytes()
 
     def _count_survivor_mapping_bytes(self):
@@ -1349,7 +1408,6 @@ class SpatialGatedMotion(MotionBase):
         branches whose ancestors are closed. Conditional fitting is separate
         from the expected path cost so ancestors cannot starve their training.
         """
-        from .predictor_rd import predictor_cost
         zero = self.base_xyz.new_zeros(())
         result = dict(rate_loss=zero, relative_motion_loss=zero, candidate_motion_loss=zero)
         state = getattr(self, '_predictor_fit_state', None)
@@ -1810,7 +1868,7 @@ class SpatialGatedMotion(MotionBase):
         if cfg.frame_training_plan:
             if self.last_step <= 100 or 151 <= self.last_step <= 180:
                 edits = self._select_frontier(freeze=self.last_step in (100, 180))
-            if self.last_step >= 100:
+            if self.last_step >= self.config.shared_discovery_steps:
                 self._shared_field_active = False
             if self._motion_fit_window_due():
                 self._proximal_gs_blocks()

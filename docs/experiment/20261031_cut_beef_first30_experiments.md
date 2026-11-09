@@ -29,7 +29,7 @@
 - 生产 30 帧配置：`config/cut_roasted_beef_sh3_15k_cov150_gatepricefix_regdc_30_20261031.yaml`。
 - 生产配置相对当前 Cut 统一 SH1 版本的结构化差异只有 `output_dir`、`experiment_name`、checkpoint、reference layout 和 `module.sh_degree: 1 -> 3`。动态机制保持 50,000 bytes 目标、初始 multiplier 3、gate price 1/3、区域共享 DC，且 log-scale 更新关闭。
 - frame-plan newborn 先由训练 RGB 初始化 DC，高阶 `sh_rest` 从同一个 codec reference 点完整继承；SH3 下为 15 个高阶系数，不会清零后发送整组抵消残差。
-- `scripts/publish_initial_asset.py` 严格校验完整激活的 SH0–SH3、layout degree、reference SH 形状与 finite 属性；15k、frame0、100k–200k、同源 fresh layout 约束未放宽。
+- 当时的 `scripts/publish_initial_asset.py` 严格校验完整激活的 SH0–SH3、layout degree、reference SH 形状与 finite 属性；15k、frame0、100k–200k、同源 fresh layout 约束未放宽。该脚本现已清理。
 - `pipeline/model/gpu_stream.py` 从 `sh_rest` 系数数目严格推导 SH degree，`StreamView` 报告真实 degree；新增 SH3 newborn + regional DC 的 CPU/GPU exact 覆盖。
 
 这些工程改动验证的是 SH3 资产与播放链路的正确性，不等于已经证明某种共享粒度选择策略提高了画质。

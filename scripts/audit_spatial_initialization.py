@@ -136,7 +136,7 @@ def main():
         xyz = torch.from_numpy(packet['xyz'].copy())
         rotation = torch.from_numpy(packet['rotation'].copy())
         extent = float(packet['extent'])
-        saved_paths = packet['spatial_paths'].copy()
+        saved_paths = CODEC.DecodedState.from_reference(packet).spatial_paths.numpy()
         saved_centers = packet['spatial_centers'].copy()
     support = LAYOUT.spatial_initialization_support(xyz, 'robust_median').numpy()
     positions = xyz.numpy()

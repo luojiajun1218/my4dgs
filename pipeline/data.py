@@ -15,6 +15,24 @@ from libgs.data import Dataset, SceneInfo, load_scene
 from libgs.pipeline import DataConfig as BaseDataConfig
 from libgs.pipeline import DataModule as BaseDataModule
 from libgs.data.utils.fetch import Fetcher
+from libgs.data.dataset import base as _libgs_dataset_base
+
+
+_libgs_original_resolution_warning = _libgs_dataset_base.warning
+
+def _safe_resolution_warning():
+    """Keep libgs' warning behavior when dataset access is in the main process."""
+    if _libgs_dataset_base.get_worker_info() is not None:
+        return _libgs_original_resolution_warning()
+    with _libgs_dataset_base.WARNED.get_lock():
+        if _libgs_dataset_base.WARNED.value != 0:
+            return
+        _libgs_dataset_base.WARNED.value += 1
+    print('[WARNING] Rescale large image to 1.6K. Set resolution=1 to use original size.')
+
+
+# resolve_size uses this module global; do not alter its resize calculation.
+_libgs_dataset_base.warning = _safe_resolution_warning
 
 
 def _collate_single_view(batch, expected_image_size=None):

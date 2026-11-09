@@ -185,21 +185,23 @@ class QuantizedOpacityUpdate(nn.Module):
         # Old sparse gradients/momentum must not affect the photo-only refit.
         self.optimizer.state.pop(self.delta, None)
 
-    def forward(self):
+    def forward(self, delta=None):
+        delta = self.delta if delta is None else delta
         if self.config.mode=='alpha':
-            alpha=self.alphas()
+            alpha=self.alphas(delta)
             logits=torch.logit(alpha.clamp(1e-6,1-1e-6))
             logits=torch.where(alpha.le(0),logits.new_full((),-100.),
                 torch.where(alpha.ge(1),logits.new_full((),100.),logits))
-            zero=self.symbols()[self.rows].eq(0)
+            zero=torch.round(delta.detach()/self.step)[self.rows].eq(0)
             return _PreserveZeroLogits.apply(self.reference[self.rows],logits,zero)
-        return _QuantizedLogits.apply(self.reference, self.delta, self.step)[self.rows]
+        return _QuantizedLogits.apply(self.reference, delta, self.step)[self.rows]
 
-    def alphas(self):
+    def alphas(self, delta=None):
+        delta = self.delta if delta is None else delta
         if self.config.mode=='alpha':
             return _QuantizedAlpha.apply(self.alpha_reference,self.render_alpha_reference,
-                self.delta,self.step)[self.rows]
-        return self().sigmoid()
+                delta,self.step)[self.rows]
+        return self(delta).sigmoid()
 
     def rate_terms(self, byte_price, width=1.):
         value = self.delta[self.rows]

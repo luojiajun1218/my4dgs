@@ -370,7 +370,8 @@ def _summarize_storage(rows):
                    int(row.get('opacity_update_bytes', 0)) +
                    int(row.get('feature_dc_update_bytes', 0)) +
                    int(row.get('logscale_update_bytes', 0)) +
-                   int(row.get('full_attribute_update_bytes', 0)))
+                   int(row.get('full_attribute_update_bytes', 0)) +
+                   int(row.get('color_point_mask_bytes', 0)))
         if int(row['encoded_bytes']) != payload or int(row.get('payload_bytes', payload)) != payload:
             raise ValueError('Dynamic payload bytes must equal all declared attribute and motion packets')
 
@@ -400,6 +401,9 @@ def _summarize_storage(rows):
                                          'opacity/DC/log-scale/full-attribute packets')
     if any('full_attribute_update_bytes' in row for row in dynamic):
         result['full_attribute_update_bytes_total'] = full_attributes
+    if any('color_point_mask_bytes' in row for row in dynamic):
+        result['color_point_mask_bytes_total'] = sum(int(row.get('color_point_mask_bytes', 0)) for row in dynamic)
+        result['encoded_bytes_scope'] += ' plus transmitted color point masks'
     for name, value in payload_stats.items():
         result[f'encoded_bytes_{name}'] = value  # Preserve legacy payload names.
         result[f'payload_bytes_{name}'] = value
@@ -488,11 +492,13 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
     feature_name = f'shdc_{frame:03d}.bin'
     logscale_name = f'logscale_{frame:03d}.bin'
     full_name = f'fullattr_{frame:03d}.bin'
+    mask_name = f'pointmask_{frame:03d}.bin'
     if (manifest.get('motion') != motion_name or manifest.get('birth') not in (None, birth_name) or
             manifest.get('opacity_update') not in (None, opacity_name) or
             manifest.get('feature_dc_update') not in (None, feature_name) or
             manifest.get('logscale_update') not in (None, logscale_name) or
-            manifest.get('full_attribute_update') not in (None, full_name)):
+            manifest.get('full_attribute_update') not in (None, full_name) or
+            manifest.get('color_point_mask') not in (None, mask_name)):
         raise ValueError(f'Frame {frame} manifest packet names differ from expected files')
     if (manifest.get('full_attribute_update') is not None and
             (manifest.get('full_update') is not True or
@@ -506,6 +512,9 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
                       if manifest.get('logscale_update') else 0)
     full_bytes = ((stream / full_name).stat().st_size
                   if manifest.get('full_attribute_update') else 0)
+    mask_bytes = ((stream / mask_name).stat().st_size if manifest.get('color_point_mask') else 0)
+    if not manifest.get('color_point_mask') and (stream / mask_name).exists():
+        raise ValueError('Color point mask is not declared by frame manifest')
     if not manifest.get('opacity_update') and (stream / opacity_name).exists():
         raise ValueError('Opacity packet is not declared by frame manifest')
     if not manifest.get('feature_dc_update') and (stream / feature_name).exists():
@@ -522,7 +531,8 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
     saved_logscale = summary['logscale_update']['archive_bytes'] if summary.get('logscale_update') else 0
     saved_full = (summary['full_attribute_update']['archive_bytes']
                   if summary.get('full_attribute_update') else 0)
-    payload = motion_bytes + birth_bytes + opacity_bytes + feature_bytes + logscale_bytes + full_bytes
+    saved_mask = (summary['color_point_mask']['archive_bytes'] if summary.get('color_point_mask') else 0)
+    payload = motion_bytes + birth_bytes + opacity_bytes + feature_bytes + logscale_bytes + full_bytes + mask_bytes
     complete = payload + manifest_index_bytes
     # Frame-plan summaries explicitly include the manifest in encoded_bytes.
     # Historical summaries use that name for payload only. Validate every
@@ -535,7 +545,7 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
         if has_complete_accounting else summary['encoded_bytes'] == payload)
     if (saved_motion != motion_bytes or saved_birth != birth_bytes or saved_opacity != opacity_bytes or
             saved_feature != feature_bytes or saved_logscale != logscale_bytes or
-            saved_full != full_bytes or
+            saved_full != full_bytes or saved_mask != mask_bytes or
             not valid_accounting or
             summary['shared_reference_bytes'] != reference_bytes or
             summary['decoder_reference'] != relative_reference or
@@ -554,6 +564,8 @@ def _actual_frame_storage(stream, frame, manifest, summary, reference_bytes,
         result['logscale_update_bytes'] = logscale_bytes
     if 'full_update' in manifest or 'full_attribute_update' in manifest:
         result['full_attribute_update_bytes'] = full_bytes
+    if 'color_point_mask' in manifest:
+        result['color_point_mask_bytes'] = mask_bytes
     return result
 
 
@@ -760,10 +772,12 @@ def main():
         parser.error('Timing counts must be positive')
     import torch
 
+    # Check other GPU jobs before querying or initializing CUDA, so an
+    # accidental benchmark cannot disturb an ongoing training run.
+    first_gpu_check = check_gpu_exclusivity()
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is required for materialized rendering FPS')
     device = torch.device('cuda')
-    first_gpu_check = check_gpu_exclusivity()
     run = args.run.resolve()
     config = _load_config(run)
     expected = config.data.expected_image_size

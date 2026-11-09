@@ -16,16 +16,18 @@ from pathlib import Path
 import functools
 
 
-@functools.lru_cache(maxsize=1)
-def _backend():
+@functools.lru_cache(maxsize=2)
+def _backend(stable_backward=False):
     from torch.utils.cpp_extension import load
     root = (Path(__file__).resolve().parents[2] / 'extensions' / 'observed_rasterizer').resolve()
-    return load(name='my4dgs_observed_rasterizer',
+    flag = ['-DMY4DGS_STABLE_COVARIANCE_BACKWARD'] if stable_backward else []
+    name = 'my4dgs_observed_rasterizer_stable' if stable_backward else 'my4dgs_observed_rasterizer'
+    return load(name=name,
         sources=[str(root / p) for p in ('cuda_rasterizer/rasterizer_impl.cu',
             'cuda_rasterizer/forward.cu', 'cuda_rasterizer/backward.cu',
             'rasterize_points.cu', 'ext.cpp')],
         extra_include_paths=[str(root / 'third_party/glm')],
-        extra_cflags=['-O3'], extra_cuda_cflags=['-O3'], verbose=False)
+        extra_cflags=['-O3', *flag], extra_cuda_cflags=['-O3', *flag], verbose=False)
 
 
 @functools.lru_cache(maxsize=1)
@@ -85,6 +87,7 @@ def rasterize_gaussians(
     cov3Ds_precomp,
     raster_settings,
     stats_sink=None,
+    stable_backward=False,
 ):
     args = (
         means3D,
@@ -97,6 +100,8 @@ def rasterize_gaussians(
         cov3Ds_precomp,
         raster_settings,
     )
+    if stable_backward:
+        return _RasterizeGaussians.apply(*args, stats_sink, True)
     # Keep the old nine-input autograd call unchanged when statistics are off.
     if stats_sink is None:
         return _RasterizeGaussians.apply(*args)
@@ -116,6 +121,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         cov3Ds_precomp,
         raster_settings,
         stats_sink=None,
+        stable_backward=False,
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -141,17 +147,21 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.debug
         )
 
+        # The backend is selected per autograd context, so another renderer
+        # cannot change which implementation a pending backward call uses.
+        ctx.stable_backward = bool(stable_backward)
+        backend = _backend(True) if ctx.stable_backward else _backend()
         # Invoke C++/CUDA rasterizer
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend().rasterize_gaussians(*args)
+                num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = backend.rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = _backend().rasterize_gaussians(*args)
+            num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, observed = backend.rasterize_gaussians(*args)
 
         ctx.has_stats_sink = stats_sink is not None
         if stats_sink is not None:
@@ -196,17 +206,18 @@ class _RasterizeGaussians(torch.autograd.Function):
                 imgBuffer,
                 raster_settings.debug)
 
+        backend = _backend(True) if ctx.stable_backward else _backend()
         # Compute gradients for relevant tensors by invoking backward method
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _backend().rasterize_gaussians_backward(*args)
+                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = backend.rasterize_gaussians_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
                 raise ex
         else:
-             grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _backend().rasterize_gaussians_backward(*args)
+             grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = backend.rasterize_gaussians_backward(*args)
 
         grads = (
             grad_means3D,
@@ -220,6 +231,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             None,
         )
 
+        if ctx.stable_backward:
+            return grads + (None, None)
         return grads + (None,) if ctx.has_stats_sink else grads
 
 class GaussianRasterizationSettings(NamedTuple):
@@ -237,15 +250,17 @@ class GaussianRasterizationSettings(NamedTuple):
     debug : bool
 
 class GaussianRasterizer(nn.Module):
-    def __init__(self, raster_settings):
+    def __init__(self, raster_settings, stable_backward=False):
         super().__init__()
         self.raster_settings = raster_settings
+        self.stable_backward = stable_backward
 
     def markVisible(self, positions):
         # Mark visible points (based on frustum culling for camera) with a boolean
         with torch.no_grad():
             raster_settings = self.raster_settings
-            visible = _backend().mark_visible(
+            backend = _backend(True) if self.stable_backward else _backend()
+            visible = backend.mark_visible(
                 positions,
                 raster_settings.viewmatrix,
                 raster_settings.projmatrix)
@@ -286,4 +301,5 @@ class GaussianRasterizer(nn.Module):
             cov3D_precomp,
             raster_settings,
             stats_sink,
+            self.stable_backward,
         )

@@ -354,5 +354,255 @@ class HistoricalSharedDCTests(unittest.TestCase):
                 _actual_frame_storage(path, 1, manifest, summary, 11, 'reference_frame0.npz')
 
 
+# ----- Regional DC updates -----
+
+from unittest.mock import patch
+
+
+from pipeline.model.birth_quantization import RAW_FIELDS, model_raw
+from pipeline.model.gaussian import BirthGaussianModel
+from pipeline.model.sparse_features import (FeatureDCUpdateConfig, RegionalFeatureDCUpdate,
+    REGIONAL_MAGIC, HEADER, decode_feature_dc_delta)
+from pipeline.module import Module
+from pipeline.trainer import Trainer
+from tests.test_full_attribute_update import fixture, fit_step
+from tests.test_frame_plan import cpu_gaussian_setup
+
+
+def config():
+    return FeatureDCUpdateConfig(enabled=True, sharing='spatial_region', post_motion_only=True,
+        step=.001, learning_rate=.0025, l1_weight=.005, gate_joint=False)
+
+
+class RegionalDCUnitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def update(self):
+        cfg = config()
+        update = RegionalFeatureDCUpdate(cfg)
+        reference = torch.tensor([[[-0., .2, -.3]], [[.4, -.5, .6]], [[.1, .2, .3]]])
+        update.setup(reference)
+        anchor = torch.nn.Parameter(torch.zeros(()))
+        optimizer = torch.optim.Adam([anchor], lr=.001)
+        update.bind(torch.tensor([1,1,2]), 4, torch.tensor([1]), optimizer)
+        return update, optimizer, reference
+
+    def test_regional_rate_costs_match_original_gap_encoding(self):
+        devices = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                update = RegionalFeatureDCUpdate(config())
+                update.setup(torch.zeros(4, 1, 3, device=device))
+                anchor = torch.nn.Parameter(torch.zeros((), device=device))
+                optimizer = torch.optim.Adam([anchor], lr=.001)
+                update.bind(torch.tensor([0, 42, 5504, 6999], device=device), 7000,
+                            torch.tensor([6999, 0, 5504, 42, 0], device=device), optimizer)
+                with torch.no_grad():
+                    update.delta[0, 0] = .002
+                    update.delta[42, 2] = -.004
+                    update.delta[5504, 0] = .003
+                    update.delta[6999, 2] = .001
+                    update.delta[22, 0] = .02  # Ineligible values must not affect the rate.
+                flat = update.symbols().flatten()
+                indices = flat.ne(0).nonzero(as_tuple=True)[0]
+                gaps = torch.diff(torch.cat((indices.new_tensor([-1]), indices)))
+                expected = update.delta.new_zeros(update.node_count)
+                lengths = 1 + gaps.ge(128).long() + gaps.ge(16384).long()
+                expected.scatter_add_(0, indices // 3, (lengths + 2).to(expected))
+                self.assertTrue(torch.equal(update._row_costs(), expected))
+                terms = update.rate_terms(.005)
+                raw = expected.sum() + len(REGIONAL_MAGIC) + 32 + HEADER.size
+                l1 = update.config.l1_weight * update.delta[update.allowed].abs().mean()
+                torch.testing.assert_close(terms['raw_bytes_surrogate'], raw, rtol=0, atol=0)
+                torch.testing.assert_close(terms['l1_loss'], l1, rtol=0, atol=0)
+                self.assertEqual(int(terms['eligible_regions']), 4)
+
+    def test_no_regional_candidates_have_zero_cost(self):
+        update = RegionalFeatureDCUpdate(config())
+        update.setup(torch.zeros(1, 1, 3))
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(()))])
+        update.bind(torch.tensor([0]), 4, torch.empty(0, dtype=torch.long), optimizer)
+        terms = update.rate_terms(.01)
+        self.assertEqual(float(terms['loss']), 0.)
+        self.assertEqual(float(update._row_costs().sum()), 0.)
+        self.assertEqual(int(terms['eligible_regions']), 0)
+
+    def test_regional_proximal_update_matches_original_calculation(self):
+        for price in (0., 1e-8, .1):
+            with self.subTest(price=price):
+                update, optimizer, _ = self.update()
+                with torch.no_grad():
+                    update.delta[1] = torch.tensor([.012, -.004, .002])
+                    update.delta[2] = .5
+                update.delta.grad = torch.full_like(update.delta, .01)
+                optimizer.step()
+                state = optimizer.state[update.delta]
+                group = update._group()
+                with torch.no_grad():
+                    expected = update.delta.clone().clamp_(-32767*update.step, 32767*update.step)
+                    expected[~update.allowed] = 0
+                    metric = (state['exp_avg_sq'] /
+                              (1-group['betas'][1]**int(state['step']))).sqrt().add(group['eps'])
+                    threshold = group['lr']*update.config.l1_weight/(int(update.allowed.sum())*3)/metric
+                    expected = expected.sign()*(expected.abs()-threshold).clamp_min(0)
+                    if price > 0:
+                        symbols = torch.round(expected/update.step)*update.allowed[:, None]
+                        indices = symbols.flatten().ne(0).nonzero(as_tuple=True)[0]
+                        gaps = torch.diff(torch.cat((indices.new_tensor([-1]), indices)))
+                        costs = expected.new_zeros(update.node_count)
+                        lengths = 1+gaps.ge(128).long()+gaps.ge(16384).long()
+                        costs.scatter_add_(0, indices//3, (lengths+2).to(costs))
+                        gain = (.5*metric*expected.square()/group['lr']).sum(-1)
+                        expected[symbols.ne(0).any(-1) & gain.lt(costs*price)] = 0
+                    expected[~update.allowed] = 0
+                update.after_step(price, proximal=True)
+                self.assertTrue(torch.equal(update.delta, expected))
+
+    def test_zero_bins_have_gradients_without_changing_reference_bits(self):
+        update, optimizer, reference = self.update()
+        self.assertTrue(torch.equal(update().view(torch.int32), reference.view(torch.int32)))
+        update().sum().backward()
+        torch.testing.assert_close(update.delta.grad[1], torch.full((3,),2.),rtol=0,atol=0)
+        self.assertEqual(int(update.delta.grad[~update.allowed].ne(0).sum()),0)
+        optimizer.step()
+        self.assertGreater(int(update.delta[1].ne(0).sum()),0)
+
+    def test_packet_is_optional_sparse_and_bound_to_reference_and_owners(self):
+        update, _, reference = self.update()
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'shdc_001.bin'
+            self.assertIsNone(update.export(path,1));self.assertFalse(path.exists())
+            with torch.no_grad():update.delta[1]=torch.tensor([.0034,-.0016,.0001])
+            info=update.export(path,1)
+            self.assertEqual(info['active_regions'],1)
+            decoded=decode_feature_dc_delta(path.read_bytes(),reference,frame_index=1,
+                owner=update.owner,node_count=4)
+            self.assertTrue(torch.equal(decoded.view(torch.int32),update().view(torch.int32)))
+            self.assertTrue(torch.equal(decoded[2].view(torch.int32),reference[2].view(torch.int32)))
+            with self.assertRaises(ValueError):
+                decode_feature_dc_delta(path.read_bytes(),reference,frame_index=1,
+                    owner=torch.tensor([1,2,2]),node_count=4)
+
+    def test_shared_and_point_residuals_both_receive_gradients(self):
+        from pipeline.model.full_attribute_update import FullAttributeUpdate, FullUpdateConfig
+        update, optimizer, reference=self.update()
+        full=FullAttributeUpdate(FullUpdateConfig(enabled=True,regional_repair=True))
+        full.setup(dict(logscale=torch.zeros(3,3),sh_dc=reference,sh_rest=torch.zeros(3,3,3)),
+                   optimizer,(.01,.01,.001))
+        full.apply(dict(logscale=torch.zeros(3,3),sh_dc=update(),sh_rest=torch.zeros(3,3,3)))['sh_dc'].sum().backward()
+        self.assertGreater(float(update.delta.grad.abs().sum()),0)
+        self.assertGreater(float(full.parameters['sh_dc'].grad.abs().sum()),0)
+
+    def test_resume_and_next_frame_reset_do_not_apply_colour_twice(self):
+        update, optimizer, reference=self.update()
+        for step in (201,202):
+            update.prepare_step(step,.2);(update()-.3).square().mean().backward()
+            optimizer.step();update.after_step(1e-8,proximal=True);optimizer.zero_grad(set_to_none=True)
+        packet=copy.deepcopy(update.capture())
+        anchor=torch.nn.Parameter(torch.zeros(()));other=torch.optim.Adam([anchor],lr=.001)
+        resumed=RegionalFeatureDCUpdate(config());resumed.restore(packet,torch.device('cpu'),other)
+        for obj,opt in ((update,optimizer),(resumed,other)):
+            obj.prepare_step(203,.2);(obj()-.3).square().mean().backward()
+            opt.step();obj.after_step(1e-8,proximal=True)
+        self.assertTrue(torch.equal(update.delta,resumed.delta))
+        committed=update.canonical_features()
+        update.setup(committed)
+        self.assertFalse(update.ready)
+        self.assertTrue(torch.equal(update().view(torch.int32),committed.view(torch.int32)))
+
+
+class RegionalDCPipelineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def make(self,directory,threshold=.03):
+        m,runner=fixture(directory,threshold=threshold)
+        m.config.feature_dc_update=config()
+        m.config.feature_dc_update.l1_weight=0. # isolate lifecycle/codec from selection strength
+        m.feature_dc_update=RegionalFeatureDCUpdate(m.config.feature_dc_update,m.motion)
+        m.feature_dc_update.setup(m.gaussians._features_dc)
+        return m,runner
+
+    def test_full_schedule_resume_point_masks_and_actual_two_layer_decode(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory, patch.object(BirthGaussianModel,'training_setup',cpu_gaussian_setup):
+            m,runner=self.make(directory)
+            prior=copy.deepcopy(m.motion.frame_reference_state);initial=model_raw(m.gaussians)
+            worker=SimpleNamespace(output_dir=Path(directory),module=m,datamodule=m.datamodule)
+            Trainer._write_reference(worker,0,prior)
+            m.trainer.decoder_reference_path=worker.decoder_reference_path
+            region_at200=None
+            clones={}
+            for step in range(1,301):
+                fit_step(m,runner,step)
+                if step<200:
+                    self.assertFalse(m.feature_dc_update.ready)
+                    self.assertTrue(torch.equal(m.feature_dc_update().view(torch.int32),initial['sh_dc'].view(torch.int32)))
+                if step==200:
+                    self.assertTrue(m.feature_dc_update.ready)
+                    self.assertEqual(int(m.feature_dc_update.delta.ne(0).sum()),0)
+                    region_at200=m.motion.region_translation.detach().clone()
+                    selected=m._plan_regional_attribute_state['eligible'].clone()
+                    point_anchors={name:p.detach().clone() for name,p in m._regional_attribute_parameters().items()}
+                if 201<=step<300:
+                    self.assertTrue(torch.equal(m.motion.region_translation,region_at200))
+                    for name,p in m._regional_attribute_parameters().items():
+                        self.assertTrue(torch.equal(p[~selected],point_anchors[name][~selected]),(step,name))
+                if step in (200,250):
+                    packet=dict(global_step=step,current_frame=1)
+                    Module.on_save_checkpoint(m,packet)
+                    clone,clone_runner=self.make(directory)
+                    clone.trainer.decoder_reference_path=worker.decoder_reference_path
+                    Module.on_load_checkpoint(clone,copy.deepcopy(packet))
+                    clones[step+1]=(clone,clone_runner)
+                if step in clones:
+                    clone,clone_runner=clones[step];fit_step(clone,clone_runner,step)
+                    self.assertTrue(torch.equal(m.feature_dc_update.delta,clone.feature_dc_update.delta))
+                    for name,p in m._regional_attribute_parameters().items():
+                        self.assertTrue(torch.equal(p,clone._regional_attribute_parameters()[name]),(step,name))
+            stream=Path(directory)/'frame_storage/rigid_tree'
+            decoded,raw=decode_frame(stream,1,prior,initial)
+            for name in RAW_FIELDS:
+                self.assertTrue(torch.equal(raw[name].view(torch.int32),model_raw(m.gaussians)[name].cpu().view(torch.int32)),name)
+            manifest=json.loads((stream/'frame_001.json').read_text())
+            self.assertEqual(manifest['training_step_accounting']['regional_dc_steps'],100)
+            self.assertIsNotNone(manifest['feature_dc_update'])
+            shared=m.feature_dc_update.canonical_features()
+            self.assertTrue(torch.equal(raw['sh_dc'][~selected],shared[~selected]))
+            self.assertGreater(int(raw['sh_dc'].ne(initial['sh_dc']).sum()),0)
+            self.assertEqual(decoded.digest(),m.motion.codec_previous_state.digest())
+
+    def test_low_error_region_can_correct_colour_without_any_point_permission(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(BirthGaussianModel,'training_setup',cpu_gaussian_setup):
+            m,runner=self.make(directory,threshold=10.)
+            for step in range(1,202):
+                fit_step(m,runner,step)
+            self.assertFalse(bool(m._plan_regional_attribute_state['eligible'].any()))
+            self.assertTrue(bool(m.feature_dc_update.allowed.any()))
+            self.assertGreater(float(m.feature_dc_update.delta.abs().sum()),0.)
+            self.assertEqual(float(m.full_attribute_update.parameters['sh_dc'].abs().sum()),0.)
+
+    def test_first_200_steps_match_the_existing_pipeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline,base_runner=fixture(str(Path(directory)/'baseline'))
+            changed,runner=self.make(str(Path(directory)/'regional_dc'))
+            for step in range(1,201):
+                # Each fixture samples stochastic gates from the same RNG state.
+                rng=torch.random.get_rng_state()
+                fit_step(baseline,base_runner,step)
+                torch.random.set_rng_state(rng)
+                fit_step(changed,runner,step)
+                for name in ('region_translation','region_rotation','gs_translation',
+                             'gs_rotation','gate_logits'):
+                    self.assertTrue(torch.equal(getattr(baseline.motion,name),
+                                                getattr(changed.motion,name)),(step,name))
+                self.assertTrue(torch.equal(baseline.opacity_update.delta,changed.opacity_update.delta))
+            self.assertTrue(torch.equal(baseline._plan_regional_attribute_state['eligible'],
+                                        changed._plan_regional_attribute_state['eligible']))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 import csv
 import json
+import math
 import random
 import sys
 import time
@@ -19,10 +20,29 @@ from libgs.pipeline import Trainer as BaseTrainer
 from libgs.pipeline import TrainerConfig as BaseTrainerConfig
 
 from .data import PairedFetcher
+from .frame_plan import frame_plan_phase, gradient_probe_step
 from .model.birth_quantization import RAW_FIELDS, model_raw, reference_digest
 from .model.residual_birth import RawView
 from .module import restore_retired_reference, uses_residual_birth,uses_early_replacement
 from libgs.metric import psnr
+
+
+def _validate_extension_frame_coverage(items, requested):
+    """Reject silently truncated training datasets before resuming a sequence."""
+    if isinstance(requested, bool) or not isinstance(requested, int) or requested < 2:
+        raise ValueError('Sequence extension needs an explicit frame count of at least two')
+    frames = set()
+    for item in items:
+        frame = getattr(item, 'frame', None)
+        if isinstance(frame, bool) or not isinstance(frame, (int, np.integer)):
+            raise ValueError('Extension training dataset has an invalid frame index')
+        frames.add(int(frame))
+    expected = set(range(requested))
+    if frames != expected:
+        missing = sorted(expected - frames)
+        extra = sorted(frames - expected)
+        raise ValueError(f'Extension training dataset does not cover requested frames; '
+                         f'missing={missing[:10]}, extra={extra[:10]}')
 
 
 @dataclass
@@ -41,6 +61,18 @@ class TrainerConfig(BaseTrainerConfig):
     population_window_joint_steps: int = 10
     population_window_views_per_step: int = 1
     population_window_selection_views: int = 4
+
+    def use_single_training_view(self):
+        """Record the actual per-step view count in resolved run configs."""
+        names = ('motion_views_per_step', 'birth_views_per_step')
+        previous = {name: getattr(self, name) for name in names}
+        for name, value in previous.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f'{name} must be a positive integer')
+        if any(value != 1 for value in previous.values()):
+            logging.warning('Single-view training overrides historical view counts %s', previous)
+        for name in names:
+            setattr(self, name, 1)
 
 
 def step_phase(step, motion_steps, gate_start, freeze, refit_steps):
@@ -85,7 +117,20 @@ def _log_value(value, pattern):
     return 'n/a' if value is None else format(value, pattern)
 
 
+def _extension_end_frame(last_frame, plan, total_frames):
+    if last_frame is None:
+        return total_frames
+    if (plan is None or isinstance(last_frame, bool) or not isinstance(last_frame, int) or
+            not plan.resume_frame < last_frame < total_frames):
+        raise ValueError('The last frame must follow the verified prefix and belong to the dataset')
+    return last_frame + 1
+
+
 class Trainer(BaseTrainer):
+    def fit(self, module, ckpt_path=None):
+        self.config.use_single_training_view()
+        return super().fit(module, ckpt_path)
+
     @staticmethod
     def _assert_frame_step_budget(trainer):
         if trainer.current_frame>=1 and (trainer.num_steps>300 or trainer.global_step>300):
@@ -124,10 +169,13 @@ class Trainer(BaseTrainer):
             if Path(ckpt_path).resolve().parent != Path(prefix).resolve():
                 raise ValueError('Extension checkpoint must belong to its source prefix run')
             items = list(self.datamodule.scene.train_dataset.items)
+            _validate_extension_frame_coverage(items,
+                self.datamodule.config.extra_dataset_kwargs.get('num_frames'))
             if self.datamodule.scene.test_dataset is not None:
                 items += list(self.datamodule.scene.test_dataset.items)
             first = [item for item in self.datamodule.scene.train_dataset.items if item.frame == 0]
-            if not first or getNerfppNorm(first)['radius'] != self.datamodule.cameras_extent:
+            if not first or not math.isclose(float(getNerfppNorm(first)['radius']),
+                    float(self.datamodule.cameras_extent), rel_tol=1e-7, abs_tol=1e-9):
                 raise ValueError('Extension scene extent must already be determined by frame0 cameras')
             extension_plan = validate_sequence_extension(
                 checkpoint=ckpt, current_data_config=asdict(self.datamodule.config),
@@ -135,6 +183,33 @@ class Trainer(BaseTrainer):
                 destination_run=self.output_dir, current_extent=self.datamodule.cameras_extent,
                 current_images=[(item.frame, item.path) for item in items],
                 completed_prefix_frames=getattr(self, 'resume_completed_prefix_frames', None))
+        if ckpt.get('rigid_tree_version') is not None:
+            previous_ste = ckpt.get('gate_refine_image_ste', False)
+            current_ste = bool(getattr(self.module, 'gate_refine_image_ste', False))
+            fork = bool(getattr(self, 'gate_fork_from_step150', False) and self.global_step == 150 and
+                        ckpt.get('rigid_tree_frame', {}).get('prepared') is True and
+                        ckpt.get('rigid_tree_frame', {}).get('finalized') is False)
+            if previous_ste != current_ste and not fork:
+                raise ValueError('Gate STE changes require an explicitly authorized step-150 fork')
+        self._verified_prefix_plan = extension_plan
+        self._end_frame_exclusive = _extension_end_frame(getattr(self, 'resume_last_frame', None),
+                                                          extension_plan, self.datamodule.num_frames)
+        color_last = getattr(self, 'color_last_frame', None)
+        if color_last is not None:
+            if (extension_plan is not None or isinstance(color_last, bool) or not isinstance(color_last, int) or
+                    not self.current_frame <= color_last < self.datamodule.num_frames or
+                    self.global_step != 200 or not ckpt.get('rigid_tree_frame', {}).get('prepared') or
+                    ckpt.get('rigid_tree_frame', {}).get('finalized')):
+                raise ValueError('Color branch needs a mid-frame step-200 fork checkpoint and valid last frame')
+            self._end_frame_exclusive = color_last + 1
+        gate_last = getattr(self, 'gate_last_frame', None)
+        if gate_last is not None:
+            if (extension_plan is not None or not getattr(self, 'gate_fork_from_step150', False) or
+                    isinstance(gate_last, bool) or not isinstance(gate_last, int) or
+                    not self.current_frame <= gate_last < self.datamodule.num_frames or self.global_step != 150 or
+                    ckpt.get('rigid_tree_frame', {}).get('finalized') is not False):
+                raise ValueError('Gate fork needs an unfinalized step-150 checkpoint and a valid last frame')
+            self._end_frame_exclusive = gate_last + 1
         if ckpt.get('rigid_tree_version') is not None:
             saved_trainer = ckpt.get('rigid_tree_trainer_config')
             if isinstance(saved_trainer, dict) and 'stage_image_camera' not in saved_trainer:
@@ -152,6 +227,8 @@ class Trainer(BaseTrainer):
         if extension_plan is not None:
             from .sequence_extension import copy_verified_prefix
             provenance = copy_verified_prefix(extension_plan)
+            if getattr(self, 'resume_last_frame', None) is not None:
+                provenance['requested_last_frame'] = self.resume_last_frame
             with (self.output_dir / 'prefix_provenance.json').open('x') as file:
                 json.dump(provenance, file, indent=2)
             logging.info('Extending completed prefix 0–%d to %d frames; past packets copied unchanged',
@@ -165,7 +242,8 @@ class Trainer(BaseTrainer):
                          '%d motion + %d %s steps',
                          self.module.config.rigid_tree.spatial_gate.max_depth,
                          self.module.config.rigid_tree.motion_steps,
-                         self.module.config.rigid_tree.birth_steps, tail)
+                         (0 if self.module.config.full_update.stop_after_motion else
+                          self.module.config.rigid_tree.birth_steps), tail)
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():
@@ -175,6 +253,63 @@ class Trainer(BaseTrainer):
                 if state is None:
                     raise ValueError('Spatial checkpoint has no decoded bootstrap state')
                 self._write_reference(frame_index=state.frame_index, state=state)
+        if getattr(self, 'color_last_frame', None) is not None:
+            # The fork bootstraps from the previous decoded frame, not the
+            # in-progress step-200 pose; compare all attributes bit for bit.
+            saved = ckpt.get('frame_plan_diagnostic_reference')
+            if saved is None:
+                raise ValueError('Color fork checkpoint lost the previous decoded raw state')
+            with np.load(self.decoder_reference_path, allow_pickle=False) as packet:
+                bootstrap={name:torch.from_numpy(packet[name].copy()) for name in RAW_FIELDS}
+            if reference_digest(bootstrap) != reference_digest(saved):
+                raise ValueError('Color fork bootstrap differs from the saved decoded predecessor')
+            from .model.rigid_tree_codec import DecodedState
+            with np.load(self.decoder_reference_path, allow_pickle=False) as packet:
+                bootstrap_state=DecodedState.from_reference(packet)
+            if bootstrap_state.digest() != self.module.motion.frame_reference_state.digest():
+                raise ValueError('Color fork motion reference differs from the saved predecessor')
+            import hashlib
+            digest=hashlib.sha256()
+            with Path(ckpt_path).open('rb') as source:
+                for block in iter(lambda:source.read(1024*1024),b''): digest.update(block)
+            selected=self.module._plan_regional_attribute_state['eligible'].detach().cpu().numpy()
+            provenance=dict(checkpoint=str(Path(ckpt_path).resolve()), checkpoint_sha256=digest.hexdigest(),
+                frame=int(self.current_frame),step=int(self.global_step),branch=self.module.color_drift_branch,
+                prior_raw_sha256=reference_digest(bootstrap),prior_state_sha256=bootstrap_state.digest().hex(),
+                selected_points=int(selected.sum()), selection_sha256=hashlib.sha256(selected.tobytes()).hexdigest(),
+                reference_kind='lossless diagnostic bootstrap at previous decoded frame; original prefix charged separately')
+            with (self.output_dir/'color_fork_provenance.json').open('x') as file:
+                json.dump(provenance,file,indent=2)
+        if getattr(self, 'gate_last_frame', None) is not None:
+            import hashlib
+            from .model.rigid_tree_codec import DecodedState
+            source_prefix=Path(ckpt_path).resolve().parent/'prefix_provenance.json'
+            if not source_prefix.is_file():
+                raise ValueError('Gate fork checkpoint needs its verified source-prefix provenance')
+            origin=json.loads(source_prefix.read_text())
+            with np.load(self.decoder_reference_path, allow_pickle=False) as packet:
+                bootstrap={name:torch.from_numpy(packet[name].copy()) for name in RAW_FIELDS}
+                state=DecodedState.from_reference(packet)
+            if (reference_digest(bootstrap) != origin['raw_sha256'] or
+                    state.digest().hex() != origin['decoded_sha256'] or
+                    state.digest() != self.module.motion.frame_reference_state.digest()):
+                raise ValueError('Gate fork bootstrap does not match its verified decoded predecessor')
+            digest=hashlib.sha256()
+            with Path(ckpt_path).open('rb') as source:
+                for block in iter(lambda:source.read(1024*1024),b''): digest.update(block)
+            motion=self.module.motion
+            state_hash=hashlib.sha256()
+            for v in (motion.gate_logits,motion.opened,motion.owner,motion.region_translation,
+                      motion.region_rotation,motion.gs_translation,motion.gs_rotation):
+                state_hash.update(v.detach().cpu().contiguous().numpy().tobytes())
+            record=dict(checkpoint=str(Path(ckpt_path).resolve()),checkpoint_sha256=digest.hexdigest(),
+                frame=int(self.current_frame),step=int(self.global_step),
+                gate_refine_image_ste=bool(getattr(self.module,'gate_refine_image_ste',False)),
+                predecessor_raw_sha256=origin['raw_sha256'],predecessor_state_sha256=origin['decoded_sha256'],
+                loaded_motion_sha256=state_hash.hexdigest(),rng_state_present=bool(ckpt.get('rng_state')),
+                reference_kind='diagnostic lossless previous-frame bootstrap; original reference charged separately')
+            with (self.output_dir/'gate_fork_provenance.json').open('x') as file:
+                json.dump(record,file,indent=2)
         logging.info('Loaded frame %d step %d from %s',
                      self.current_frame, self.global_step, ckpt_path)
     def _write_reference(self, frame_index, state=None):
@@ -224,7 +359,8 @@ class Trainer(BaseTrainer):
             initial_retained_count=np.array(initial['retained_count'], dtype=np.int64),
             initial_removed_count=np.array(initial['removed_count'], dtype=np.int64),
             initial_opacity_threshold=np.array(initial['threshold'], dtype=np.float64))
-        np.savez_compressed(path, **fields)
+        from .model.rigid_tree_codec import compact_reference_fields, write_reference_npz
+        write_reference_npz(path, compact_reference_fields(fields))
         self.decoder_reference_path = path
         with tqdm.external_write_mode(file=sys.stderr):
             logging.info('Decoder reference: %s (%d bytes); native frame0 GS %d -> %d '
@@ -308,11 +444,7 @@ class Trainer(BaseTrainer):
             self._resume_rng = None
 
     def _views_per_step(self, step):
-        if uses_early_replacement(self.module.config):
-            return self.config.motion_views_per_step
-        if step <= self.module.motion_steps:
-            return self.config.motion_views_per_step
-        return getattr(self.config, 'birth_views_per_step', 1)
+        return 1
 
     def _fit_views(self, fetcher, step, *, defer_metrics=False):
         """Average image objectives before one shared-motion optimizer update."""
@@ -320,38 +452,47 @@ class Trainer(BaseTrainer):
         packages, metrics, loss_value = [], {}, 0.
         plan = getattr(getattr(self.module.config,'birth',None), 'frame_training_plan', False)
         plan_views = self.module.frame_plan_training_views(step, count) if plan else None
-        for index in range(count):
-            # The regularizer does not depend on the camera. Charging it on
-            # the last view with weight=count preserves the averaged objective
-            # and avoids rebuilding the same graph once per camera.
-            camera = None
-            if plan:
-                viewpoint = plan_views[index]
-            elif uses_residual_birth(self.module.config) and (step > self.module.motion_steps or
-                    (uses_early_replacement(self.module.config) and step>70)):
-                viewpoint, camera = self.module.transaction_training_view(step, index, count)
-            else:
-                viewpoint = fetcher.next()
-            loss, values, package = self.module.training_step(viewpoint, step,
-                regularization_weight=count if index == count - 1 else 0.)
-            if camera is not None:
-                package['birth_camera_index'] = camera
-            if loss.requires_grad:
-                (loss / count).backward()
-            if (index == 0 and count > 1 and step in (201, 250, 300) and
-                    getattr(getattr(self.module.config, 'full_update', None), 'regional_repair', False)):
-                self.module._plan_record_regional_image_gradients(step, viewpoint)
-            loss_value = loss_value + loss.detach() / count
-            for name, value in values.items():
-                metrics[name] = metrics.get(name, 0.) + value / count
-            if count > 1:
-                # Keep only evidence needed after backward, not full images.
-                package = {name: package[name] for name in
-                    ('visibility_filter', 'motion_contribution_filter', 'viewspace_points',
-                     'radii','birth_feature_probe','birth_camera_index','birth_branch','birth_image_loss','birth_psnr',
-                     'regional_error_evidence')
-                    if name in package}
-            packages.append(package)
+        begin_shared = getattr(self.module, '_begin_shared_training_views', None)
+        shared_pose = begin_shared(step) if count > 1 and begin_shared is not None else False
+        try:
+            for index in range(count):
+                # The regularizer does not depend on the camera. Charging it on
+                # the last view with weight=count preserves the averaged objective.
+                camera = None
+                if plan:
+                    viewpoint = plan_views[index]
+                elif uses_residual_birth(self.module.config) and (step > self.module.motion_steps or
+                        (uses_early_replacement(self.module.config) and step>70)):
+                    viewpoint, camera = self.module.transaction_training_view(step, index, count)
+                else:
+                    viewpoint = fetcher.next()
+                probe = plan and gradient_probe_step(self.module, step)
+                loss, values, package = self.module.training_step(viewpoint, step,
+                    regularization_weight=0. if probe else count if index == count - 1 else 0.)
+                if camera is not None:
+                    package['birth_camera_index'] = camera
+                if loss.requires_grad:
+                    (loss / count).backward(retain_graph=shared_pose == 'shared' and index < count - 1)
+                if (index == 0 and count > 1 and step in (201, 250, 300) and
+                        getattr(getattr(self.module.config, 'full_update', None), 'regional_repair', False) and
+                        getattr(getattr(self.module.config, 'full_update', None), 'gradient_diagnostics', True)):
+                    self.module._plan_record_regional_image_gradients(step, viewpoint)
+                loss_value = loss_value + loss.detach() / count
+                for name, value in values.items():
+                    metrics[name] = metrics.get(name, 0.) + value / count
+                if count > 1:
+                    # Keep only evidence needed after backward, not full images.
+                    package = {name: package[name] for name in
+                        ('visibility_filter', 'motion_contribution_filter', 'viewspace_points',
+                         'radii','birth_feature_probe','birth_camera_index','birth_branch','birth_image_loss','birth_psnr',
+                         'regional_error_evidence')
+                        if name in package}
+                packages.append(package)
+            if shared_pose == 'proxy':
+                self.module._finish_shared_training_views()
+        finally:
+            if shared_pose:
+                self.module._end_shared_training_views()
         metrics['gs'] = values['gs']
         self.module.post_training_step(packages[0] if count == 1 else packages)
         if defer_metrics:
@@ -386,20 +527,28 @@ class Trainer(BaseTrainer):
             start_frame = 1
         else:
             start_frame = self.current_frame
-        if start_frame >= self.datamodule.num_frames:
+        end_frame = getattr(self, '_end_frame_exclusive', self.datamodule.num_frames)
+        if start_frame >= end_frame:
             self._log_sequence_summary([])
             return []
         reports = []
-        for frame in range(start_frame, self.datamodule.num_frames):
+        for frame in range(start_frame, end_frame):
             self.datamodule.current_frame = frame
-            if self.global_step >= self.num_steps:
+            plan = getattr(self, '_verified_prefix_plan', None)
+            color_prefix_complete = bool(plan is not None and frame == plan.resume_frame and
+                self.module.config.full_update.resume_from_finalized_200 and
+                self.module.frame_finalized and self.global_step == 200)
+            if self.global_step >= self.num_steps or color_prefix_complete:
                 logging.info('Frame %d is complete in checkpoint; continuing', frame)
                 self._restore_rng(self._resume_rng)
                 self._resume_rng = None
                 self.module.begin_next_frame()
                 self.global_step = 0
                 continue
-            reports.append(self.frame_training_loop())
+            report = self.frame_training_loop()
+            if report is None and getattr(self, 'color_fork_capture', False):
+                return reports
+            reports.append(report)
             self.module.begin_next_frame()
             self.global_step = 0
         self._log_sequence_summary(reports)
@@ -504,6 +653,8 @@ class Trainer(BaseTrainer):
         Trainer._assert_frame_step_budget(self)
         frame = self.current_frame
         started = time.perf_counter()
+        if getattr(self, 'gate_fork_from_step150', False) and self.device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(self.device)
         fetcher = self._make_fetcher()
         self._resume_fetcher(fetcher)
         starting_step = self.global_step
@@ -586,28 +737,51 @@ class Trainer(BaseTrainer):
                         progress_bar.set_postfix(dict(image=f"{metrics_ema['image']:.5f}",
                             psnr=f"{metrics_ema['psnr']:.2f}", gs=metrics['gs']), refresh=False)
                         progress_bar.update(step - progress_bar.n)
+                    if getattr(self, 'color_fork_capture', False) and step == 200:
+                        if not (self.module.config.full_update.color_only and self.module.config.full_update.color_point_budget and
+                                self.module.frame_prepared and not self.module.frame_finalized):
+                            raise ValueError('Color fork requires a completed, unfinalized step 200')
+                        self.save_checkpoint()
+                        logging.info('Saved common color fork at frame %d step 200: %s', frame, self.ckpt_save_path)
+                        return None
                     if self._checkpoint_due() and step != self.num_steps:
                         self.save_checkpoint()
             finally:
                 step_handle.close()
         evaluation = self.validation_loop()
+        train_camera = getattr(self, 'diagnostic_train_camera', None)
+        if train_camera is not None:
+            rng = self._capture_rng()
+            try:
+                dataset = self.datamodule.get_train_dataset()
+                matches = [i for i, item in enumerate(dataset.items) if Path(str(item.path)).name == train_camera]
+                if len(matches) != 1:
+                    raise ValueError(f'Train diagnostic camera {train_camera!r} must match exactly one training view')
+                with torch.no_grad():
+                    sample = self.module.validation_step(dataset[matches[0]].to(self.device), 1000000, 0)
+                evaluation['train_sample'] = {**sample, 'camera': train_camera}
+            finally:
+                self._restore_rng(rng)
         executed_steps = self.global_step-starting_step
         elapsed = time.perf_counter() - started
         diagnostics = self._frame_diagnostic_seconds
         report = dict(self.module.frame_report or {},
             stage_image_metrics=self.module.stage_image_metrics,
-            evaluation=evaluation, final_train_metrics=last_metrics,
+            evaluation=evaluation, validation_per_view=getattr(self, '_validation_per_view', {}), final_train_metrics=last_metrics,
             mean_train_loss=train_loss / max(1, executed_steps),
             train_loss_steps=executed_steps,
             elapsed_seconds=elapsed,
             diagnostic_seconds=diagnostics,
             training_seconds=max(0., elapsed - diagnostics),
-            checkpoint=str(self.ckpt_save_path) if self._checkpoint_due() else None)
+            peak_gpu_allocated_bytes=(int(torch.cuda.max_memory_allocated(self.device))
+                if getattr(self, 'gate_fork_from_step150', False) and self.device.type == 'cuda' else None),
+            checkpoint=(str(self.ckpt_save_path) if self._checkpoint_due() or
+                        getattr(self, 'gate_fork_from_step150', False) else None))
         directory = self.output_dir / 'frame_summary'
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f'frame_{frame:03d}.json').write_text(
             json.dumps(report, indent=2, default=str))
-        if self._checkpoint_due():
+        if self._checkpoint_due() or getattr(self, 'gate_fork_from_step150', False):
             self.save_checkpoint()
         quality = ' | '.join(
             f'{name} PSNR={row.get("psnr", float("nan")):.4f} '
@@ -625,15 +799,7 @@ class Trainer(BaseTrainer):
 
     def _phase_name(self, step):
         if getattr(getattr(self.module.config,'birth',None), 'frame_training_plan', False):
-            if step <= 100: return 'shared_gate'
-            if step <= 150: return 'fixed_gate_residual'
-            if step <= 180: return 'joint_gate_residual'
-            if step <= 200: return 'fixed_gate_motion'
-            if getattr(self.module.config.birth, 'keep_incumbent_fixed_after_motion', False):
-                return 'newborn_fixed_incumbent'
-            tail = self.module.config.rigid_tree.spatial_gate.final_joint_refine_steps
-            if tail and step >= 301-tail: return 'final_joint_refine'
-            return 'newborn_old_alpha'
+            return frame_plan_phase(self.module, step)
         if uses_early_replacement(self.module.config) and step>70:
             return 'early_joint' if step<=200 else 'early_fixed_population'
         gate = self.module.config.rigid_tree.spatial_gate
@@ -671,7 +837,10 @@ class Trainer(BaseTrainer):
         """Keep the preceding decoded population for optional independent replay."""
         self.module._plan_diagnostic_reference = None
         if (self.config.stage_image_camera is None and not
-                getattr(getattr(self.module.config, 'birth', None), 'regional_postfit_admission', False)):
+                getattr(getattr(self.module.config, 'birth', None), 'regional_postfit_admission', False) and not
+                getattr(self.module, 'full_update_active', False) and not
+                getattr(getattr(self.module.config, 'full_update', None), 'color_only', False) and not
+                getattr(getattr(self.module.config, 'full_update', None), 'regional_full_point_budget', 0)):
             return
         started = time.perf_counter()
         try:
@@ -841,12 +1010,18 @@ class Trainer(BaseTrainer):
         if not isinstance(loaders, (tuple, list)):
             loaders = [loaders]
         groups = []
+        per_view = {}
         for loader_idx, loader in enumerate(loaders):
             rows = []
             for index, viewpoint in enumerate(loader):
-                rows.append(self.module.validation_step(
-                    viewpoint.to(self.device), index, loader_idx))
+                row = self.module.validation_step(viewpoint.to(self.device), index, loader_idx)
+                rows.append(row)
+                name = Path(str(viewpoint.path)).name
+                if name in per_view:
+                    raise ValueError('Duplicate validation camera in frame')
+                per_view[name] = {key: float(value) for key, value in row.items()}
             groups.append(rows)
+        self._validation_per_view = per_view
         return self.module.validation_end(
             groups[0] if len(groups) == 1 else groups,
             num_loaders=len(groups))

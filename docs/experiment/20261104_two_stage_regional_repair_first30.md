@@ -116,7 +116,7 @@
 
 ## 两个前缀的FUA3无损重打包
 
-对以上Sear/Cook两个已完成前缀分别重打包29个动态更新，未重新训练或改变量化整数与属性。`pipeline/model/full_attribute_update.py` 将FUA2的稀疏有符号值作可逆zigzag及高低字节分离后用zlib压缩；`scripts/repack_fua3.py` 提供派生码流。新reader支持FUA1/2/3，encoder按完整包长度择短；旧reader不能读取FUA3。
+对以上Sear/Cook两个已完成前缀分别重打包29个动态更新，未重新训练或改变量化整数与属性。`pipeline/model/full_attribute_update.py` 将FUA2的稀疏有符号值作可逆zigzag及高低字节分离后用zlib压缩。用于本次实验的一次性重打包脚本及源实验产物现已清理；当前reader仍支持FUA1/2/3，encoder按完整包长度择短；旧reader不能读取FUA3。
 
 | 动态帧1–29 | 原更新 / KB | FUA3更新 / KB | 总节省 | 继承的PSNR / dB |
 |---|---:|---:|---:|---:|

@@ -22,3 +22,6 @@ dist/
 *.ply
 *.npz
 *.tfevents.*
+
+# Local archives of experiment output summaries and source snapshots.
+docs/experiment/assets/*_short_runs_records.tar.gz

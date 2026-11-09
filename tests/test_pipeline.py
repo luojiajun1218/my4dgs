@@ -31,6 +31,40 @@ from pipeline.sequence_extension import _validate_adaptive_birth_completion
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class ReferenceRelocationTests(unittest.TestCase):
+    def test_only_verified_identical_layout_can_relocate_checkpoint_configuration(self):
+        import hashlib
+        from pipeline.sequence_extension import relocate_checkpoint_reference
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'reference_frame0.npz'
+            target.write_bytes(b'original reference layout')
+            previous = '/old/location/reference_frame0.npz'
+            info = {'file': target.name, 'original_path': previous,
+                    'original_resolved_path': previous,
+                    'sha256': hashlib.sha256(target.read_bytes()).hexdigest()}
+            (target.parent / 'manifest.json').write_text(json.dumps({'files': {'reference_layout': info}}))
+            saved = {'spatial_gate': {'reference_layout': previous, 'max_depth': 4}}
+            checkpoint = {'rigid_tree_config': saved,
+                          'rigid_tree_module_config': {'rigid_tree': saved},
+                          'rigid_tree_motion': {'config': saved}}
+
+            relocated = relocate_checkpoint_reference(checkpoint, str(target))
+            for config in (relocated['rigid_tree_config'],
+                           relocated['rigid_tree_module_config']['rigid_tree'],
+                           relocated['rigid_tree_motion']['config']):
+                self.assertEqual(config['spatial_gate']['reference_layout'], str(target))
+                self.assertEqual(config['spatial_gate']['max_depth'], 4)
+            self.assertEqual(checkpoint['rigid_tree_config']['spatial_gate']['reference_layout'], previous)
+
+            unrelated = copy.deepcopy(checkpoint)
+            unrelated['rigid_tree_config']['spatial_gate']['reference_layout'] = '/unrelated/reference.npz'
+            self.assertIs(relocate_checkpoint_reference(unrelated, str(target)), unrelated)
+            target.write_bytes(b'different layout')
+            with self.assertRaisesRegex(ValueError, 'SHA256'):
+                relocate_checkpoint_reference(checkpoint, str(target))
+
+
 class PipelinePackageTests(unittest.TestCase):
     def run_python(self, code):
         return subprocess.run([sys.executable, '-c', code], cwd=ROOT,
@@ -80,7 +114,7 @@ assert 'pipeline.module' not in sys.modules
         outputs = []
         for flags in ([], ['--pipeline=ReCon-GS']):
             result = subprocess.run([sys.executable, 'main.py',
-                '--config=config/flame_steak_cov150_shared_discovery_30_20261030.yaml',
+                '--config=config/best_flame_steak.yaml',
                 '--print', *flags], cwd=ROOT, check=True, capture_output=True, text=True)
             outputs.append(result.stdout)
         self.assertEqual(outputs[0], outputs[1])
@@ -105,6 +139,18 @@ assert 'pipeline.module' not in sys.modules
 
 # ----- test_sequence_extension -----
 class SequenceExtensionTests(unittest.TestCase):
+    def test_extension_rejects_truncated_training_frame_set(self):
+        from pipeline.trainer import _validate_extension_frame_coverage
+
+        items = [SimpleNamespace(frame=frame) for frame in (0, 0, 1, 1, 2, 2)]
+        _validate_extension_frame_coverage(items, 3)
+        with self.assertRaisesRegex(ValueError, 'missing=\\[2\\]'):
+            _validate_extension_frame_coverage(items[:-2], 3)
+        with self.assertRaisesRegex(ValueError, 'extra=\\[2\\]'):
+            _validate_extension_frame_coverage(items, 2)
+        with self.assertRaisesRegex(ValueError, 'invalid frame index'):
+            _validate_extension_frame_coverage([SimpleNamespace(frame=None)], 3)
+
     @classmethod
     def setUpClass(cls):
         cls.extension = importlib.import_module('pipeline.sequence_extension')
@@ -312,6 +358,78 @@ class SequenceExtensionTests(unittest.TestCase):
         self.assertEqual(before, {str(p.relative_to(self.source)): p.read_bytes()
                                  for p in self.source.rglob('*') if p.is_file()})
         self.assertEqual((self.destination / 'config.yaml').read_text(), 'new run config must stay intact\n')
+
+
+
+
+    def test_extension_copies_full_attribute_packet_and_decodes_all_six_fields(self):
+        from pipeline.model.full_attribute_update import FIELDS, encode_full_attribute_delta
+        stream = self.source / 'frame_storage' / 'rigid_tree'
+        reference = stream / 'reference_frame0.npz'
+        previous, raw = self.replay.replay(stream, reference, through=1)
+        attribute_reference = {name: raw[name] for name in FIELDS}
+        symbols = {name: torch.zeros_like(value) for name, value in attribute_reference.items()}
+        symbols['logscale'][0, 0] = 2
+        symbols['sh_dc'][1, 0, 1] = -3
+        symbols['sh_rest'][2, 1, 2] = 4
+        packet = encode_full_attribute_delta(attribute_reference, symbols,
+            frame_index=2, steps=(.005, .001, .001))
+        (stream / 'fullattr_002.bin').write_bytes(packet)
+        path = stream / 'frame_002.json'
+        manifest = json.loads(path.read_text())
+        diagnostic = 'frame_diagnostics/learnable_attribute_gate/frame_002.npz'
+        diagnostic_path = self.source / diagnostic
+        diagnostic_path.parent.mkdir(parents=True)
+        np.savez_compressed(diagnostic_path, region_id=np.asarray([1]), selected=np.asarray([True]))
+        manifest.update(full_update=True, full_attribute_update='fullattr_002.bin',
+            full_attribute_update_timing='after_regional_dc_before_births',
+            regional_attribute_repair=dict(diagnostic_sidecar=diagnostic))
+        path.write_text(json.dumps(manifest, indent=2))
+        decoded, expected = self.replay.decode_frame(stream, 2, previous, raw)
+        manifest['raw_state_sha256'] = self.birth.reference_digest(expected)
+        path.write_text(json.dumps(manifest, indent=2))
+        capture = list(self.checkpoint['gaussians'])
+        for name, index in dict(xyz=1, rotation=5, logscale=4, opacity=6, sh_dc=2, sh_rest=3).items():
+            capture[index] = expected[name].clone()
+        self.checkpoint['gaussians'] = tuple(capture)
+        plan = self.plan()
+        copied = {self.entry_path(entry) for entry in plan.files}
+        self.assertIn('frame_storage/rigid_tree/fullattr_002.bin', copied)
+        self.assertIn(diagnostic, copied)
+        self.extension.copy_verified_prefix(plan)
+        dest = self.destination / 'frame_storage' / 'rigid_tree'
+        actual_state, actual = self.replay.replay(dest, dest / 'reference_frame0.npz', through=2)
+        self.assertEqual(actual_state.digest(), decoded.digest())
+        for name in ('xyz', 'rotation', 'logscale', 'opacity', 'sh_dc', 'sh_rest'):
+            self.assertTrue(torch.equal(actual[name].view(torch.int32),
+                                        expected[name].view(torch.int32)), name)
+        self.assertEqual((self.destination / diagnostic).read_bytes(), diagnostic_path.read_bytes())
+
+    def test_extension_accepts_only_an_equivalent_symlink_dataset_root(self):
+        alias = self.root / 'dataset_alias'
+        alias.mkdir()
+        (alias / 'frames').symlink_to(self.dataset / 'frames', target_is_directory=True)
+        config = copy.deepcopy(self.current_data)
+        config['root'] = str(alias)
+        images = [(frame, str(alias / 'frames' / f'{frame:04d}' / 'cam00.png'))
+                  for frame in range(5)]
+        plan = self.plan(current_data_config=config, current_images=images)
+        self.assertEqual(plan.resume_frame, 2)
+        self.assertTrue(all(Path(item['resolved_path']).is_relative_to(self.dataset)
+                            for item in plan.images))
+        changed = self.root / 'changed_dataset'
+        for frame in range(5):
+            target = changed / 'frames' / f'{frame:04d}' / 'cam00.png'
+            target.parent.mkdir(parents=True)
+            if frame == 1:
+                Image.new('RGB', (4, 4), (100, 25, 50)).save(target)
+            else:
+                target.symlink_to(self.dataset / 'frames' / f'{frame:04d}' / 'cam00.png')
+        config['root'] = str(changed)
+        changed_images = [(frame, str(changed / 'frames' / f'{frame:04d}' / 'cam00.png'))
+                          for frame in range(5)]
+        with self.assertRaisesRegex(ValueError, 'changed a prefix image'):
+            self.plan(current_data_config=config, current_images=changed_images)
 
     def test_explicit_completed_prefix_from_interrupted_longer_plan_is_verified(self):
         # Three completed frames, with an original four-frame plan. Never
@@ -593,6 +711,34 @@ class SequenceExtensionTests(unittest.TestCase):
         self.assertEqual(calls, [('begin', 2), ('train', 3), ('begin', 3), ('train', 4), ('begin', 4)])
         self.assertEqual([item['frame'] for item in result], [3, 4])
         self.assertIsNone(trainer._resume_rng)
+
+    def test_prefix_frame_limit_trains_only_the_requested_future_frames(self):
+        plan = self.plan()
+        limit = self.trainer_module._extension_end_frame
+        self.assertEqual(limit(None, None, 5), 5)
+        self.assertEqual(limit(3, plan, 5), 4)
+        for last, candidate in ((2, plan), (5, plan), (True, plan), (3, None)):
+            with self.subTest(last=last), self.assertRaises(ValueError):
+                limit(last, candidate, 5)
+        calls = []
+
+        class LoopHarness(self.trainer_module.Trainer):
+            def frame_training_loop(trainer):
+                calls.append(('train', trainer.current_frame))
+                trainer.global_step = 300
+                return dict(frame=trainer.current_frame)
+
+        trainer = object.__new__(LoopHarness)
+        trainer.config = self.trainer_module.TrainerConfig()
+        trainer.module = SimpleNamespace(config=SimpleNamespace(rigid_tree=self.template.config),
+            total_steps=300, datamodule=SimpleNamespace(current_frame=2, num_frames=5),
+            begin_next_frame=lambda: calls.append(('begin', trainer.current_frame)))
+        trainer.global_step = 300
+        trainer._resume_rng = copy.deepcopy(self.saved_rng)
+        trainer._end_frame_exclusive = limit(3, plan, 5)
+        result = trainer.training_loop()
+        self.assertEqual(calls, [('begin', 2), ('train', 3), ('begin', 3)])
+        self.assertEqual([item['frame'] for item in result], [3])
 
     def test_rejects_missing_packet_index_or_required_birth_packet(self):
         for name in ('frame_storage/rigid_tree/motion_001.bin',
@@ -940,6 +1086,75 @@ class AdaptiveCompletionTests(unittest.TestCase):
         checkpoint, manifest = completed_adaptive_checkpoint()
         with self.assertRaises(ValueError):
             _validate_adaptive_birth_completion(checkpoint, manifest, 200)
+
+
+# ----- LPIPS evaluation cache -----
+
+
+
+
+import pipeline.module as pipeline_module
+
+
+class _FakeLPIPS(torch.nn.Module):
+    created = 0
+
+    def __init__(self, network, version):
+        super().__init__()
+        if (network, version) != ('vgg', '0.1'):
+            raise AssertionError('LPIPS network or weights changed')
+        type(self).created += 1
+        torch.rand(17)  # Real VGG construction also consumes the CPU RNG.
+        self.weight = torch.nn.Parameter(torch.tensor(0.75), requires_grad=False)
+
+    def forward(self, image, target):
+        return (image - target).square().mean().reshape(1) * self.weight
+
+
+class LPIPSEvaluationTests(unittest.TestCase):
+    def setUp(self):
+        _FakeLPIPS.created = 0
+        self.image = torch.full((3, 16, 16), 0.25)
+        self.view = SimpleNamespace(image=torch.full_like(self.image, 0.5))
+
+    def module(self, enabled=True):
+        config = pipeline_module.ModuleConfig(lpips_required=enabled, num_saving_images=0)
+        module = pipeline_module.Module(config)
+        module.forward = lambda viewpoint: {'render': self.image}
+        return module
+
+    def test_validation_reuses_metric_and_keeps_rng_and_state_dict(self):
+        module = self.module()
+        before_keys = set(module.state_dict())
+        rng = torch.get_rng_state().clone()
+        with patch.object(pipeline_module, 'LPIPS', _FakeLPIPS):
+            first = module.validation_step(self.view, 0, 0)
+            second = module.validation_step(self.view, 0, 0)
+        self.assertEqual(_FakeLPIPS.created, 1)
+        self.assertEqual(first, second)
+        self.assertAlmostEqual(first['lpips'], 0.75 * 0.25**2)
+        self.assertTrue(torch.equal(rng, torch.get_rng_state()))
+        self.assertEqual(before_keys, set(module.state_dict()))
+
+    def test_cold_and_warm_cache_leave_same_next_random_draw(self):
+        with patch.object(pipeline_module, 'LPIPS', _FakeLPIPS):
+            warm, cold = self.module(), self.module()
+            warm.validation_step(self.view, 0, 0)
+            rng = torch.get_rng_state().clone()
+            warm.validation_step(self.view, 0, 0)
+            after_warm = torch.rand(8)
+            torch.set_rng_state(rng)
+            cold.validation_step(self.view, 0, 0)
+            after_cold = torch.rand(8)
+        torch.testing.assert_close(after_warm, after_cold, rtol=0, atol=0)
+        self.assertEqual(_FakeLPIPS.created, 2)
+
+    def test_disabled_lpips_does_not_construct_network(self):
+        module = self.module(enabled=False)
+        with patch.object(pipeline_module, 'LPIPS', side_effect=AssertionError('unexpected LPIPS')):
+            metrics = module.validation_step(self.view, 0, 0)
+        self.assertNotIn('lpips', metrics)
+        self.assertFalse(hasattr(module, '_lpips_eval_cache'))
 
 
 if __name__ == "__main__":

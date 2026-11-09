@@ -25,7 +25,7 @@ import test_spatial_motion as fixtures
 import test_spatial_motion as image_fixtures
 import test_spatial_motion as lineage
 import test_spatial_motion as lineage_fixtures
-from pipeline.model.predictor_rd import predictor_cost
+from pipeline.model.spatial_gated_motion import predictor_cost
 from pipeline.model.rigid_tree_codec import decode_motion, encode_motion
 from pipeline.model.spatial_gated_motion import SpatialGatedMotion
 
@@ -1923,6 +1923,82 @@ class MotionImageScheduleTests(unittest.TestCase):
         torch.testing.assert_close(torch.autograd.grad(new, image, retain_graph=True)[0],
                                    torch.autograd.grad(old, image)[0], rtol=0, atol=0)
 
+    def test_cached_ssim_matches_loss_and_gradients_across_resolutions(self):
+        devices = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                image = torch.rand(3, 25, 27, device=device, requires_grad=True)
+                target = torch.rand_like(image)
+                cache = MODULE._TrainingSSIMCache()
+                for factor in (1, 2, 4):
+                    expected = MODULE.motion_photometric_loss(image, target, .2, factor)
+                    actual = MODULE.motion_photometric_loss(image, target, .2, factor, cache=cache)
+                    expected_grad = torch.autograd.grad(expected, image)[0]
+                    actual_grad = torch.autograd.grad(actual, image)[0]
+                    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+                    torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-6, atol=1e-7)
+                first = cache.prepare(image, target, image.shape[-2:])
+                second = cache.prepare(image, target, image.shape[-2:])
+                self.assertIs(first[1], second[1])
+                target.add_(.1)
+                changed = cache.prepare(image, target, image.shape[-2:])
+                self.assertIsNot(first[1], changed[1])
+                torch.testing.assert_close(
+                    MODULE.motion_photometric_loss(image, target, .2, cache=cache),
+                    MODULE.motion_photometric_loss(image, target, .2), rtol=1e-6, atol=1e-7)
+                cache.clear()
+                self.assertEqual(cache._target_bytes, 0)
+                self.assertFalse(cache._targets)
+
+    def test_cached_ssim_keeps_target_gradients_and_honours_budget(self):
+        image = torch.rand(3, 17, 19, requires_grad=True)
+        target = torch.rand_like(image, requires_grad=True)
+        cache = MODULE._TrainingSSIMCache(max_bytes=1)
+        expected = MODULE.motion_photometric_loss(image, target, .2)
+        actual = MODULE.motion_photometric_loss(image, target, .2, cache=cache)
+        expected_grads = torch.autograd.grad(expected, (image, target))
+        actual_grads = torch.autograd.grad(actual, (image, target))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+        MODULE.motion_photometric_loss(image, target.detach(), .2, cache=cache)
+        self.assertFalse(cache._targets)
+        if torch.cuda.is_available():
+            gpu_image = image.detach().cuda()
+            gpu_target = target.detach().cuda()
+            limited = MODULE._TrainingSSIMCache()
+            with patch.object(torch.cuda, 'mem_get_info', return_value=(0, 1024)):
+                self.assertIsNone(limited.prepare(gpu_image, gpu_target, gpu_image.shape[-2:]))
+            self.assertFalse(limited._targets)
+
+    def test_cached_ssim_falls_back_during_autocast(self):
+        image = torch.rand(3, 19, 21, requires_grad=True)
+        target = torch.rand_like(image)
+        cache = MODULE._TrainingSSIMCache()
+        normal = MODULE.motion_photometric_loss(image, target, .2, cache=cache)
+        with torch.autocast(device_type='cpu', dtype=torch.bfloat16):
+            expected = MODULE.motion_photometric_loss(image, target, .2)
+            actual = MODULE.motion_photometric_loss(image, target, .2, cache=cache)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(torch.autograd.grad(actual, image)[0],
+                                   torch.autograd.grad(expected, image)[0], rtol=1e-5, atol=1e-9)
+        self.assertEqual(len(cache._targets), 1)
+        torch.testing.assert_close(normal, MODULE.motion_photometric_loss(image, target, .2, cache=cache),
+                                   rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA separable SSIM check')
+    def test_cuda_cached_ssim_on_flat_and_nearly_matching_images(self):
+        torch.manual_seed(91)
+        for value in (0., .5, 1.):
+            target = torch.full((3, 25, 27), value, device='cuda')
+            image = (target + torch.randn_like(target) * .01).clamp(0, 1).requires_grad_()
+            expected = MODULE.motion_photometric_loss(image, target, .2)
+            actual = MODULE.motion_photometric_loss(image, target, .2, cache=MODULE._TrainingSSIMCache())
+            expected_grad = torch.autograd.grad(expected, image)[0]
+            actual_grad = torch.autograd.grad(actual, image)[0]
+            torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-3, atol=1e-6)
+
     def test_extra_motion_budget_keeps_gate_and_residual_fitting_at_full_resolution(self):
         for budget in (100, 200):
             for step, factor in ((1, 4), (20, 4), (21, 2), (40, 2),
@@ -1982,6 +2058,49 @@ TRAINER = importlib.import_module('pipeline.trainer')
 
 
 class MotionViewUpdates(unittest.TestCase):
+    def test_historical_view_counts_resolve_to_one(self):
+        config = TRAINER.TrainerConfig(motion_views_per_step=4, birth_views_per_step=2)
+        config.use_single_training_view()
+        self.assertEqual((config.motion_views_per_step, config.birth_views_per_step), (1, 1))
+        for invalid in (0, -1, True):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                TRAINER.TrainerConfig(motion_views_per_step=invalid).use_single_training_view()
+
+    def test_saved_run_config_records_the_actual_single_view(self):
+        import yaml
+        from pipeline.entry import Config, Pipeline
+        with TemporaryDirectory() as directory:
+            config = Config(gui_enabled=False,
+                trainer=TRAINER.TrainerConfig(motion_views_per_step=4, birth_views_per_step=4))
+            def setup(pipeline):
+                pipeline.trainer = SimpleNamespace(output_dir=Path(directory), is_global_zero=True)
+            with patch('pipeline.entry.safe_state'), patch.object(Pipeline, 'setup_trainer_and_modules', setup):
+                Pipeline(config)
+            recorded = yaml.safe_load((Path(directory) / 'config.yaml').read_text())
+            self.assertEqual(recorded['trainer']['motion_views_per_step'], 1)
+            self.assertEqual(recorded['trainer']['birth_views_per_step'], 1)
+
+    def test_birth_camera_schedule_is_random_and_resumable(self):
+        names = [f'cam{i:02d}.png' for i in range(1, 9)]
+        views = {name: object() for name in names}
+        for adaptive, first_step in ((False, 201), (True, 71)):
+            with self.subTest(adaptive=adaptive):
+                birth = SimpleNamespace(mechanism='residual_transaction',
+                    radiance_mode='adaptive_residual_birth' if adaptive else 'free')
+                module = SimpleNamespace(config=SimpleNamespace(birth=birth), current_frame=2,
+                    datamodule=SimpleNamespace(config=SimpleNamespace(training_view_seed=13)),
+                    birth_transaction=SimpleNamespace(fit_names=names), motion_steps=200,
+                    transaction_camera_views=lambda: views)
+                before = torch.get_rng_state().clone()
+                schedule = [MODULE.Module.transaction_training_view(module, step, 0, 1)[1]
+                            for step in range(first_step, first_step + 2 * len(names))]
+                self.assertEqual(set(schedule[:len(names)]), set(range(len(names))))
+                self.assertEqual(set(schedule[len(names):]), set(range(len(names))))
+                self.assertNotEqual(schedule[:len(names)], list(range(len(names))))
+                self.assertTrue(torch.equal(before, torch.get_rng_state()))
+                self.assertEqual(MODULE.Module.transaction_training_view(
+                    module, first_step + 3, 0, 1)[1], schedule[3])
+
     def trainer(self, views=4):
         cfg = SimpleNamespace(birth_steps=100,
             spatial_gate=SimpleNamespace(gate_start_step=60, freeze_step=90))
@@ -1991,13 +2110,13 @@ class MotionViewUpdates(unittest.TestCase):
         trainer._views_per_step = lambda step: TRAINER.Trainer._views_per_step(trainer, step)
         return trainer
 
-    def test_one_update_averages_all_views_and_charges_regularization_once(self):
+    def test_one_random_view_produces_one_backward_and_optimizer_update(self):
         parameter = torch.tensor(.5, requires_grad=True)
         trainer = self.trainer()
         optimizer = torch.optim.SGD([parameter], lr=.1)
         received = []
         targets = [-3., 1., 2., 4.]
-        fetcher = SimpleNamespace(next=iter(targets).__next__)
+        fetcher = SimpleNamespace(next=Mock(side_effect=iter(targets)))
         regularizer_calls = []
         def train(target, step, regularization_weight=1.):
             regularizer_calls.append(regularization_weight)
@@ -2012,17 +2131,17 @@ class MotionViewUpdates(unittest.TestCase):
         trainer.module.training_step = train
         trainer.module.post_training_step = post
         loss, metrics = TRAINER.Trainer._fit_views(trainer, fetcher, 1)
-        expected = sum((.5-t)**2 + .3*.5**2 for t in targets)/4
+        expected = (.5-targets[0])**2 + .3*.5**2
         self.assertAlmostEqual(loss, expected, places=5)
-        self.assertAlmostEqual(received[0][0], -.7, places=5)
-        self.assertAlmostEqual(float(parameter), .57, places=5)
+        self.assertAlmostEqual(received[0][0], 7.3, places=5)
+        self.assertAlmostEqual(float(parameter), -.23, places=5)
+        fetcher.next.assert_called_once_with()
         self.assertEqual(len(received), 1)
-        self.assertEqual(len(received[0][1]), 4)
-        self.assertNotIn('render', received[0][1][0])
+        self.assertIn('render', received[0][1])
         self.assertEqual(metrics['gs'], 2)
-        self.assertEqual(regularizer_calls, [0., 0., 0., 4])
+        self.assertEqual(regularizer_calls, [1])
 
-    def test_device_metrics_are_returned_as_python_values_after_all_views(self):
+    def test_device_metrics_are_returned_as_python_values_after_one_view(self):
         trainer = self.trainer(views=2)
         targets = iter([1., 3.])
         trainer.module.training_step = lambda target, step, **kwargs: (
@@ -2031,8 +2150,8 @@ class MotionViewUpdates(unittest.TestCase):
         trainer.module.post_training_step = Mock()
         loss, metrics = TRAINER.Trainer._fit_views(trainer,
             SimpleNamespace(next=targets.__next__), 1)
-        self.assertEqual(loss, 2.)
-        self.assertEqual(metrics, dict(image_loss=2., psnr=20., gs=7))
+        self.assertEqual(loss, 1.)
+        self.assertEqual(metrics, dict(image_loss=1., psnr=10., gs=7))
         self.assertIsInstance(metrics['image_loss'], float)
 
     def test_deferred_metrics_preserve_gradients_and_materialized_values(self):
@@ -2134,16 +2253,16 @@ class MotionViewUpdates(unittest.TestCase):
 
     def test_schedule_and_resume_replay_exact_view_consumption(self):
         trainer = self.trainer()
-        for step, wanted in [(1,4),(60,4),(61,4),(90,4),(91,4),(100,4),
+        for step, wanted in [(1,1),(60,1),(61,1),(90,1),(91,1),(100,1),
                              (101,1),(200,1)]:
             self.assertEqual(trainer._views_per_step(step), wanted)
-        self.assertEqual(sum(trainer._views_per_step(s) for s in range(1,201)), 500)
+        self.assertEqual(sum(trainer._views_per_step(s) for s in range(1,201)), 200)
         trainer.global_step = 95
         trainer._resume_rng = {'marker': True}
         trainer._restore_rng = Mock()
         fetcher = SimpleNamespace(next=Mock())
         TRAINER.Trainer._resume_fetcher(trainer, fetcher)
-        self.assertEqual(fetcher.next.call_count, 380)
+        self.assertEqual(fetcher.next.call_count, 95)
         trainer._restore_rng.assert_called_once_with({'marker': True})
         self.assertIsNone(trainer._resume_rng)
         old = self.trainer(views=1)
