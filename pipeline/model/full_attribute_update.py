@@ -33,6 +33,10 @@ class FullUpdateConfig:
     storage_loss_enabled: bool = True
     per_attribute_l1_weight: float = .005
     point_dc_rate_scale: float = 1.0
+    point_logscale_rate_multiplier: float = 1.0
+    point_sh_rest_rate_multiplier: float = 1.0
+    attribute_aware_gate: bool = False
+    regional_opacity_l1_weight: float | None = None
     probe_views_per_round: int = 2
     probe_opacity_weight: bool = True
     point_budget_fraction: float | None = None
@@ -42,6 +46,8 @@ class FullUpdateConfig:
     repair_rmse_mix: float = 0.0
     motion_rmse_mix: float = 0.0
     early_joint_repair: bool = False
+    dense_color_200: bool = False
+    regional_full_200: bool = False
     early_probe_attribute_only: bool = False
     shared_region_orientation: bool = False
 
@@ -50,7 +56,6 @@ class FullUpdateConfig:
     interval = 10
     repair_only_after_motion = False
     train_attributes = True
-    stop_after_motion = False
     color_only = False
     resume_from_finalized_200 = False
     train_point_dc = True
@@ -72,8 +77,12 @@ class FullUpdateConfig:
     def regional_repair(self):
         return self.enabled
 
+    @property
+    def stop_after_motion(self):
+        return self.dense_color_200
+
     def validate(self):
-        for name in ('enabled', 'audit_camera_sequence', 'gradient_diagnostics', 'storage_loss_enabled', 'early_joint_repair', 'early_probe_attribute_only', 'probe_opacity_weight', 'shared_region_orientation'):
+        for name in ('enabled', 'audit_camera_sequence', 'gradient_diagnostics', 'storage_loss_enabled', 'early_joint_repair', 'dense_color_200', 'regional_full_200', 'attribute_aware_gate', 'early_probe_attribute_only', 'probe_opacity_weight', 'shared_region_orientation'):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f'full_update.{name} must be boolean')
         for name in ('gradient_position_lr_scale', 'logscale_step', 'sh_dc_step', 'sh_rest_step'):
@@ -82,10 +91,14 @@ class FullUpdateConfig:
                 raise ValueError(f'full_update.{name} must be finite and positive')
         if self.gradient_position_lr_scale > 1:
             raise ValueError('full_update.gradient_position_lr_scale must not exceed 1')
-        for name in ('per_attribute_l1_weight', 'point_dc_rate_scale'):
+        for name in ('per_attribute_l1_weight', 'point_dc_rate_scale', 'point_logscale_rate_multiplier', 'point_sh_rest_rate_multiplier'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'full_update.{name} must be finite and nonnegative')
+        opacity_l1 = self.regional_opacity_l1_weight
+        if opacity_l1 is not None and (isinstance(opacity_l1, bool) or
+                not isinstance(opacity_l1, (float, int)) or not math.isfinite(opacity_l1) or opacity_l1 < 0):
+            raise ValueError('full_update.regional_opacity_l1_weight must be finite and nonnegative')
         if type(self.probe_views_per_round) is not int or self.probe_views_per_round not in (2, 4):
             raise ValueError('full_update.probe_views_per_round must be 2 or 4')
         if self.point_budget_fraction is not None and (
@@ -108,6 +121,12 @@ class FullUpdateConfig:
             raise ValueError('full_update.motion_rmse_mix must be in [0, 1]')
         if self.early_probe_attribute_only and not self.early_joint_repair:
             raise ValueError('Attribute-only early probes require early joint repair')
+        if self.dense_color_200 and (not self.enabled or not self.early_joint_repair):
+            raise ValueError('Dense 200-step color requires early joint full updates')
+        if self.regional_full_200 and not self.dense_color_200:
+            raise ValueError('Regional full attributes require the dense 200-step plan')
+        if self.attribute_aware_gate and not self.regional_full_200:
+            raise ValueError('Attribute-aware gate requires regional full attributes')
 
 
 def normalize_full_update_config(saved):
@@ -426,8 +445,17 @@ class FullAttributeUpdate:
         symbols = self.symbols()
         return _materialize(reference, symbols, self.steps)
 
+    def point_rate_multiplier(self, name):
+        if name == 'logscale':
+            return self.config.point_logscale_rate_multiplier
+        if name == 'sh_rest':
+            return self.config.point_sh_rest_rate_multiplier
+        return 1.0
+
     def symbols(self):
-        symbols = {name: torch.round(self.parameters[name].detach().cpu() / step)
+        # Match the quantizer used by the training forward on the parameter's
+        # device. CPU and CUDA division can round differently at half bins.
+        symbols = {name: torch.round(self.parameters[name].detach() / step).cpu()
                    for name, step in zip(FIELDS, self.steps)}
         opposed = self._scale_opposed()
         if opposed is not None:
@@ -435,28 +463,41 @@ class FullAttributeUpdate:
         return symbols
 
     @torch.no_grad()
-    def rate_terms(self, byte_price):
+    def rate_terms(self, byte_price, *, include_scalar_counts=True, include_symbols=False):
         """Report raw sparse-block price; Adam proximal performs its gradient step."""
         fields = {}
+        symbols = {} if include_symbols else None
         for name, step in zip(FIELDS, self.steps):
             value = self.parameters[name].detach()
             matrix = value.reshape(len(value), -1)
             integers = torch.round(matrix / step)
-            active = integers.ne(0).any(-1)
+            if symbols is not None:
+                symbols[name] = integers.reshape_as(value)
+            nonzero = integers.ne(0)
+            active = nonzero.any(-1)
             rows = active.sum()
             # One-byte typical gap plus the full int16 attribute row. Actual
             # varint gaps, compression and FUA1/FUA2/FUA3 choice are measured.
             raw = rows.to(value) * (1 + 2 * matrix.shape[1])
             l1 = (self.config.per_attribute_l1_weight * value.abs().mean()
                   if self.config.storage_loss_enabled and value.numel() else value.sum() * 0)
-            fields[name] = dict(active_rows=rows, active_scalars=integers.ne(0).sum(),
-                                raw_bytes_surrogate=raw, l1_loss=l1)
+            multiplier = self.point_rate_multiplier(name)
+            fields[name] = dict(active_rows=rows, raw_bytes_surrogate=raw,
+                                l1_loss=l1, rate_multiplier=value.new_tensor(multiplier))
+            if include_scalar_counts:
+                fields[name]['active_scalars'] = nonzero.sum()
         first = self.parameters[FIELDS[0]]
         raw = sum((item['raw_bytes_surrogate'] for item in fields.values()), first.new_zeros(()))
         raw = raw + raw.gt(0).to(raw) * (HEADER.size + 12)
         l1 = sum((item['l1_loss'] for item in fields.values()), first.new_zeros(()))
-        loss = raw * byte_price + l1 if self.config.storage_loss_enabled else raw * 0
-        return dict(loss=loss, raw_bytes_surrogate=raw, l1_loss=l1, fields=fields)
+        weighted_raw = sum((item['raw_bytes_surrogate'] * item['rate_multiplier']
+                            for item in fields.values()), first.new_zeros(()))
+        weighted_raw = weighted_raw + raw.gt(0).to(raw) * (HEADER.size + 12)
+        loss = weighted_raw * byte_price + l1 if self.config.storage_loss_enabled else raw * 0
+        result = dict(loss=loss, raw_bytes_surrogate=raw, l1_loss=l1, fields=fields)
+        if symbols is not None:
+            result['symbols'] = symbols
+        return result
 
     @torch.no_grad()
     def after_step(self, optimizer, byte_price, *, proximal):
@@ -482,7 +523,8 @@ class FullAttributeUpdate:
                 matrix = parameter.reshape(len(parameter), -1)
                 gain = (.5 * metric * parameter.square() / lr).reshape_as(matrix).sum(-1)
                 active = torch.round(matrix / step).ne(0).any(-1)
-                price = (1 + 2 * matrix.shape[1]) * byte_price
+                multiplier = self.point_rate_multiplier(name)
+                price = (1 + 2 * matrix.shape[1]) * byte_price * multiplier
                 prune = active & gain.lt(price)
                 matrix[prune] = 0
 
@@ -549,6 +591,7 @@ class FullUpdateSpatialGatedMotion(SpatialGatedMotion):
     original_rotation_updates = False
     shared_region_orientation = False
     color_only = False
+    regional_full_200 = False
 
     @torch.no_grad()
     def _enforce_rotation_policy(self):
@@ -580,6 +623,10 @@ class FullUpdateSpatialGatedMotion(SpatialGatedMotion):
                     parameter.grad = None
             return
         super().prepare_plan_step(step)
+        if self.regional_full_200 and step <= 100:
+            for parameter in (self.region_rotation, self.gs_rotation):
+                parameter.requires_grad_(False)
+                parameter.grad = None
 
     @torch.no_grad()
     def optimizer_step(self):

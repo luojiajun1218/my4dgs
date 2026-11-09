@@ -340,6 +340,46 @@ class SequenceExtensionTests(unittest.TestCase):
     def entry_path(entry):
         return str(entry['relative_path'] if isinstance(entry, dict) else entry.relative_path)
 
+    def test_recover_200_step_full_attribute_prefix_with_regional_packet(self):
+        from pipeline.model.full_attribute_update import encode_full_attribute_delta
+        from pipeline.model.regional_full_attributes import HEADER, MAGIC, decode_regional_full
+        state = self.codec.DecodedState.restore(self.saved_motion['codec_previous_state'])
+        nodes = len(state.parents)
+        zeros = dict(logscale=torch.zeros(nodes, 3), sh_dc=torch.zeros(nodes, 1, 3),
+                     sh_rest=torch.zeros(nodes, 3, 3))
+        symbols = {key: torch.zeros_like(value) for key, value in zeros.items()}
+        symbols['sh_dc'][int(state.owner[0]), 0, 0] = 3
+        body = encode_full_attribute_delta(zeros, symbols, frame_index=2, steps=(.005, .001, .001))
+        packet = HEADER.pack(MAGIC, 2, len(body), 0) + body
+        stream = self.source / 'frame_storage/rigid_tree'
+        (stream / 'regfull_002.bin').write_bytes(packet)
+        raw = {key: value.clone() for key, value in self.final_raw.items()}
+        raw.update(decode_regional_full(packet, raw, state.owner, nodes, 2))
+        manifest_path = stream / 'frame_002.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(optimization_steps=200, regional_full_attributes='regfull_002.bin',
+                        regional_full_timing='after_point_attributes_before_births',
+                        raw_state_sha256=self.birth.reference_digest(raw))
+        manifest_path.write_text(json.dumps(manifest))
+        self.checkpoint['birth_allocation'] = 'frame_training_plan_v1'
+        self.checkpoint['global_step'] = 200
+        self.checkpoint['rigid_tree_module_config']['full_update'].update(
+            enabled=True, dense_color_200=True, regional_full_200=True)
+        gaussian = list(self.checkpoint['gaussians'])
+        for name, index in (('xyz', 1), ('sh_dc', 2), ('sh_rest', 3), ('logscale', 4),
+                            ('rotation', 5), ('opacity', 6)):
+            gaussian[index] = raw[name].clone()
+        self.checkpoint['gaussians'] = tuple(gaussian)
+        plan = self.plan()
+        self.assertEqual(plan.resume_frame, 2)
+        self.assertIn('frame_storage/rigid_tree/regfull_002.bin',
+                      {self.entry_path(entry) for entry in plan.files})
+        self.extension.copy_verified_prefix(plan)
+        decoded, actual = self.replay.replay(self.destination/'frame_storage/rigid_tree',
+            self.destination/'frame_storage/rigid_tree/reference_frame0.npz', through=2)
+        self.assertEqual(decoded.frame_index, 2)
+        self.assertEqual(self.birth.reference_digest(actual), self.birth.reference_digest(raw))
+
     def test_complete_prefix_copy_is_byte_identical_and_preserves_new_metadata(self):
         before = {str(p.relative_to(self.source)): p.read_bytes()
                   for p in self.source.rglob('*') if p.is_file()}

@@ -236,14 +236,22 @@ class Trainer(BaseTrainer):
         self._resume_rng = ckpt.get('rng_state')
         if ckpt.get('rigid_tree_version') is None:
             self._write_reference(frame_index=0)
-            tail = ('regional attribute repair' if self.module.config.full_update.regional_repair
-                    else 'birth')
-            logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
-                         '%d motion + %d %s steps',
-                         self.module.config.rigid_tree.spatial_gate.max_depth,
-                         self.module.config.rigid_tree.motion_steps,
-                         (0 if self.module.config.full_update.stop_after_motion else
-                          self.module.config.rigid_tree.birth_steps), tail)
+            full = self.module.config.full_update
+            if getattr(full, 'regional_full_200', False):
+                logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
+                             '200 total steps; regional and per-point attributes jointly optimized at steps 101-200',
+                             self.module.config.rigid_tree.spatial_gate.max_depth)
+            elif getattr(full, 'dense_color_200', False):
+                logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
+                             '200 total steps; all-point color jointly optimized at steps 101-200',
+                             self.module.config.rigid_tree.spatial_gate.max_depth)
+            else:
+                tail = 'regional attribute repair' if full.regional_repair else 'birth'
+                logging.info('Spatial gates: eight initial cells, candidate depth=%d, '
+                             '%d motion + %d %s steps',
+                             self.module.config.rigid_tree.spatial_gate.max_depth,
+                             self.module.config.rigid_tree.motion_steps,
+                             (0 if full.stop_after_motion else self.module.config.rigid_tree.birth_steps), tail)
         else:
             existing = self.output_dir / 'frame_storage' / 'rigid_tree' / 'reference_frame0.npz'
             if existing.exists():

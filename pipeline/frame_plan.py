@@ -42,6 +42,8 @@ def gradient_probe_step(module, step):
 
 
 def regional_probe_steps(module):
+    if getattr(module.config.full_update, 'dense_color_200', False):
+        return ()
     count = getattr(module.config.full_update, 'probe_views_per_round', 2)
     if getattr(module.config.full_update, 'early_joint_repair', False):
         return tuple(range(101, 101 + count))
@@ -87,7 +89,8 @@ def frame_plan_phase(module, step):
         return 'shared_gate'
     if step <= 100:
         return 'joint_gate_residual_early'
-    if step <= 150:
+    restart = getattr(getattr(tree, 'spatial_gate', None), 'joint_gate_start_step', 151)
+    if step < restart:
         return 'fixed_gate_residual'
     if step <= 180:
         return 'joint_gate_residual'
@@ -553,14 +556,15 @@ class FramePlanController:
             self._plan_regional_alpha_mask_gradient(step)
         early_repair = (regional_attribute_repair_active(self) and
                         getattr(self.config.full_update, 'early_joint_repair', False))
-        if regional_attribute_repair_active(self) and (step > 200 or (early_repair and step > 100)):
+        if regional_attribute_repair_active(self) and not self.config.full_update.dense_color_200 and (step > 200 or (early_repair and step > 100)):
             self._plan_mask_regional_attribute_gradients(attributes_only=step <= 200)
         tail_start = 301-effective_final_joint_refine_steps(self)
         full = bool(getattr(self, 'full_update_active', False))
         shared = getattr(self, 'feature_dc_update', None)
         frozen = _fixed_incumbent(self, step)
         alpha_frozen = _fixed_old_alpha(self, step)
-        boundaries = (1,50,51,100,101,150,151,180,181,200,201,250,251,300)
+        boundaries = (1,50,51,100,101,150,151,180,181,200,201,250,251,300,
+                      self.config.rigid_tree.spatial_gate.joint_gate_start_step)
         diagnostic_steps = step in boundaries or (tail_start <= 300 and step in (tail_start-1,tail_start))
         if diagnostic_steps and getattr(getattr(self.config, 'full_update', None), 'gradient_diagnostics', True):
             parameters = {name: getattr(self.motion,name) for name in
@@ -594,6 +598,19 @@ class FramePlanController:
             self.motion.mark_observed(observed)
             self.birth_control['motion_frustum_samples'] = torch.as_tensor(self.birth_control.get('motion_frustum_samples',0),device=self.device)+package['visibility_filter'][:count].sum()
             self.birth_control['motion_observed_samples'] = torch.as_tensor(self.birth_control.get('motion_observed_samples',0),device=self.device)+observed.sum()
+        region_full = getattr(self, 'regional_full_attributes', None)
+        rebase = (region_full is not None and step > 100 and
+                  getattr(self.config.full_update, 'attribute_aware_gate', False) and
+                  not self.motion._hard_gate_frozen)
+        if rebase and step in (self.config.rigid_tree.spatial_gate.joint_gate_start_step, 151, 165, 180) and self.motion.gate_logits.grad is not None:
+            reachable = region_full.reachable_gate_mask()
+            logits, gradient = self.motion.gate_logits.detach(), self.motion.gate_logits.grad.detach()
+            self.birth_control.setdefault('attribute_gate_total_gradient_checks', []).append(dict(
+                step=step, reachable_gates=int(reachable.sum()),
+                reachable_nonzero=int((reachable & gradient.ne(0)).sum()),
+                reachable_towards_switch=int((reachable & (gradient*logits).gt(0)).sum()),
+                reachable_within_one=int((reachable & logits.abs().lt(1.)).sum())))
+        previous_owner = self.motion.owner.detach().clone() if rebase else None
         if fitting_old_motion(self):
             edits = self.motion.optimizer_step()
             self.birth_control['tree_edit_count'] = self.birth_control.get('tree_edit_count', 0)+len(edits)
@@ -606,6 +623,11 @@ class FramePlanController:
                 logscale_update.after_optimizer_step(
                     step, self.motion.optimizer, self._rate_byte_price(step))
             self.motion.optimizer.zero_grad(set_to_none=True)
+        if rebase:
+            region_full.rebase_points(previous_owner, self.full_attribute_update, self.opacity_update)
+            if step in (self.config.rigid_tree.spatial_gate.joint_gate_start_step, 151, 165, 180):
+                self.birth_control.setdefault('attribute_gate_rebase_checks', []).append(dict(
+                    step=step, changed_points=int(previous_owner.ne(self.motion.owner).sum())))
         hook = getattr(self, 'full_update_after_step', None)
         if hook is not None:
             hook(step)
@@ -626,7 +648,7 @@ class FramePlanController:
                 perform_step=False, external_state=self.motion.optimizer.state.get(self.opacity_update.delta, {}))
         if regional_alpha_repair_active(self) and step > 200:
             self._plan_regional_alpha_restore(step)
-        if regional_attribute_repair_active(self) and (step > 200 or (early_repair and step > 100)):
+        if regional_attribute_repair_active(self) and not self.config.full_update.dense_color_200 and (step > 200 or (early_repair and step > 100)):
             self._plan_restore_regional_attribute_frozen_rows(step, attributes_only=step <= 200)
         self.early_shared_steps += 1
         if self.early_initialized:
@@ -634,7 +656,7 @@ class FramePlanController:
             self.early_birth_updates += 1
         if getattr(self.config.birth, 'regional_color_birth', False) and step in (100, 150, 180):
             self._plan_record_stage(step, 'old_only', old_only=True)
-        if early_repair and step == 100:
+        if early_repair and step == 100 and not self.config.full_update.dense_color_200:
             self._plan_select_regional_attributes(packages)
         if step == 200:
             xyz, rotation = self.motion.decoded_survivor_pose()
@@ -667,7 +689,9 @@ class FramePlanController:
                 self.birth_control['early_replacement'].update(mode='regional_attribute_repair',
                     birth_steps=[], cleanup_steps=[], colour_initialization=None,
                     reference_distance=None)
-                if early_repair:
+                if self.config.full_update.dense_color_200:
+                    self.birth_control['early_replacement']['mode'] = 'dense_color_200'
+                elif early_repair:
                     if shared is not None and shared.regional and not shared.ready:
                         shared.bind(self.motion.owner, len(self.motion.parents),
                                     torch.unique(self.motion.owner), self.motion.optimizer)

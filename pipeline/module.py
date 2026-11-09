@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field, replace
 from collections import OrderedDict
 import json
 import math
+import os
 from pathlib import Path
 from typing import Optional
 import weakref
@@ -34,6 +35,7 @@ from .model.full_attribute_update import (FullUpdateConfig, FullAttributeUpdate,
 from .model.sparse_updates import OpacityUpdateConfig, QuantizedOpacityUpdate
 from .model.sparse_features import FeatureDCUpdateConfig, QuantizedFeatureDCUpdate, RegionalFeatureDCUpdate
 from .model.regional_logscale import RegionalLogScaleConfig, RegionalLogScaleUpdate
+from .model.regional_full_attributes import RegionalFullAttributes, decode_regional_full
 from .model.sparse_logscale import (LogScaleUpdateConfig,
     MotionSupportLogScaleUpdate)
 from .model.residual_birth import ResidualBirthConfig, BirthTransaction, RawView
@@ -482,6 +484,22 @@ class _TrainingSSIMCache:
 def stabilized_rmse(image, target):
     """Pixel-scale RMSE with finite gradient and an exact zero at a match."""
     mse = (image - target).square().mean()
+    return _stabilized_rmse_from_mse(mse)
+
+
+def stable_covariance_backward_active(module, training):
+    """Use the stable backward during full-attribute fitting and legacy tails."""
+    if not (getattr(module.config, 'stable_tail_covariance_backward', False) and training and
+            module.frame_prepared and not module.frame_finalized and
+            regional_attribute_repair_active(module)):
+        return False
+    step = module.trainer.global_step
+    return (step > module.motion_steps or
+            (getattr(module.config.full_update, 'regional_full_200', False) and
+             1 <= step <= module.motion_steps))
+
+
+def _stabilized_rmse_from_mse(mse):
     return mse / ((mse + 1e-8).sqrt() + 1e-4)
 
 
@@ -698,6 +716,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if regional_scale_config.enabled and not (cfg.full_update.enabled and cfg.full_update.regional_repair and cfg.full_update.color_only and cfg.full_update.sparse_color_logscale_v3 and not cfg.logscale_update.enabled):
             raise ValueError("Regional scale requires fixed-population color-only FUA3")
         cfg.full_update.validate()
+        if cfg.full_update.regional_full_200 and (cfg.sh_degree != 1 or not cfg.rigid_tree.rotation_updates or
+                cfg.opacity_update.mode != 'alpha' or cfg.feature_dc_update.enabled or
+                cfg.regional_logscale.enabled or cfg.logscale_update.enabled):
+            raise ValueError('Regional full experiment requires SH1, rotations, alpha updates and no other shared attributes')
         supported_regional_dc = (cfg.feature_dc_update.enabled and
             cfg.feature_dc_update.sharing == 'spatial_region' and cfg.feature_dc_update.post_motion_only)
         if cfg.full_update.enabled and ((cfg.feature_dc_update.enabled and not supported_regional_dc) or
@@ -779,6 +801,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = FullUpdateSpatialGatedMotion(cfg.rigid_tree)
         self.full_attribute_update = None
+        self.regional_full_attributes = None
         self.regional_logscale = (RegionalLogScaleUpdate(regional_scale_config, self.motion) if regional_scale_config.enabled else None)
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
         dc_type = RegionalFeatureDCUpdate if regional_dc else QuantizedFeatureDCUpdate
@@ -853,6 +876,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         self.motion.color_only = False
         self.motion.original_rotation_updates = self.config.rigid_tree.rotation_updates
         self.motion.shared_region_orientation = bool(active and cfg.shared_region_orientation)
+        self.motion.regional_full_200 = bool(active and cfg.regional_full_200)
         self.motion.refine_image_gate_ste = bool(getattr(self, 'gate_refine_image_ste', False))
 
     def full_update_prepare_step(self, step):
@@ -860,8 +884,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             start = 101 if self.config.full_update.early_joint_repair else self.motion_steps + 1
             trainable = step >= start
             for name, parameter in self.full_attribute_update.parameters.items():
-                parameter.requires_grad_(trainable)
-                if not trainable:
+                enabled = trainable and not (getattr(self.config.full_update, 'dense_color_200', False) and
+                    not getattr(self.config.full_update, 'regional_full_200', False) and name == 'logscale')
+                parameter.requires_grad_(enabled)
+                if not enabled:
                     parameter.grad = None
             args = self.config.gaussian
             rates = _full_attribute_learning_rates(args)
@@ -872,6 +898,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 name = group.get('name', '')
                 if name.startswith('early_full_'):
                     group['lr'] = rates[name[len('early_full_'):]] * factor
+        regional_full = getattr(self, 'regional_full_attributes', None)
+        if regional_full is not None:
+            regional_full.prepare(step, self.config.rigid_tree.motion_lr_final_ratio)
         scale_shared = getattr(self, 'regional_logscale', None)
         if scale_shared is not None and scale_shared.ready:
             scale_shared.prepare_step(step, self.config.rigid_tree.motion_lr_final_ratio)
@@ -887,6 +916,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 shared.delta.grad = None
 
     def full_update_after_step(self, step):
+        regional_full = getattr(self, 'regional_full_attributes', None)
+        if regional_full is not None:
+            regional_full.after_step(step, self._rate_byte_price(step))
         scale_shared = getattr(self, 'regional_logscale', None)
         if scale_shared is not None and scale_shared.ready and step > self.motion_steps and not scale_shared.disabled_for_frame:
             window = self.config.rigid_tree.motion_fit_window_steps
@@ -972,6 +1004,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             if full is None:
                 raise ValueError('Keyframe checkpoint lost full attributes')
             ckpt['full_attribute_update'] = full.capture(self.motion.optimizer)
+            if self.config.full_update.regional_full_200:
+                if self.regional_full_attributes is None:
+                    raise ValueError('Checkpoint lost regional full attributes')
+                ckpt['regional_full_attributes'] = self.regional_full_attributes.capture()
         ckpt['birth_handoff_sources'] = (self.birth_handoff_sources.detach().cpu()
             if self.birth_handoff_sources is not None else None)
         transaction = getattr(self, 'birth_transaction', None)
@@ -1152,12 +1188,17 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                     parameter.requires_grad_(False)
                 self.motion.optimizer.zero_grad(set_to_none=True)
             self.full_attribute_update = None
+            self.regional_full_attributes = None
             if getattr(self, 'full_update_active', False) and not self.frame_finalized:
                 self.full_attribute_update = FullAttributeUpdate(self.config.full_update)
                 self.full_attribute_update.restore(ckpt.get('full_attribute_update'),
                     self.motion.optimizer, self.device, len(self.gaussians._xyz))
                 if getattr(self, 'regional_logscale', None) is not None:
                     self.full_attribute_update.regional_scale_symbols = self.regional_logscale.point_symbols
+                if self.config.full_update.regional_full_200:
+                    self.regional_full_attributes = RegionalFullAttributes(self.motion, self.config.full_update,
+                        self.config.gaussian, self.config.opacity_update)
+                    self.regional_full_attributes.restore(ckpt.get('regional_full_attributes'))
         if ckpt['births'] is not None and not uses_early_replacement(self.config):
             self.births = BirthGaussianModel(self.config.sh_degree)
             self.births.restore(ckpt['births'], self.config.gaussian_stage2)
@@ -1185,6 +1226,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 self._early_attach_opacity()
             regional_start = 100 if self.config.full_update.early_joint_repair else 200
             if (self.full_update_active and self.config.full_update.regional_repair and
+                    not self.config.full_update.dense_color_200 and
                     self.frame_prepared and not self.frame_finalized and self.early_shared_steps >= regional_start):
                 saved = ckpt.get('regional_attribute_repair_state')
                 if saved is None:
@@ -1310,6 +1352,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if uses_early_replacement(self.config):
             self._early_attach_opacity()
         self.full_attribute_update = None
+        self.regional_full_attributes = None
         if getattr(self, 'full_update_active', False):
             self.full_attribute_update = FullAttributeUpdate(self.config.full_update)
             args = self.config.gaussian
@@ -1318,6 +1361,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 tuple(rates[name] for name in FULL_ATTRIBUTE_FIELDS))
             if getattr(self, 'regional_logscale', None) is not None:
                 self.full_attribute_update.regional_scale_symbols = self.regional_logscale.point_symbols
+            if self.config.full_update.regional_full_200:
+                self.regional_full_attributes = RegionalFullAttributes(self.motion, self.config.full_update,
+                    self.config.gaussian, self.config.opacity_update)
 
     def pre_training_step(self):
         if getattr(self.config.birth,'frame_training_plan',False):
@@ -1421,7 +1467,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         update = self.opacity_update
         if ((regional_attribute_repair_active(self) and
              self.trainer.global_step > self.motion_steps) or
-                (getattr(self.config, 'ablation_motion_only', False) and self.motion_committed)):
+                ((getattr(self.config, 'ablation_motion_only', False) or
+                  getattr(self.config.full_update, 'dense_color_200', False)) and self.motion_committed)):
             # The codec materializes alpha through CPU logit, followed by the
             # renderer's device sigmoid. Use those exact forward values while
             # keeping the original quantized-alpha straight-through gradient.
@@ -1452,9 +1499,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         previous_stable_backward = getattr(self.renderer, 'stable_backward', False)
         stable_tail = getattr(self.config, 'stable_tail_covariance_backward', False)
         if stable_tail:
-            self.renderer.stable_backward = bool(
-                training and self.frame_prepared and not self.frame_finalized and
-                regional_attribute_repair_active(self) and self.trainer.global_step > self.motion_steps)
+            self.renderer.stable_backward = stable_covariance_backward_active(self, training)
         early_pose=None
         birth_view=None
         if effective:
@@ -1477,8 +1522,9 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                                      self.motion.predictor_pose() if predictor_only else
                                      self.motion.proposal_pose() if proposal_only else
                                      self.motion(self.trainer.global_step, training=training))
-                    if (self.motion_committed and self.trainer.global_step > self.motion_steps and
-                            getattr(self.config.full_update, 'shared_region_orientation', False)):
+                    if (self.motion_committed and ((self.trainer.global_step > self.motion_steps and
+                            getattr(self.config.full_update, 'shared_region_orientation', False)) or
+                            getattr(self.config.full_update, 'regional_full_200', False))):
                         rotation = decoder_exact_rotation(self.motion, rotation)
                     self.gaussians.rigid_xyz = xyz
                     self.gaussians.rigid_rotation = rotation
@@ -1531,6 +1577,20 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                     self.gaussians.rigid_logscale = values['logscale']
                     self.gaussians.rigid_sh_dc = values['sh_dc']
                     self.gaussians.rigid_sh_rest = values['sh_rest']
+                regional_full = getattr(self, 'regional_full_attributes', None)
+                if regional_full is not None and self.frame_prepared and not self.frame_finalized:
+                    gate_weights = regional_full.gate_image_weights()
+                    for name, rigid, base in (('logscale', 'rigid_logscale', '_scaling'),
+                            ('sh_dc', 'rigid_sh_dc', '_features_dc'), ('sh_rest', 'rigid_sh_rest', '_features_rest')):
+                        reference = getattr(self.gaussians, rigid, None)
+                        if reference is None:
+                            reference = getattr(self.gaussians, base)
+                        setattr(self.gaussians, rigid, regional_full.apply(name, reference, gate_weights=gate_weights))
+                    alpha = getattr(self.gaussians, 'rigid_alpha', None)
+                    if alpha is not None:
+                        logits = self.opacity_update.canonical_logits() if self.motion_committed else None
+                        self.gaussians.rigid_alpha = regional_full.alpha(alpha, self.motion_committed, logits,
+                                                                        gate_weights=gate_weights)
                 if shared is not None:
                     attributes = {name: getattr(self.gaussians, name, None) for name in
                         ('rigid_xyz', 'rigid_rotation', 'rigid_alpha', 'rigid_opacity',
@@ -1648,19 +1708,25 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                if full_cfg is not None else 0.)
         temporal_objective = bool((regional_attribute_repair_active(self) or
                                    getattr(self.config, 'ablation_motion_only', False)) and mix > 0)
+        squared_error = None
         if temporal_objective:
             if full_cfg.repair_temporal_weight:
                 weights = self._temporal_repair_weights(viewpoint)
                 repair_rmse = weighted_repair_rmse(image, viewpoint.image, weights)
             else:
-                repair_rmse = stabilized_rmse(image, viewpoint.image)
+                squared_error = (image - viewpoint.image).square()
+                repair_rmse = _stabilized_rmse_from_mse(squared_error.mean())
             loss = (1 - mix) * image_loss + mix * repair_rmse
         # Leave scalar diagnostics on device until all views have finished.
         # Converting each one to float would synchronize CUDA before backward.
         early = uses_early_replacement(self.config) and self.early_initialized
         if early:
-            squared_error = (image.detach() - viewpoint.image.detach()).square()
+            squared_error = ((image.detach() - viewpoint.image.detach()).square()
+                             if squared_error is None else squared_error.detach())
             channel_mse = squared_error.view(image.shape[0], -1).mean(1, keepdim=True)
+            image_psnr = (20 * torch.log10(1. / torch.sqrt(channel_mse))).mean()
+        elif squared_error is not None:
+            channel_mse = squared_error.detach().view(image.shape[0], -1).mean(1, keepdim=True)
             image_psnr = (20 * torch.log10(1. / torch.sqrt(channel_mse))).mean()
         else:
             image_psnr = psnr(image.detach(), viewpoint.image).detach()
@@ -1721,11 +1787,45 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
         if regularization_weight and shared_scale is not None and shared_scale.ready and not self.frame_finalized:
             loss = loss + regularization_weight * shared_scale.rate_terms(self._rate_byte_price(step) * self.config.full_update.shared_dc_rate_scale)['loss']
         full = getattr(self, 'full_attribute_update', None)
+        regional_full = getattr(self, 'regional_full_attributes', None)
+        reuse_point_symbols = bool(regional_full is not None and step >= 101 and
+            self.config.full_update.attribute_aware_gate and not self.motion._hard_gate_frozen and
+            self.motion.gate_logits.requires_grad)
+        point_symbols = None
         if (regularization_weight and getattr(self, 'full_update_active', False) and full is not None and
                 full.config.storage_loss_enabled and not self.frame_finalized and
                 not (step <= self.motion_steps and full.initial_zero_frozen())):
-            terms = full.rate_terms(self._rate_byte_price(step) * self.config.full_update.point_dc_rate_scale)
+            terms = full.rate_terms(self._rate_byte_price(step) * self.config.full_update.point_dc_rate_scale,
+                                    include_scalar_counts=False, include_symbols=reuse_point_symbols)
             loss = loss + regularization_weight * terms['loss']
+            point_symbols = terms.get('symbols')
+        if regularization_weight and regional_full is not None and step >= 101 and not self.frame_finalized:
+            price = self._rate_byte_price(step)
+            regional_terms = regional_full.rate_terms(price)
+            loss = loss + regularization_weight * regional_terms['loss']
+            metrics['regional_storage_loss'] = regional_terms['loss'].detach()
+            metrics['regional_storage_raw_bytes'] = regional_terms['raw_bytes_surrogate'].detach()
+            if self.config.full_update.attribute_aware_gate:
+                gate_terms = regional_full.gate_rate_terms(full, self.opacity_update, price,
+                                                           point_symbols=point_symbols)
+                loss = loss + regularization_weight * gate_terms['proxy']
+                metrics['attribute_gate_hard_weighted_bytes'] = gate_terms['hard_weighted_bytes'].detach()
+                metrics['attribute_gate_expected_weighted_bytes'] = gate_terms['expected_weighted_bytes'].detach()
+                if step in (self.config.rigid_tree.spatial_gate.joint_gate_start_step, 151, 165, 180) and gate_terms['proxy'].requires_grad:
+                    gate_gradient = torch.autograd.grad(gate_terms['proxy'], self.motion.gate_logits,
+                        retain_graph=True, allow_unused=True)[0]
+                    reachable = regional_full.reachable_gate_mask()
+                    logits = self.motion.gate_logits.detach()
+                    self.birth_control.setdefault('attribute_gate_rate_checks', []).append(dict(
+                        step=step,
+                        gradient_norm=0. if gate_gradient is None else float(gate_gradient.detach().norm()),
+                        nonzero_gates=0 if gate_gradient is None else int(gate_gradient.detach().ne(0).sum()),
+                        reachable_gates=int(reachable.sum()),
+                        reachable_nonzero=0 if gate_gradient is None else int((reachable & gate_gradient.detach().ne(0)).sum()),
+                        reachable_towards_switch=0 if gate_gradient is None else int((reachable & (gate_gradient.detach()*logits).gt(0)).sum()),
+                        reachable_within_one=int((reachable & logits.abs().lt(1.)).sum()),
+                        hard_weighted_bytes=float(gate_terms['hard_weighted_bytes']),
+                        expected_weighted_bytes=float(gate_terms['expected_weighted_bytes'])))
         if (self.motion_committed and regularization_weight and len(self.births._xyz) and
                 self.config.birth.alpha_sparsity_weight):
             penalty = (self.config.birth.alpha_sparsity_weight *
@@ -2079,7 +2179,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             camera = getattr(self.trainer, 'diagnostic_train_camera', None) or sorted(views)[0]
             if camera not in views or camera == 'cam00.png':
                 raise ValueError('Forward/decode check requires a training camera')
-            full_debug = bool(self.config.full_update.regional_full_point_budget)
+            full_debug = bool(self.config.full_update.regional_full_point_budget or
+                os.environ.get('MY4DGS_DEBUG_ATTRGATE') == '1')
             self._capture_regional_full_debug = full_debug
             before = self.forward(views[camera], training=True)['render'].detach().clamp(0, 1).clone()
             debug_before = getattr(self, '_regional_full_debug', None) if full_debug else None
@@ -2116,6 +2217,17 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             full_reference = self.full_update_reference(canonical=True)
             old_raw.update({name: value.to(old_raw[name]) for name, value in
                             full.canonical(full_reference).items()})
+        stream_dir = self.output_dir / 'frame_storage' / 'rigid_tree'
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        regional_full_info = None
+        regional_full = getattr(self, 'regional_full_attributes', None)
+        point_full_raw = {name: old_raw[name] for name in (*FULL_ATTRIBUTE_FIELDS, 'opacity')}
+        if regional_full is not None:
+            regional_full_info = regional_full.export(stream_dir / f'regfull_{self.current_frame:03d}.bin', self.current_frame)
+            if regional_full_info is not None:
+                regional_values = decode_regional_full(Path(regional_full_info['path']).read_bytes(), old_raw,
+                    self.motion.owner.detach().cpu(), len(self.motion.parents), self.current_frame)
+                old_raw.update({name: value.to(old_raw[name]) for name,value in regional_values.items()})
         view = self.make_birth_view(reference=old_raw) if full_reference is not None else self.make_birth_view()
         raw, sources = materialize_quantized_gaussians(
             old_raw, view)
@@ -2158,7 +2270,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             opacity_info = self.opacity_update.export(
                 stream_dir / f'opacity_{self.current_frame:03d}.bin', self.current_frame)
             expected_logits = self.opacity_update.canonical_logits().to(raw['opacity'])
-            if not torch.equal(raw['opacity'][:len(self.motion.owner)], expected_logits):
+            actual_point_opacity = point_full_raw['opacity'] if regional_full is not None else raw['opacity']
+            if not torch.equal(actual_point_opacity[:len(self.motion.owner)], expected_logits):
                 raise ValueError('Materialized old opacity differs from its sparse packet')
         feature_info = None
         if getattr(self, 'feature_dc_update', None) is not None:
@@ -2169,14 +2282,18 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 raise ValueError('Materialized old DC differs from its shared color packet')
         full_info = None
         if full_reference is not None:
-            selected = self._plan_regional_attribute_state['eligible'].detach().cpu()
-            if selected.dtype != torch.bool or selected.shape != (len(full_reference['sh_dc']),):
-                raise ValueError('Invalid gradient-probed full-attribute selection')
-            if int(selected.sum()) > regional_point_budget(self, len(selected)):
-                raise ValueError('Gradient-probed full-attribute selection exceeds its point budget')
-            for name, symbols in full.symbols().items():
-                if bool(symbols[~selected].ne(0).any()):
-                    raise ValueError(f'Full attribute {name} changed outside the selection')
+            if self.config.full_update.dense_color_200 and not self.config.full_update.regional_full_200:
+                if bool(full.symbols()['logscale'].ne(0).any()):
+                    raise ValueError('Dense color experiment must not change scale')
+            elif not self.config.full_update.dense_color_200:
+                selected = self._plan_regional_attribute_state['eligible'].detach().cpu()
+                if selected.dtype != torch.bool or selected.shape != (len(full_reference['sh_dc']),):
+                    raise ValueError('Invalid gradient-probed full-attribute selection')
+                if int(selected.sum()) > regional_point_budget(self, len(selected)):
+                    raise ValueError('Gradient-probed full-attribute selection exceeds its point budget')
+                for name, symbols in full.symbols().items():
+                    if bool(symbols[~selected].ne(0).any()):
+                        raise ValueError(f'Full attribute {name} changed outside the selection')
             sparse_color = (self.config.full_update.sparse_color_stream_v2 or
                             self.config.full_update.sparse_color_logscale_v3)
             if sparse_color:
@@ -2199,7 +2316,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                                     full_reference, self.current_frame, sparse_only=sparse_color)
             expected_full = full.canonical(full_reference)
             for name in FULL_ATTRIBUTE_FIELDS:
-                if not torch.equal(raw[name][:len(expected_full[name])].cpu(), expected_full[name]):
+                actual_point = point_full_raw[name] if regional_full is not None else raw[name]
+                if not torch.equal(actual_point[:len(expected_full[name])].cpu(), expected_full[name]):
                     raise ValueError(f'Materialized old {name} differs from its full attribute packet')
         point_mask_info = None
         if (self.full_update_active and self.config.full_update.color_only and
@@ -2280,9 +2398,10 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 topology_born_step=70,population_frozen_step=200)
             if self.config.birth.radiance_mode=='adaptive_residual_birth':
                 manifest['training_step_accounting'].update(population_frozen_step=70,final_alpha_cleanup_step=300)
+        gate_restart = self.config.rigid_tree.spatial_gate.joint_gate_start_step
         if getattr(self.config.birth,'frame_training_plan',False):
             manifest['training_step_accounting'] = dict(global_iterations=300, shared_adam_steps=self.early_shared_steps,
-                shared_gate=100, fixed_gate_residual=50, joint_gate_residual=30, final_motion=20,
+                shared_gate=100, fixed_gate_residual=gate_restart-101, joint_gate_residual=181-gate_restart, final_motion=20,
                 birth_steps=[200,250], cleanup_steps=[200,250,300],
                 old_opacity=(100 if self.config.birth.keep_incumbent_fixed_after_motion else 200),
                 old_attribute_optimizer_steps=200,
@@ -2299,7 +2418,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             if (not getattr(self, 'full_update_active', False) and
                     getattr(self.config.birth, 'keep_incumbent_alpha_after_motion', False)):
                 manifest['training_step_accounting']['old_opacity'] = 200
-            if self.full_update_active:
+            if self.full_update_active and not self.config.full_update.dense_color_200:
                 factor = self.motion._motion_lr_factor(200)
                 rates = dict(
                     xyz=self.config.rigid_tree.gs_translation_lr * factor * self.config.full_update.gradient_position_lr_scale,
@@ -2326,8 +2445,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                     global_iterations=300, shared_adam_steps=self.early_shared_steps - len(probe_steps),
                     shared_gate=self.config.rigid_tree.shared_discovery_steps,
                     joint_gate_residual_early=100-self.config.rigid_tree.shared_discovery_steps,
-                    fixed_gate_residual=50 - sum(101 <= step <= 150 for step in probe_steps),
-                    joint_gate_residual=30, final_motion=20,
+                    fixed_gate_residual=gate_restart-101 - sum(101 <= step < gate_restart for step in probe_steps),
+                    joint_gate_residual=181-gate_restart - sum(gate_restart <= step <= 180 for step in probe_steps), final_motion=20,
                     fixed_region_selected_gs_repair=repair_steps,
                     old_opacity_all_rows_steps=100 - sum(step <= 200 for step in probe_steps),
                     old_opacity_regional_repair_steps=repair_steps,
@@ -2347,13 +2466,41 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                     learning_rates_step_201=rates, learning_rates_step_300=final_rates,
                     reference='previous decoded frame',
                     attribute_packet='shortest of FUA1/FUA2/FUA3 or absent for zero')
+        if self.full_update_active and self.config.full_update.dense_color_200:
+            manifest['birth_events'] = []
+            manifest['training_step_accounting'] = dict(
+                global_iterations=200, shared_adam_steps=self.early_shared_steps,
+                shared_gate=self.config.rigid_tree.shared_discovery_steps,
+                joint_gate_residual_early=100-self.config.rigid_tree.shared_discovery_steps,
+                fixed_gate_residual=gate_restart-101, joint_gate_residual=181-gate_restart, final_motion=20,
+                motion_optimizer_steps=200, old_opacity_all_rows_steps=100,
+                all_point_color_steps=100, gradient_probe_steps=[],
+                birth_steps=[], cleanup_steps=[], newborn_updates=[], extra_SGD_steps=0)
+            manifest['dense_color_200'] = dict(fields=['sh_dc', 'sh_rest'],
+                start_step=101, end_step=200, selection='all points',
+                reference='previous decoded frame', train_views_per_step=1)
+            if self.config.full_update.regional_full_200:
+                manifest['dense_color_200']['fields'] = ['logscale', 'sh_dc', 'sh_rest']
+                manifest['regional_full_attributes'] = (Path(regional_full_info['path']).name if regional_full_info else None)
+                manifest['regional_full_timing'] = 'after_point_attributes_before_births'
+                manifest['training_step_accounting']['all_point_full_attribute_steps'] = 100
+                manifest['training_step_accounting']['regional_full_attribute_steps'] = 100
+                manifest['regional_full_rate_config'] = dict(
+                    attribute_aware_gate=self.config.full_update.attribute_aware_gate,
+                    gate_cost=('motion plus estimated regional attributes and point residuals after candidate rebase'
+                               if self.config.full_update.attribute_aware_gate else 'motion only'),
+                    regional_opacity_l1_weight=regional_full.opacity_l1_weight,
+                    point_sh_rest_rate_multiplier=self.config.full_update.point_sh_rest_rate_multiplier,
+                    joint_gate_start_step=gate_restart,
+                    gate_reopen_logit_limit=self.config.rigid_tree.spatial_gate.gate_reopen_logit_limit,
+                    gate_alpha_rebase='alpha-grid approximation after regional logit update')
         if getattr(self.config, 'ablation_motion_only', False):
             manifest['birth_events'] = []
             manifest['training_step_accounting'] = dict(
                 global_iterations=200, shared_adam_steps=self.early_shared_steps,
                 shared_gate=self.config.rigid_tree.shared_discovery_steps,
                 joint_gate_residual_early=100-self.config.rigid_tree.shared_discovery_steps,
-                fixed_gate_residual=50, joint_gate_residual=30, final_motion=20,
+                fixed_gate_residual=gate_restart-101, joint_gate_residual=181-gate_restart, final_motion=20,
                 motion_optimizer_steps=200, old_opacity_all_rows_steps=100,
                 sparse_attribute_update_steps=0, gradient_probe_steps=[],
                 birth_steps=[], cleanup_steps=[], newborn_updates=[], extra_SGD_steps=0)
@@ -2361,7 +2508,8 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 sparse_attribute_repair=False, per_point_motion_residual=True,
                 quantized_opacity_update=True, train_views_per_step=1)
         if getattr(self, 'gate_refine_image_ste', False):
-            manifest['gate_refine_image_ste'] = 'hard cut forward; candidate-total path-probability gate derivative at steps 151-180'
+            manifest['gate_refine_image_ste'] = (f'hard cut forward; candidate-total path-probability gate derivative '
+                f'at steps {self.config.rigid_tree.spatial_gate.joint_gate_start_step}-180')
         if self.opacity_update is not None:
             manifest.update(opacity_update=Path(opacity_info['path']).name if opacity_info else None,
                             opacity_update_timing='before_births')
@@ -2420,7 +2568,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 target.copy_(replayed_raw[name].to(device=target.device, dtype=target.dtype))
             self.motion.codec_previous_state = replayed_state
         if forward_check is not None:
-            self._capture_regional_full_debug = bool(self.config.full_update.regional_full_point_budget)
+            self._capture_regional_full_debug = full_debug
             after=self.forward(views[forward_check['camera']],training=False)['render'].detach().clamp(0,1)
             debug_after = getattr(self, '_regional_full_debug', None) if self._capture_regional_full_debug else None
             self._capture_regional_full_debug = False
@@ -2428,8 +2576,13 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             forward_check['max_abs'] = float(difference.max())
             forward_check['mean_abs'] = float(difference.mean())
             forward_check['tolerance'] = 1e-5
+            if full_debug and debug_before is not None and debug_after is not None:
+                forward_check['state_check'] = {name: dict(
+                    max_abs=float((value-debug_after[name]).abs().max()),
+                    changed_scalars=int(value.ne(debug_after[name]).sum()))
+                    for name, value in debug_before.items()}
             if not bool(torch.isfinite(difference).all()) or forward_check['max_abs'] > forward_check['tolerance']:
-                if self.config.full_update.regional_full_point_budget:
+                if full_debug:
                     path = Path(self.output_dir) / f'full_forward_debug_{self.current_frame:03d}.pth'
                     torch.save(dict(before=debug_before, after=debug_after, camera=forward_check['camera'],
                                     max_abs=forward_check['max_abs'], mean_abs=forward_check['mean_abs']), path)
@@ -2446,7 +2599,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
             previous_count=len(prior.xyz), retired_count=retired_count,
             total_count=len(raw['xyz']), motion=motion_info, birth=birth_info,
             opacity_update=opacity_info, feature_dc_update=feature_info,
-            logscale_update=logscale_info, regional_logscale_update=shared_scale_info, color_point_mask=point_mask_info, forward_decode_check=forward_check,
+            logscale_update=logscale_info, regional_logscale_update=shared_scale_info, regional_full_attributes=regional_full_info, color_point_mask=point_mask_info, forward_decode_check=forward_check,
             motion_observation_diagnostics=dict(
                 kind=('actual_compositing' if self.config.effective_motion_observations else 'frustum'),
                 frustum_samples=self.birth_control.get('motion_frustum_samples', 0),
@@ -2455,6 +2608,7 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                 scope='surviving GS; current motion optimization views; excludes birth and heldout renders'),
             stage_image_metrics=self.stage_image_metrics,
             encoded_bytes=motion_path.stat().st_size +
+                (regional_full_info['archive_bytes'] if regional_full_info else 0) +
                 (birth_info['archive_bytes'] if birth_info else 0) +
                 (opacity_info['archive_bytes'] if opacity_info else 0) +
                 (feature_info['archive_bytes'] if feature_info else 0) +
@@ -2499,11 +2653,21 @@ class Module(FramePlanController,EarlyReplacementController,BaseModule):
                            for name, item in terms['fields'].items()}}
             self.frame_report['semantics'] = ('Spatial gate motion and quantized births; '
                 'keyframe old log-scale, DC and higher-order SH use an additional coded delta.')
+        if regional_full is not None:
+            terms = regional_full.rate_terms(self._rate_byte_price(self.total_steps))
+            self.frame_report['regional_full_rate_diagnostics'] = dict(
+                semantics='raw sparse row estimate excluding packet headers; post-Adam proximal penalties',
+                raw_bytes_surrogate=float(terms['raw_bytes_surrogate']), l1_loss=float(terms['l1_loss']),
+                loss=float(terms['loss']), actual_packet_bytes=regional_full_info['archive_bytes'] if regional_full_info else 0,
+                opacity_l1_weight=regional_full.opacity_l1_weight,
+                fields={name:{key:(int(value) if key == 'active_regions' else float(value))
+                    for key,value in field.items()} for name,field in terms['fields'].items()})
         if self.full_update_active and self.config.full_update.color_only and not self.config.full_update.stop_after_motion:
             self.frame_report['semantics'] = ('Motion and opacity frozen after step200; quantized regional DC and selected point attributes fitted through step300; previous decoded frame used as reference.')
         if self.full_update_active and self.config.full_update.stop_after_motion:
-            self.frame_report['semantics'] = ('Spatial gate motion and opacity through step200; '
-                'fixed population; no post-motion updates; shared first frame counted once.')
+            self.frame_report['semantics'] = (('Regional and per-point quantized pose, scale, opacity and SH updates through step200; '
+                if self.config.full_update.regional_full_200 else 'Spatial gate motion and opacity through step200; all-point quantized SH color updates during steps 101–200; ')
+                + 'fixed population; no post-motion updates; shared first frame counted once.')
         if getattr(self.config, 'ablation_motion_only', False):
             self.frame_report['semantics'] = ('200 steps of shared gate motion, per-point motion residuals '
                 'and quantized opacity updates; no sparse attribute repair or births.')

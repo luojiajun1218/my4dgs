@@ -39,6 +39,14 @@ class GateImageSTETests(unittest.TestCase):
    m.refine_image_gate_ste=False;x0,r0=m(step,training=True)
    m.refine_image_gate_ste=True;x1,r1=m(step,training=True)
    self.assertTrue(torch.equal(x0,x1));self.assertTrue(torch.equal(r0,r1))
+ def test_motion_image_gate_proxy_follows_early_joint_schedule(self):
+  m=self.model();m.config.spatial_gate.joint_gate_start_step=131
+  m.refine_image_gate_ste=False;x0,r0=m(131,training=True)
+  self.assertIsNone(torch.autograd.grad(x0.square().sum(),m.gate_logits,allow_unused=True)[0])
+  m.refine_image_gate_ste=True;x1,r1=m(131,training=True)
+  self.assertTrue(torch.equal(x0,x1));self.assertTrue(torch.equal(r0,r1))
+  g=torch.autograd.grad(x1.square().sum(),m.gate_logits)[0]
+  self.assertGreater(float(g[m.split_eligible].abs().sum()),0.)
  def test_quantized_motion_survives_cut_switch_and_real_packet(self):
   m=self.model();m.refine_image_gate_ste=True;m(151,training=True)
   before=tuple(x.clone() for x in m._full_motion_symbols())

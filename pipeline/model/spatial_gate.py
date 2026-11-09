@@ -55,6 +55,8 @@ class SpatialGateConfig:
     refine_unselected_candidates: bool = False
     candidate_refinement_start_step: int = 151
     reset_gate_optimizer_on_refine: bool = False
+    joint_gate_start_step: int = 151
+    gate_reopen_logit_limit: Optional[float] = None
 
     def validate(self, motion_steps):
         if self.reference_layout is not None and (
@@ -77,10 +79,19 @@ class SpatialGateConfig:
         if (not isinstance(self.reset_gate_optimizer_on_refine, bool) or
                 (self.reset_gate_optimizer_on_refine and not self.frame_training_plan)):
             raise ValueError('Gate optimizer restart requires the frame training plan')
+        if (isinstance(self.joint_gate_start_step, bool) or
+                not isinstance(self.joint_gate_start_step, int) or
+                not 101 <= self.joint_gate_start_step <= 180 or
+                (self.joint_gate_start_step != 151 and not self.frame_training_plan)):
+            raise ValueError('Joint gate restart must be in 101..180 for the frame plan')
+        limit = self.gate_reopen_logit_limit
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, (int, float)) or
+                not math.isfinite(limit) or limit <= 0 or not self.frame_training_plan):
+            raise ValueError('Gate reopening limit requires a positive finite frame-plan value')
         if self.frame_training_plan and (self.training_schedule != 'joint' or
                 not self.shared_discovery or self.freeze_step != 180 or
                 self.gate_start_step != 0 or motion_steps != 200):
-            raise ValueError('Frame plan requires joint discovery, gate1..100/151..180, motion200')
+            raise ValueError('Frame plan requires joint discovery, gate freeze180 and motion200')
         relative_image = (self.region_motion == 'relative' and
                           self.image_relaxation == 'stochastic_ste' and
                           ((self.private_full_motion and

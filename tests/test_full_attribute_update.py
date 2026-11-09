@@ -75,6 +75,79 @@ def force_retire_at_events(module):
 
 class FullAttributeCodecTests(unittest.TestCase):
 
+    def test_sh_rest_rate_multiplier_only_changes_its_proximal_pruning(self):
+        cfg = FullUpdateConfig(per_attribute_l1_weight=0., point_sh_rest_rate_multiplier=.1)
+        ref = dict(logscale=torch.zeros(1, 3), sh_dc=torch.zeros(1, 1, 3),
+                   sh_rest=torch.zeros(1, 3, 3))
+        opt = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))])
+        update = FullAttributeUpdate(cfg)
+        update.setup(ref, opt, (.01, .01, .01))
+        for name in ('sh_dc', 'sh_rest'):
+            param = update.parameters[name]
+            with torch.no_grad():
+                param.reshape(-1)[0] = .01
+            opt.state[param] = {'step': torch.tensor(1.), 'exp_avg': torch.zeros_like(param),
+                                'exp_avg_sq': torch.full_like(param, .001)}
+        diagnostic = update.rate_terms(.001)
+        self.assertAlmostEqual(float(diagnostic['fields']['sh_rest']['rate_multiplier']), .1)
+        self.assertEqual(float(diagnostic['fields']['sh_dc']['rate_multiplier']), 1.)
+        update.after_step(opt, .001, proximal=True)
+        self.assertEqual(float(update.parameters['sh_dc'][0, 0, 0]), 0.)
+        self.assertNotEqual(float(update.parameters['sh_rest'][0, 0, 0]), 0.)
+
+    def test_fast_rate_accounting_preserves_loss(self):
+        reference = dict(logscale=torch.randn(4, 3), sh_dc=torch.randn(4, 1, 3),
+                         sh_rest=torch.randn(4, 3, 3))
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))])
+        update = FullAttributeUpdate(FullUpdateConfig(point_logscale_rate_multiplier=2.))
+        update.setup(reference, optimizer, (.005, .001, .001))
+        with torch.no_grad():
+            for parameter in update.parameters.values():
+                parameter.normal_(0, .003)
+        full = update.rate_terms(.008)
+        fast = update.rate_terms(.008, include_scalar_counts=False)
+        self.assertTrue(torch.equal(full['loss'], fast['loss']))
+        self.assertTrue(torch.equal(full['raw_bytes_surrogate'], fast['raw_bytes_surrogate']))
+        self.assertTrue(all('active_scalars' not in item for item in fast['fields'].values()))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required for cross-device quantization')
+    def test_cuda_half_bin_forward_matches_encoded_symbols(self):
+        ref = dict(logscale=torch.zeros(1, 3, device='cuda'),
+                   sh_dc=torch.zeros(1, 1, 3, device='cuda'),
+                   sh_rest=torch.zeros(1, 3, 3, device='cuda'))
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1, device='cuda'))])
+        update = FullAttributeUpdate(FullUpdateConfig())
+        update.setup(ref, optimizer, (.001, .001, .001))
+        with torch.no_grad():
+            update.parameters['sh_dc'][0, 0, 0] = -0.07750000059604645
+        forward = update.apply(ref)['sh_dc'].detach().cpu()
+        symbols = update.symbols()
+        cpu_ref = {name: value.cpu() for name, value in ref.items()}
+        packet = encode_full_attribute_delta(cpu_ref, symbols, frame_index=1, steps=(.001, .001, .001))
+        decoded = decode_full_attribute_delta(packet, cpu_ref, frame_index=1)
+        self.assertTrue(torch.equal(forward, decoded['sh_dc']))
+
+    def test_scale_rate_multiplier_only_changes_point_scale_pruning(self):
+        cfg = FullUpdateConfig(per_attribute_l1_weight=0., point_logscale_rate_multiplier=2.)
+        reference = dict(logscale=torch.zeros(1, 3), sh_dc=torch.zeros(1, 1, 3),
+                         sh_rest=torch.zeros(1, 3, 3))
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))])
+        update = FullAttributeUpdate(cfg)
+        update.setup(reference, optimizer, (.01, .01, .01))
+        for name in ('logscale', 'sh_dc'):
+            parameter = update.parameters[name]
+            with torch.no_grad():
+                parameter.reshape(-1)[0] = .01
+            optimizer.state[parameter] = {'step': torch.tensor(1.),
+                                          'exp_avg': torch.zeros_like(parameter),
+                                          'exp_avg_sq': torch.full_like(parameter, .001)}
+        diagnostic = update.rate_terms(.0006)
+        self.assertEqual(float(diagnostic['fields']['logscale']['rate_multiplier']), 2.)
+        self.assertEqual(float(diagnostic['fields']['sh_dc']['rate_multiplier']), 1.)
+        update.after_step(optimizer, .0006, proximal=True)
+        self.assertEqual(float(update.parameters['logscale'][0, 0]), 0.)
+        self.assertNotEqual(float(update.parameters['sh_dc'][0, 0, 0]), 0.)
+
     def test_zero_full_update_can_only_be_skipped_while_frozen_and_unchanged(self):
         reference = dict(logscale=torch.randn(4, 3), sh_dc=torch.randn(4, 1, 3),
                          sh_rest=torch.randn(4, 3, 3))
@@ -683,6 +756,24 @@ def fit_step(module, runner, step):
 
 
 class ImageLossTests(unittest.TestCase):
+    def test_reused_pixel_squares_preserve_rmse_gradient_and_psnr(self):
+        from libgs.metric import psnr
+        from pipeline.module import stabilized_rmse, _stabilized_rmse_from_mse
+        for device in (['cpu', 'cuda'] if torch.cuda.is_available() else ['cpu']):
+            torch.manual_seed(81)
+            image = torch.rand(3, 19, 23, device=device, requires_grad=True)
+            target = torch.rand_like(image)
+            original_loss = stabilized_rmse(image, target)
+            original_grad = torch.autograd.grad(original_loss, image)[0]
+            squares = (image - target).square()
+            reused_loss = _stabilized_rmse_from_mse(squares.mean())
+            reused_grad = torch.autograd.grad(reused_loss, image)[0]
+            channel_mse = squares.detach().view(image.shape[0], -1).mean(1, keepdim=True)
+            reused_psnr = (20 * torch.log10(1. / torch.sqrt(channel_mse))).mean()
+            self.assertTrue(torch.equal(original_loss, reused_loss))
+            self.assertTrue(torch.equal(original_grad, reused_grad))
+            self.assertTrue(torch.equal(psnr(image.detach(), target), reused_psnr))
+
     def test_rmse_has_finite_zero_and_emphasizes_larger_pixel_errors(self):
         from pipeline.module import stabilized_rmse
         target = torch.zeros(1, 1, 2)

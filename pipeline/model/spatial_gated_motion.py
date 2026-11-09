@@ -195,13 +195,19 @@ class SpatialGatedMotion(MotionBase):
             return
         previous_step=self.last_step
         self.last_step = int(step)
+        restart = self.config.spatial_gate.joint_gate_start_step
+        reopening = previous_step < restart <= self.last_step <= 180
         if (self.config.spatial_gate.reset_gate_optimizer_on_refine and
-                previous_step < 151 <= self.last_step <= 180):
+                reopening):
             # The gate now prices an existing full-motion representation,
             # rather than fitting the first shared-only images. Its old
             # image moments must not govern this different objective.
             self.optimizer.state.pop(self.gate_logits,None)
-        gate = step <= 100 or 151 <= step <= 180
+        limit = self.config.spatial_gate.gate_reopen_logit_limit
+        if reopening and limit is not None:
+            # Preserve every hard decision while making saturated logits learnable.
+            self.gate_logits.clamp_(-limit, limit)
+        gate = step <= 100 or restart <= step <= 180
         tail_steps = self.config.spatial_gate.final_joint_refine_steps
         motion = step <= 200 or bool(tail_steps and 301-tail_steps <= step <= 300)
         self._hard_gate_frozen = not gate
@@ -948,7 +954,8 @@ class SpatialGatedMotion(MotionBase):
             xyz = self.base_xyz + shared_t + gt
             rotation_vector = shared_r + gr
             if (training and getattr(self, 'refine_image_gate_ste', False) and
-                    self.config.spatial_gate.frame_training_plan and 151 <= step <= 180):
+                    self.config.spatial_gate.frame_training_plan and
+                    self.config.spatial_gate.joint_gate_start_step <= step <= 180):
                 if self._hard_gate_frozen or not self.shared_image_recode or self.hierarchical_private or self.private_full_motion:
                     raise ValueError('Gate image STE requires the unfrozen physical-recoding frame plan')
                 # A path's alternatives use each candidate's quantized region
@@ -1866,7 +1873,7 @@ class SpatialGatedMotion(MotionBase):
         cfg = self.config.spatial_gate
         edits = []
         if cfg.frame_training_plan:
-            if self.last_step <= 100 or 151 <= self.last_step <= 180:
+            if self.last_step <= 100 or cfg.joint_gate_start_step <= self.last_step <= 180:
                 edits = self._select_frontier(freeze=self.last_step in (100, 180))
             if self.last_step >= self.config.shared_discovery_steps:
                 self._shared_field_active = False

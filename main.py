@@ -45,10 +45,11 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
     if full_update.get("enabled", False):
         supported = {"enabled", "gradient_position_lr_scale", "audit_camera_sequence",
                      "gradient_diagnostics", "logscale_step", "sh_dc_step", "sh_rest_step",
-                     "storage_loss_enabled", "per_attribute_l1_weight", "point_dc_rate_scale",
+                     "storage_loss_enabled", "per_attribute_l1_weight", "point_dc_rate_scale", "point_logscale_rate_multiplier", "point_sh_rest_rate_multiplier",
                      "probe_views_per_round", "probe_opacity_weight", "point_budget_fraction", "repair_temporal_weight",
                      "repair_temporal_scale", "repair_temporal_lag", "repair_rmse_mix", "motion_rmse_mix",
-                     "early_joint_repair", "early_probe_attribute_only", "shared_region_orientation"}
+                     "early_joint_repair", "dense_color_200", "regional_full_200", "attribute_aware_gate",
+                     "regional_opacity_l1_weight", "early_probe_attribute_only", "shared_region_orientation"}
         unsupported = sorted(set(full_update) - supported)
         if unsupported:
             raise ValueError(f"Retired full-update training options: {unsupported}. "

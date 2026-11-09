@@ -269,6 +269,26 @@ class RegionalStatsCUDA(unittest.TestCase):
 
 
 class CompatibilityTests(unittest.TestCase):
+    def test_stable_backward_covers_200_step_full_attribute_training(self):
+        from types import SimpleNamespace
+        from pipeline.module import stable_covariance_backward_active
+        cfg = SimpleNamespace(stable_tail_covariance_backward=True,
+                              full_update=SimpleNamespace(regional_repair=True, regional_full_200=True))
+        module = SimpleNamespace(config=cfg, full_update_active=True, frame_prepared=True,
+                                 frame_finalized=False, motion_steps=200,
+                                 trainer=SimpleNamespace(global_step=1))
+        for step in (1, 100, 101, 151, 200):
+            module.trainer.global_step = step
+            self.assertTrue(stable_covariance_backward_active(module, True))
+        self.assertFalse(stable_covariance_backward_active(module, False))
+        module.frame_finalized = True
+        self.assertFalse(stable_covariance_backward_active(module, True))
+        module.frame_finalized = False
+        cfg.full_update.regional_full_200 = False
+        self.assertFalse(stable_covariance_backward_active(module, True))
+        module.trainer.global_step = 201
+        self.assertTrue(stable_covariance_backward_active(module, True))
+
     def test_legacy_three_outputs_observed_semantics_and_backward_arity_stay_unchanged(self):
         count = 2
         xyz = torch.zeros(count, 3, requires_grad=True)

@@ -101,6 +101,31 @@ def controller_fixture(directory,budget=False,shared_colour=False):
 
 
 class FramePlanMotionTests(unittest.TestCase):
+    def test_early_gate_reopening_preserves_hard_decisions(self):
+        model = motion_fixture()
+        cfg = model.config.spatial_gate
+        cfg.joint_gate_start_step = 131
+        cfg.gate_reopen_logit_limit = 2.
+        cfg.reset_gate_optimizer_on_refine = True
+        model.config.validate()
+        model.prepare_plan_step(130)
+        self.assertFalse(model.gate_logits.requires_grad)
+        with torch.no_grad():
+            model.gate_logits.copy_(torch.linspace(-6., 6., len(model.gate_logits)))
+        before = model.gate_logits.detach().clone()
+        model.optimizer.state[model.gate_logits]['step'] = torch.tensor(7.)
+        model.prepare_plan_step(131)
+        self.assertTrue(model.gate_logits.requires_grad)
+        self.assertTrue(torch.equal(before.ge(0), model.gate_logits.detach().ge(0)))
+        self.assertLessEqual(float(model.gate_logits.detach().abs().max()), 2.)
+        self.assertNotIn(model.gate_logits, model.optimizer.state)
+        with torch.no_grad():
+            model.gate_logits[0] = 3.
+        model.prepare_plan_step(132)
+        self.assertEqual(float(model.gate_logits[0]), 3.)
+        model.prepare_plan_step(181)
+        self.assertFalse(model.gate_logits.requires_grad)
+
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)

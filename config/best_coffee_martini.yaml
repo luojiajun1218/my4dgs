@@ -21,7 +21,7 @@ data:
   validation_camera_names: null
   white_background: false
 detect_anomaly: false
-experiment_name: coffee_best_prox10_300frames_20261109
+experiment_name: coffee_best_fullattr_gate_200step_300frames_20261109
 gui_enabled: false
 gui_ip: 127.0.0.1
 gui_port: 6009
@@ -95,6 +95,12 @@ module:
     motion_rmse_mix: 0.8
     repair_rmse_mix: 0.8
     repair_temporal_weight: 0.0
+    dense_color_200: true
+    point_dc_rate_scale: 4.0
+    regional_full_200: true
+    point_logscale_rate_multiplier: 2.0
+    attribute_aware_gate: true
+    regional_opacity_l1_weight: 0.005
   effective_motion_observations: true
   feature_dc_update:
     decay_with_motion: true
@@ -188,7 +194,7 @@ module:
     region_translation_lr: 0.0003246817779541016
     relative_motion_loss_weight: 1.0
     relative_motion_units: extent_radians
-    rotation_updates: false
+    rotation_updates: true
     sparse_rate_width_bins: 1.0
     spatial_gate:
       candidate_refinement_start_step: 101
@@ -244,13 +250,10 @@ trainer:
   saving_ckpt_every_n_frames: 1000
   saving_ckpt_frames:
   - 1
-  - 10
-  - 29
+  - 30
   - 99
   - 199
   - 299
-  - 30
   saving_ckpt_steps:
   - 200
-  - 300
   stage_image_camera: null

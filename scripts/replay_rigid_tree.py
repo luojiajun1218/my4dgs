@@ -161,6 +161,16 @@ def decode_frame(directory: Path, frame: int, state, raw):
             raise ValueError('Color-only residual packet changed non-DC attributes')
     elif (directory / f'fullattr_{frame:03d}.bin').exists():
         raise ValueError('Unexpected full attribute packet absent from frame manifest')
+    regional_name = manifest.get('regional_full_attributes')
+    if regional_name is not None:
+        from pipeline.model.regional_full_attributes import decode_regional_full
+        if (regional_name != f'regfull_{frame:03d}.bin' or
+                manifest.get('regional_full_timing') != 'after_point_attributes_before_births'):
+            raise ValueError('Invalid regional full attribute packet timing')
+        current.update(decode_regional_full((directory / regional_name).read_bytes(), current,
+            decoded.owner[:old_count], len(decoded.parents), frame))
+    elif (directory / f'regfull_{frame:03d}.bin').exists():
+        raise ValueError('Unexpected regional full attribute packet')
     birth_file = directory / f'birth_{frame:03d}.bin'
     if birth_count:
         newborn = birth_codec.decode_birth_attributes(

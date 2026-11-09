@@ -257,8 +257,10 @@ def validate_sequence_extension(checkpoint, current_data_config,
     config = checkpoint.get('rigid_tree_config') or {}
     terminal_step = config.get('motion_steps', 0) + config.get('birth_steps', 0)
     terminal_step += config.get('post_birth_motion_steps', 0)
+    saved_full = (checkpoint.get('rigid_tree_module_config') or {}).get('full_update', {})
     if (checkpoint.get('birth_allocation') == 'frame_training_plan_v1' and
-            (checkpoint.get('rigid_tree_module_config') or {}).get('full_update', {}).get('stop_after_motion') is True):
+            (saved_full.get('stop_after_motion') is True or
+             (saved_full.get('enabled') is True and saved_full.get('dense_color_200') is True))):
         terminal_step = config.get('motion_steps', 0)
     if config.get('online_flat_clustering'):
         terminal_step += config.get('post_partition_steps', 0)
@@ -427,6 +429,8 @@ def validate_sequence_extension(checkpoint, current_data_config,
         for field, stem in (('birth', 'birth'), ('opacity_update', 'opacity'),
                             ('feature_dc_update', 'shdc'),
                             ('logscale_update', 'logscale'),
+                            ('regional_logscale_update', 'regscale'),
+                            ('regional_full_attributes', 'regfull'),
                             ('full_attribute_update', 'fullattr')):
             name = manifest.get(field)
             if name is not None:
@@ -436,6 +440,10 @@ def validate_sequence_extension(checkpoint, current_data_config,
                         manifest.get('full_update') is not True or
                         manifest.get('full_attribute_update_timing') != 'after_regional_dc_before_births'):
                     raise ValueError('Prefix full attributes have an invalid decode order')
+                if field == 'regional_logscale_update' and manifest.get('regional_logscale_update_timing') != 'before_full_attribute_update':
+                    raise ValueError('Prefix regional scale has an invalid decode order')
+                if field == 'regional_full_attributes' and manifest.get('regional_full_timing') != 'after_point_attributes_before_births':
+                    raise ValueError('Prefix regional full attributes have an invalid decode order')
                 relative_files.add(f'frame_storage/rigid_tree/{name}')
         diagnostic = (manifest.get('regional_attribute_repair') or {}).get('diagnostic_sidecar')
         if diagnostic is not None:
