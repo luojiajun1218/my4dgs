@@ -1,13 +1,10 @@
-"""Run the original ReCon-GS static trainer with safe mid-frame clock setup.
+"""首帧静态 GS 训练入口及可选的增密、多视角和颜色微调策略。
 
-The external source tree is read only. The local Trainer subclass starts its
-frame timer on resume. --colour-only freezes geometry and opacity while native
-SH fitting, rendering and checkpointing continue in the original implementation.
+负责命令行配置、首帧续训，以及可选的多视角、增密预算和颜色微调策略。
+静态训练模型与调度核心位于 pipeline/first_frame；本文件不训练后续动态帧。
 """
 import argparse
 import hashlib
-import importlib
-import importlib.util
 import json
 import math
 from pathlib import Path
@@ -16,9 +13,22 @@ from typing import Iterable
 
 import torch
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 
 STATIC_FIELDS = ('_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity')
 COLOUR_FIELDS = ('_features_dc', '_features_rest')
+
+
+def _top_candidates(mask, score, limit):
+    """Return eligible indices in stable descending score order."""
+    candidates = mask.nonzero(as_tuple=True)[0]
+    count = min(limit, len(candidates))
+    if not count:
+        return candidates[:0]
+    order = torch.argsort(score[candidates], descending=True, stable=True)
+    return candidates[order[:count]]
 
 
 @torch.no_grad()
@@ -140,12 +150,8 @@ def coverage_budgeted_selection(gradient_sum, observations, sample_count, scalin
     scale = scaling.max(dim=1).values
     small = scale <= float(percent_dense) * float(scene_extent)
     eligible = score >= float(grad_threshold)
-    candidates = eligible.nonzero(as_tuple=True)[0]
-    count = min(remaining, len(candidates))
     selected = torch.zeros(len(score), dtype=torch.bool, device=score.device)
-    if count:
-        order = torch.argsort(score[candidates], descending=True, stable=True)
-        selected[candidates[order[:count]]] = True
+    selected[_top_candidates(eligible, score, remaining)] = True
     return dict(selected=selected, clone=selected & small, split=selected & ~small,
                 native_gradient=native, coverage=support, score=score,
                 eligible=eligible)
@@ -208,21 +214,13 @@ def camera_frontier_budgeted_selection(gradient_sum, observations,
     for turn in range(camera_count):
         index = (camera_offset + turn) % camera_count
         quota = base + (turn < extra)
-        candidates = (camera_eligible[index] & ~selected).nonzero(as_tuple=True)[0]
-        count = min(quota, len(candidates))
-        if count:
-            order = torch.argsort(frontier_score[index, candidates],
-                                  descending=True, stable=True)
-            selected[candidates[order[:count]]] = True
-        allocations[index] = int(count)
+        chosen = _top_candidates(camera_eligible[index] & ~selected, frontier_score[index], quota)
+        selected[chosen] = True
+        allocations[index] = len(chosen)
     frontier_selected = selected.clone()
     slots = remaining - int(selected.sum())
     if slots:
-        candidates = (safe_eligible & ~selected).nonzero(as_tuple=True)[0]
-        count = min(slots, len(candidates))
-        if count:
-            order = torch.argsort(coverage_score[candidates], descending=True, stable=True)
-            selected[candidates[order[:count]]] = True
+        selected[_top_candidates(safe_eligible & ~selected, coverage_score, slots)] = True
     scale = scaling.max(dim=1).values
     small = scale <= float(percent_dense) * float(scene_extent)
     selected_below_gate = selected & ~safe_eligible
@@ -433,9 +431,12 @@ def install_high_order_only_training(model, preserve_sh_degree):
     return rest.register_hook(mask_low_order), preserved
 
 
+def tensor_sha256(value):
+    return hashlib.sha256(value.detach().contiguous().cpu().numpy().tobytes()).hexdigest()
+
+
 def static_field_digests(model):
-    return {name: hashlib.sha256(getattr(model, name).detach().contiguous().cpu().numpy().tobytes()).hexdigest()
-            for name in STATIC_FIELDS}
+    return {name: tensor_sha256(getattr(model, name)) for name in STATIC_FIELDS}
 
 
 def verify_colour_only(before, after):
@@ -456,6 +457,8 @@ def main():
     parser.add_argument('--name')
     parser.add_argument('--output-dir',type=Path,
         help='Override the config output root so a candidate never reuses a historical run')
+    parser.add_argument('--data-root',type=Path,
+        help='Override the frame-0 scene data root in the config')
     parser.add_argument('--sh-degree',type=int,choices=range(4),
         help='Override the static model SH degree for a new shared-reference candidate')
     parser.add_argument('--num-init-steps',type=int,
@@ -484,26 +487,11 @@ def main():
     parser.add_argument('--preserve-sh-degree', type=int, choices=range(3),
         help='With --colour-only, preserve DC and SH through this degree bit-exact; '
              'fit only newly added higher-order coefficients')
-    parser.add_argument('--recon-root',type=Path,
-        default=Path('/home/gamer-02/Documents/DeepLearning/ReCon-GS'))
     args=parser.parse_args()
     from omegaconf import OmegaConf
     from libgs.utils.config import to_structured
-    # The local project supplies a compatibility alias for pipeline.ReCon-GS.
-    # Load the external static implementation under its own package name so
-    # that this entry point cannot silently resolve to the dynamic pipeline.
-    native_dir = args.recon_root.resolve() / 'pipeline' / 'ReCon-GS'
-    native_name = '_my4dgs_native_recongs_static'
-    spec = importlib.util.spec_from_file_location(
-        native_name, native_dir / '__init__.py',
-        submodule_search_locations=[str(native_dir)])
-    if spec is None or spec.loader is None:
-        raise ImportError(f'Cannot load native static pipeline from {native_dir}')
-    native = importlib.util.module_from_spec(spec)
-    sys.modules[native_name] = native
-    spec.loader.exec_module(native)
-    Config, Pipeline = native.Config, native.Pipeline
-    trainer_native=importlib.import_module(native.Trainer.__module__)
+    import pipeline.first_frame as native
+    from pipeline.first_frame import trainer as trainer_native
 
     class MultiViewModule(native.Module):
         @torch.no_grad()
@@ -597,12 +585,10 @@ def main():
             if args.preserve_sh_degree is not None:
                 sh_hook, preserved = install_high_order_only_training(
                     self.module.gaussians, args.preserve_sh_degree)
-                preserved_before = hashlib.sha256(
-                    self.module.gaussians._features_rest[:, :preserved].detach()
-                    .contiguous().cpu().numpy().tobytes()).hexdigest()
+                preserved_before = tensor_sha256(self.module.gaussians._features_rest[:, :preserved])
             trainable = [name for name in STATIC_FIELDS
                          if getattr(self.module.gaussians, name).requires_grad]
-            if self.is_first_frame and self.global_step>0:
+            if self.global_step > 0:
                 self.module.timer.clock('frame').start()
             try:
                 result = (super().frame_training_loop()
@@ -616,9 +602,7 @@ def main():
                        [name for name in STATIC_FIELDS if before[name] != after[name]])
             preserved_after = None
             if preserved is not None:
-                preserved_after = hashlib.sha256(
-                    self.module.gaussians._features_rest[:, :preserved].detach()
-                    .contiguous().cpu().numpy().tobytes()).hexdigest()
+                preserved_after = tensor_sha256(self.module.gaussians._features_rest[:, :preserved])
                 if preserved_before != preserved_after:
                     raise ValueError('Preserved low-order SH changed during high-order fit')
             report = dict(colour_only=args.colour_only, start_step=start_step,
@@ -727,9 +711,14 @@ def main():
                     self.validation_loop()
             self.global_step = 0
 
-    native.Module=MultiViewModule
-    native.Trainer=ResumeTrainer
-    config,extra=to_structured(OmegaConf.load(args.config.resolve()),Config)
+    class FirstFramePipeline(native.Pipeline):
+        def setup_trainer_and_modules(self):
+            output_dir = Path(self.config.output_dir) / self.config.experiment_name
+            self.datamodule = native.DataModule(self.config.data)
+            self.module = MultiViewModule(self.config.module, datamodule=self.datamodule)
+            self.trainer = ResumeTrainer(self.config.trainer, output_dir=output_dir)
+
+    config,extra=to_structured(OmegaConf.load(args.config.resolve()),native.Config)
     if extra:raise ValueError(f'Unrecognized first-frame config: {extra}')
     if config.data.extra_dataset_kwargs.get('num_frames')!=1:
         raise ValueError('This entry is limited to one static first frame')
@@ -763,6 +752,9 @@ def main():
     if args.checkpoint is not None:config.ckpt_path=args.checkpoint.resolve()
     if args.name is not None:config.experiment_name=args.name
     if args.output_dir is not None:config.output_dir=args.output_dir.resolve()
+    if args.data_root is not None:config.data.root=str(args.data_root.resolve())
+    if not config.data.root:
+        raise ValueError('Set data.root in the config or pass --data-root')
     if args.sh_degree is not None:config.module.sh_degree=args.sh_degree
     if args.num_init_steps is not None:
         if args.num_init_steps < 1:raise ValueError('--num-init-steps must be positive')
@@ -771,11 +763,11 @@ def main():
         if args.max_gaussians < 1:raise ValueError('--max-gaussians must be positive')
         config.module.densify.max_gaussians=args.max_gaussians
     if args.validate_only:
-        print(f'Static pipeline: {native_dir}; steps: {config.trainer.num_init_steps}; '
+        print(f'Static pipeline: pipeline.first_frame; steps: {config.trainer.num_init_steps}; '
               f'GS cap: {config.module.densify.max_gaussians}; views/step: {args.views_per_step}; '
               f'data: {config.data.root}')
         return
-    Pipeline(config).run()
+    FirstFramePipeline(config).run()
 
 
 if __name__=='__main__':main()

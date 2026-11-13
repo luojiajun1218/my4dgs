@@ -6,7 +6,7 @@
 
 原运行 `output/experiments/coffee_fullattr_gate_alpha005_200step_300frames_20261109/20261109T131529_409a68` 在 frame 208 完成时的前向与解码图像一致性检查处退出。前向量化与编码取整使用不同设备，在半格点附近存在可复现的 CPU/CUDA 取整不一致隐患；后续让编码使用训练设备上的量化结果，并修复区域透明度相同的设备差异。原 frame 208 的现场未保存各属性差异，不能断言该隐患就是此次报错的唯一原因；一致性阈值没有放宽。
 
-完整序列通过 checkpoint 安全接续：frame 0–199 沿用原结果，frame 200–207 从 frame 199 checkpoint 重新训练，frame 208–210 及其后用修正后代码训练。最终运行 `output/experiments/coffee_fullattr_gate_alpha005_resume210_300frames_20261109/20261109T150159_61cdb0`，配置 `config/coffee_fullattr_gate_alpha005_resume210_300frames_20261109.yaml`。因此这是带恢复的单条递推序列，而非原始运行不间断完成。旧输出未修改；每次恢复都核验前缀码流、数据身份和 checkpoint。
+完整序列通过 checkpoint 安全接续：frame 0–199 沿用原结果，frame 200–207 从 frame 199 checkpoint 重新训练，frame 208–210 及其后用修正后代码训练。最终运行 `output/best/coffee_martini`，配置 `config/coffee_fullattr_gate_alpha005_resume210_300frames_20261109.yaml`。因此这是带恢复的单条递推序列，而非原始运行不间断完成。旧输出未修改；每次恢复都核验前缀码流、数据身份和 checkpoint。
 
 ## 完整结果
 

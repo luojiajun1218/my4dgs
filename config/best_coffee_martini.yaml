@@ -13,12 +13,10 @@ data:
     num_frames: 300
   first_frame_eval_train: false
   resolution: -1
-  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/colmap4d/coffee_martini_half_no13
+  root: /home/gamer-02/Documents/DeepLearning/my4dgs/data/n3dv/coffee_martini
   shuffle: true
   split_train_test: true
-  training_camera_names: null
   training_view_seed: 0
-  validation_camera_names: null
   white_background: false
 detect_anomaly: false
 experiment_name: coffee_best_fullattr_gate_200step_300frames_20261109
@@ -28,69 +26,25 @@ gui_port: 6009
 mode: train
 module:
   birth:
-    alpha_sparsity_weight: 0.0
-    anchor_sfm_path: null
-    appearance_candidates: 0
-    appearance_source_max_scale_extent: 0.05
-    clone_sigma_scale: 0.3
-    densification_stats_steps: 30
-    densify_grad_threshold: 0.0001
-    densify_interval: 40
-    densify_until_step: 0
     frame_training_plan: true
     initial_alpha: null
     joint_old_opacity: true
-    keep_incumbent_fixed_after_motion: false
-    lr_final_ratio: 0.1
-    max_new_gaussians: 1000
     mechanism: residual_transaction
-    new_logscale_step: 0.001
-    new_max_screen_size: 64.0
-    new_opacity_step: 0.01
     new_rotation_step: 0.001
-    new_sh_step: 0.001
     new_xyz_step_extent: 1.0e-05
     opacity_threshold: 0.01
     photometric_loss: l1
     population_loss_weight: 0.0
     population_rate_exempt: false
-    prune_large: false
     radiance_mode: adaptive_residual_birth
     regional_postfit_admission: false
     replace_low_opacity: false
-    residual:
-      depth_planes: 64
-      match_cost_limit: 0.25
-      max_candidates: 1000
-      max_cohorts: 2
-      max_gaussians: 250000
-      max_groups: 8
-      proposal_views: 8
-      repair_candidates: 0
-      residual_floor: 0.03
-      validation_tolerance: 0.0001
-      validation_views: 4
-      voxel_extent: 0.002
-    residual_colour_gain: 0.5
-    residual_colour_init: true
-    residual_colour_max_rgb_delta: 0.05
-    residual_support_init: true
     rotation_updates: true
-    source_covariance_init: true
     source_handoff: false
-    source_position_limit_sigma: null
-    source_position_min_extent: 0.0
     storage_loss_enabled: false
-    storage_loss_strength: 1.0
-    storage_ramp_steps: 1
-    storage_warmup_steps: 0
-    survival_aware_storage: false
   full_update:
     enabled: true
-    gradient_position_lr_scale: 0.25
     audit_camera_sequence: true
-    probe_views_per_round: 4
-    point_budget_fraction: 0.01
     early_joint_repair: true
     motion_rmse_mix: 0.8
     repair_rmse_mix: 0.8
@@ -105,11 +59,11 @@ module:
   feature_dc_update:
     decay_with_motion: true
     enabled: false
-    gate_joint: true
+    gate_joint: false
     joint_with_birth: true
     l1_weight: 0.005
     learning_rate: 0.0025
-    sharing: spatial_region
+    sharing: per_gs
     step: 0.01
   gaussian:
     feature_lr: 0.0025

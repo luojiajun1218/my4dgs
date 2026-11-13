@@ -1,8 +1,9 @@
-"""Shared motion optimization utilities and historical rigid-stream pose math.
+"""运动配置、共享基础工具及历史刚体码流的位姿计算。
 
-The active trainer uses SpatialGatedMotion. Parent/pivot composition below is
-retained only to decode historical packets; it is not a training method.
+提供 MotionBase、运动优化辅助、旋转与量化工具；当前空间运动训练在 spatial_motion_training.py。
+父子旋转中心组合主要服务历史刚体码流，但文件中也有当前训练和码流共用的函数。
 """
+
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import math
@@ -11,7 +12,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from .spatial_gate import SpatialGateConfig
+from .spatial_region_gate import SpatialGateConfig
 
 
 @dataclass
@@ -400,17 +401,32 @@ class MotionBase(nn.Module):
         self.flat_region_diagnostics = {}
 
     @property
+    def region_translation(self):
+        return self.regional_motion.translation
+
+    @property
+    def region_rotation(self):
+        return self.regional_motion.rotation
+
+    @property
     def steps(self):
-        """Regional translation/rotation steps (legacy public property)."""
-        return self.base_xyz.new_tensor(
-            [self.config.motion_xyz_step_extent * self.extent] * 3 +
-            [self.config.motion_rotation_step_rad] * 3)
+        """Regional translation/rotation quantization steps."""
+        from .regional_attributes_update import RegionalMotionAttributes
+        return RegionalMotionAttributes.quantization_steps(self.base_xyz, self.config, self.extent)
 
 
     @property
+    def gs_translation(self):
+        return self.residual_motion.translation
+
+    @property
+    def gs_rotation(self):
+        return self.residual_motion.rotation
+
+    @property
     def gs_steps(self):
-        return self.base_xyz.new_tensor([self.config.gs_xyz_step_extent * self.extent] * 3 +
-                                        [self.config.gs_rotation_step_rad] * 3)
+        from .residual_gs_attributes_update import ResidualGSMotionAttributes
+        return ResidualGSMotionAttributes.quantization_steps(self.base_xyz, self.config, self.extent)
 
 
     @property
@@ -498,9 +514,11 @@ class MotionBase(nn.Module):
         index_cost = id_lengths + 1
         price = self.effective_rate_loss_weight * ramp / self.rate_normalization_bytes
         if block_bytes is None:
-            both = (active_t | active_r).to(index_cost) * index_cost + 6 * (active_t.to(index_cost) + active_r.to(index_cost))
-            only_t = active_t.to(index_cost) * (index_cost + 6)
-            only_r = active_r.to(index_cost) * (index_cost + 6)
+            from .storage_rate import raw_motion_block_bytes
+            active_t, active_r = active_t.to(index_cost), active_r.to(index_cost)
+            both = raw_motion_block_bytes(active_t, active_r, index_cost)
+            only_t = raw_motion_block_bytes(active_t, active_r * 0, index_cost)
+            only_r = raw_motion_block_bytes(active_t * 0, active_r, index_cost)
         else:
             both, only_t, only_r = block_bytes
         cost_both = price * both
@@ -527,31 +545,14 @@ class MotionBase(nn.Module):
 
 
     def _hard_motion_bytes(self):
-        rt, rr, gt, gr = self._values(hard=True)
-        r_t = rt[1:].ne(0).any(-1)
-        r_r = rr[1:].ne(0).any(-1)
-        g_t = gt.ne(0).any(-1)
-        g_r = gr.ne(0).any(-1)
-        def sparse_bytes(active_t, active_r):
-            rows = torch.where(active_t | active_r)[0]
-            # Each sparse section restarts at -1: first gap=row+1, then
-            # positive differences between consecutive active row IDs.
-            gaps = torch.diff(torch.cat((rows.new_tensor([-1]), rows)))
-            id_bytes = torch.ones_like(gaps)
-            for shift in range(7, 63, 7):
-                id_bytes += (gaps >= (1 << shift)).to(id_bytes)
-            return (id_bytes.sum() + rows.numel() +
-                    6 * (active_t.sum() + active_r.sum()) +
-                    _varint_length(rows.numel()))
-        return sparse_bytes(r_t, r_r) + sparse_bytes(g_t, g_r)
+        from .storage_rate import hard_motion_bytes
+        return hard_motion_bytes(self)
 
 
     def _make_optimizer(self):
         self.optimizer = torch.optim.Adam([
-            dict(params=[self.region_translation], lr=self.config.region_translation_lr),
-            dict(params=[self.region_rotation], lr=self.config.region_rotation_lr),
-            dict(params=[self.gs_translation], lr=self.config.gs_translation_lr),
-            dict(params=[self.gs_rotation], lr=self.config.gs_rotation_lr)],
+            *self.regional_motion.optimizer_groups(self.config),
+            *self.residual_motion.optimizer_groups(self.config)],
             betas=tuple(self.config.adam_betas), eps=self.config.adam_eps)
 
 
@@ -627,7 +628,7 @@ class MotionBase(nn.Module):
         self.rate_multiplier=float(packet.get('rate_multiplier',1.))
         if self.rate_multiplier != 1.:
             raise ValueError('Feedback-trained motion checkpoints are replay-only')
-        from .rigid_tree_codec import DecodedState
+        from .frame_stream_format import (DecodedState)
         state = packet['codec_previous_state']
         self.codec_previous_state = None if state is None else DecodedState.restore(state)
         reference = packet.get('frame_reference_state')
@@ -648,8 +649,16 @@ class MotionBase(nn.Module):
             raise ValueError('Checkpoint needs a positive shared-reference GS count')
         self.rate_reference_count = reference_count
         self.extent = packet['extent']
-        for name, value in packet['parameters'].items():
-            setattr(self, name, nn.Parameter(value.detach().clone()))
+        from .regional_attributes_update import RegionalMotionAttributes
+        parameters = packet['parameters']
+        self.regional_motion = RegionalMotionAttributes.from_tensors(
+            parameters['region_translation'], parameters['region_rotation'])
+        from .residual_gs_attributes_update import ResidualGSMotionAttributes
+        self.residual_motion = ResidualGSMotionAttributes.from_tensors(
+            parameters['gs_translation'], parameters['gs_rotation'])
+        for name, value in parameters.items():
+            if name not in ('region_translation', 'region_rotation', 'gs_translation', 'gs_rotation'):
+                setattr(self, name, nn.Parameter(value.detach().clone()))
         self._make_optimizer()
         self.optimizer.load_state_dict(packet['optimizer'])
         self.frame_index = packet['frame_index']

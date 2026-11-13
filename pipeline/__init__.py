@@ -1,12 +1,10 @@
-"""Project pipeline implementation with lazy libgs entry-point exports."""
+"""pipeline 包的公开入口。
+
+按需导出 entry.py 中的配置、管线、数据模块、模型和训练器，供 libgs 加载；
+具体实现分别放在对应文件中，避免在包初始化时加载整个训练流程。
+"""
 
 from importlib import import_module
-import sys
-
-from ._compat import install_aliases
-
-
-install_aliases(sys.modules[__name__])
 
 __all__ = ['Config', 'Pipeline', 'DataConfig', 'DataModule', 'Module',
            'ModuleConfig', 'Trainer', 'TrainerConfig']

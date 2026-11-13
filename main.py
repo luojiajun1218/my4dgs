@@ -16,8 +16,7 @@ from libgs.pipeline.loader import load_pipeline
 from libgs.utils.config import to_structured, to_yaml
 from libgs.utils.git import get_git_commit_hash
 
-#默认启动环境从base改成了my4dgs
-flags.DEFINE_string("pipeline", "my4dgs", "pipeline name")
+flags.DEFINE_string("pipeline", "pipeline", "pipeline name")
 flags.DEFINE_string("config", "", "config file path")
 flags.DEFINE_bool("print", False, "print config to stdout and exit")
 flags.set_default(logging.ALSOLOGTOSTDERR, True)
@@ -43,17 +42,17 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
             oc.select(args, "module.rigid_tree.min_rate_multiplier", default=1) != 1):
         raise ValueError("Rate multipliers are retired; use a fixed rate_loss_weight")
     if full_update.get("enabled", False):
-        supported = {"enabled", "gradient_position_lr_scale", "audit_camera_sequence",
+        supported = {"enabled", "audit_camera_sequence",
                      "gradient_diagnostics", "logscale_step", "sh_dc_step", "sh_rest_step",
                      "storage_loss_enabled", "per_attribute_l1_weight", "point_dc_rate_scale", "point_logscale_rate_multiplier", "point_sh_rest_rate_multiplier",
-                     "probe_views_per_round", "probe_opacity_weight", "point_budget_fraction", "repair_temporal_weight",
+                     "repair_temporal_weight",
                      "repair_temporal_scale", "repair_temporal_lag", "repair_rmse_mix", "motion_rmse_mix",
                      "early_joint_repair", "dense_color_200", "regional_full_200", "attribute_aware_gate",
-                     "regional_opacity_l1_weight", "early_probe_attribute_only", "shared_region_orientation"}
+                     "regional_opacity_l1_weight", "shared_region_orientation"}
         unsupported = sorted(set(full_update) - supported)
         if unsupported:
             raise ValueError(f"Retired full-update training options: {unsupported}. "
-                             "Use the two-round gradient-probed plan.")
+                             "Use the current 200-step full-attribute plan.")
     retired = [name for name in ("learnable_gate", "point_gate_enabled",
                                  "gate_probability_weighted_proximal",
                                  "temporal_focus_strength", "tail_rmse_mix")
@@ -87,7 +86,10 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
 
 
 def main(argv):
-    Config, Pipeline = load_pipeline(flags.FLAGS.pipeline)
+    if flags.FLAGS.pipeline == 'pipeline':
+        from pipeline import Config, Pipeline
+    else:
+        Config, Pipeline = load_pipeline(flags.FLAGS.pipeline)
     cfg, args = resolve_config(argv, Config)
     if args:
         logging.info(f"Arguments not specified in Config: {args}")

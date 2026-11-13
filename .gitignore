@@ -6,6 +6,7 @@ output/
 references/
 .commandcode/
 tmp/
+.vscode/
 
 # Local CUDA extension build products (sources are not present here).
 submodules/

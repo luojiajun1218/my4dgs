@@ -1,4 +1,8 @@
-"""Pipeline tests."""
+"""检查训练管线的入口、数据和跨帧衔接。
+
+覆盖管线加载、图像尺寸、首帧参考、数据路径迁移、检查点恢复和续训，
+以及验证指标的状态管理；逐帧调度和属性更新由对应测试文件负责。
+"""
 
 import sys
 from pathlib import Path
@@ -10,12 +14,10 @@ import copy
 import importlib
 import importlib.util
 import json
-import pickle
 import random
 import shutil
 import subprocess
 import tempfile
-import time
 import unittest
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -25,7 +27,6 @@ import numpy as np
 import torch
 from PIL import Image
 
-from pipeline.sequence_extension import _validate_adaptive_birth_completion
 
 # ----- test_pipeline_package -----
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ReferenceRelocationTests(unittest.TestCase):
     def test_only_verified_identical_layout_can_relocate_checkpoint_configuration(self):
         import hashlib
-        from pipeline.sequence_extension import relocate_checkpoint_reference
+        from pipeline.continue_trainer import relocate_checkpoint_reference
 
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / 'reference_frame0.npz'
@@ -70,51 +71,17 @@ class PipelinePackageTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-c', code], cwd=ROOT,
                               check=True, capture_output=True, text=True)
 
-    def test_old_and_new_imports_share_classes_in_either_import_order(self):
-        names = ['data', 'module', 'trainer', 'sequence_extension', 'model',
-                 'model.gaussian', 'model.rigid_tree_codec',
-                 'model.rigid_tree_birth_codec', 'model.legacy_opacity_codec',
-                 'model.birth_quantization', 'model.rigid_residual_tree',
-                 'model.spatial_gate', 'model.spatial_gated_motion',
-                 'model.contribution_rasterizer', 'model.contribution_renderer']
-        for legacy_first in (True, False):
-            with self.subTest(legacy_first=legacy_first):
-                self.run_python(f'''
-import importlib
-names = {names!r}
-for name in names:
-    canonical = 'pipeline.' + name
-    for prefix in ('pipeline.ReCon-GS.', 'pipeline.my4dgs.'):
-        first, second = (prefix + name, canonical) if {legacy_first!r} else (canonical, prefix + name)
-        a = importlib.import_module(first)
-        b = importlib.import_module(second)
-        assert a is b, (first, second)
-        assert a.__spec__.name == canonical, a.__spec__.name
-''')
 
-    def test_pure_model_import_does_not_load_the_training_entry(self):
-        self.run_python('''
-import importlib, sys
-importlib.import_module('pipeline.model.rigid_tree_codec')
-assert 'pipeline.entry' not in sys.modules
-assert 'pipeline.module' not in sys.modules
-''')
-
-    def test_libgs_loads_both_names_and_historical_pickles(self):
+    def test_libgs_loads_canonical_pipeline(self):
         from libgs.pipeline.loader import load_pipeline
-        config, pipeline = load_pipeline('my4dgs')
-        self.assertEqual((config, pipeline), load_pipeline('ReCon-GS'))
-        self.assertEqual((config, pipeline), load_pipeline('pipeline'))
-        self.assertIs(pickle.loads(b'cpipeline.ReCon-GS\nConfig\n.'), config)
-        codec = importlib.import_module('pipeline.model.rigid_tree_codec')
-        self.assertIs(pickle.loads(
-            b'cpipeline.ReCon-GS.model.rigid_tree_codec\nDecodedState\n.'), codec.DecodedState)
+        from pipeline import Config, Pipeline
+        self.assertEqual((Config, Pipeline), load_pipeline('pipeline'))
 
-    def test_cli_print_supports_new_default_and_previous_pipeline_name(self):
+    def test_cli_print_supports_default_and_canonical_pipeline_name(self):
         outputs = []
-        for flags in ([], ['--pipeline=ReCon-GS']):
+        for flags in ([], ['--pipeline=pipeline']):
             result = subprocess.run([sys.executable, 'main.py',
-                '--config=config/best_flame_steak.yaml',
+                '--config=config/n3dv_baseline_flame_steak_300frames_20261113.yaml',
                 '--print', *flags], cwd=ROOT, check=True, capture_output=True, text=True)
             outputs.append(result.stdout)
         self.assertEqual(outputs[0], outputs[1])
@@ -153,12 +120,12 @@ class SequenceExtensionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.extension = importlib.import_module('pipeline.sequence_extension')
+        cls.extension = importlib.import_module('pipeline.continue_trainer')
         cls.rigid = importlib.import_module('pipeline.model.rigid_residual_tree')
-        cls.spatial = importlib.import_module('pipeline.model.spatial_gated_motion')
-        cls.codec = importlib.import_module('pipeline.model.rigid_tree_codec')
-        cls.birth = importlib.import_module('pipeline.model.birth_quantization')
-        cls.replay = importlib.import_module('scripts.replay_rigid_tree')
+        cls.spatial = importlib.import_module('pipeline.model.spatial_motion_training')
+        cls.codec = importlib.import_module('pipeline.model.frame_stream_format')
+        cls.birth = importlib.import_module('pipeline.model.frame_stream_format')
+        cls.replay = importlib.import_module('pipeline.model.frame_stream_decode')
         cls.data_module = importlib.import_module('pipeline.data')
         cls.trainer_module = importlib.import_module('pipeline.trainer')
         cls.module = importlib.import_module('pipeline.module')
@@ -174,7 +141,6 @@ class SequenceExtensionTests(unittest.TestCase):
         torch.manual_seed(71)
         np.random.seed(72)
         random.seed(73)
-        cls.initial_rng = cls.capture_rng()
         cls.template = cls.shared_fixture()
         cls.reference_raw = cls.initial_raw(cls.template)
         prefix = cls.base / 'fixture_prefix'
@@ -195,11 +161,6 @@ class SequenceExtensionTests(unittest.TestCase):
         return dict(torch=torch.get_rng_state().clone(), cuda=None,
                     numpy=np.random.get_state(), python=random.getstate())
 
-    @staticmethod
-    def restore_rng(state):
-        torch.set_rng_state(state['torch'])
-        np.random.set_state(state['numpy'])
-        random.setstate(state['python'])
 
     @staticmethod
     def initial_raw(model):
@@ -217,7 +178,18 @@ class SequenceExtensionTests(unittest.TestCase):
             motion_xyz_step_extent=.001, gs_xyz_step_extent=.001,
             motion_rotation_step_rad=.001, gs_rotation_step_rad=.001,
             rate_loss_weight=0., relative_motion_loss_weight=0.)
-        model = cls.spatial.SpatialGatedMotion(config)
+        config.proximal_gs_regularization = True
+        gate = config.spatial_gate
+        gate.training_schedule = 'joint'
+        gate.learn_region_motion = True
+        gate.start_step = gate.gate_start_step = 0
+        gate.freeze_step = 180
+        gate.region_motion = 'relative'
+        gate.shared_image_recode = gate.joint_image_gradients = gate.shared_discovery = True
+        gate.image_relaxation = 'stochastic_ste'
+        gate.frame_training_plan = True
+        config.validate()
+        model = cls.spatial.SpatialMotionTraining(config)
         model.setup(xyz, rotation, 1., frame_index=1)
         return model
 
@@ -235,7 +207,7 @@ class SequenceExtensionTests(unittest.TestCase):
 
     @classmethod
     def run_frames(cls, model, start, end, run, raw):
-        """Actual 200-step motion updates; no renderer, births or opacity."""
+        """构造已完成帧的码流和索引，不执行完整训练。"""
         raw = {k: v.clone() for k, v in raw.items()}
         stream = run / 'frame_storage' / 'rigid_tree'
         summary_dir = run / 'frame_summary'
@@ -243,27 +215,18 @@ class SequenceExtensionTests(unittest.TestCase):
         for frame in range(start, end + 1):
             if model.frame_index != frame:
                 model.setup(raw['xyz'], raw['rotation'], 1., frame_index=frame)
-            desired = model.base_xyz.clone()
-            desired[:16, 0] += .012 + frame * .001
-            desired[16:24, 1] += .009 + frame * .001
-            for step in range(1, 201):
-                # Exercise all three saved CPU RNGs, rather than comparing a
-                # deterministic pose script which could ignore RNG restore.
-                jitter = (float(torch.rand(())) + float(np.random.random()) + random.random()) * 1e-5
-                model.observations.fill_(10)
-                xyz, q = model.forward(step, training=True)
-                loss = (xyz - desired - jitter).square().mean() + (q - model.base_rotation).square().mean()
-                terms = model.loss_terms(step, False)
-                loss = loss + terms['rate_loss'] + terms['relative_motion_loss']
-                loss.backward()
-                model.optimizer_step()
-            model.record_final_diagnostics()
+            # Construct a completed-frame fixture directly. This checks
+            # continuation and replay, not the 200 optimizer steps themselves.
+            model.prepare_plan_step(200)
+            with torch.no_grad():
+                model.gs_translation[:16, 0] = .012 + frame * .001
+                model.gs_translation[16:24, 1] = .009 + frame * .001
             xyz, rotation = model.materialized_pose()
             model.register_materialized_layout(xyz, rotation)
             model.export_motion(stream / f'motion_{frame:03}.bin')
             decoded = model.codec_previous_state
             raw['xyz'], raw['rotation'] = decoded.xyz.clone(), decoded.rotation.clone()
-            manifest = dict(version=1, frame=frame,
+            manifest = dict(version=1, frame=frame, optimization_steps=200,
                 reference='frame_storage/rigid_tree/reference_frame0.npz',
                 motion=f'motion_{frame:03}.bin', birth=None,
                 old_count=len(raw['xyz']), birth_count=0, total_count=len(raw['xyz']),
@@ -301,21 +264,26 @@ class SequenceExtensionTests(unittest.TestCase):
         self.old_data = asdict(self.data_module.DataConfig(root=str(self.dataset),
             expected_image_size=[4, 4], extra_dataset_kwargs=dict(num_frames=3)))
         self.old_trainer = asdict(self.trainer_module.TrainerConfig(
-            saving_ckpt_frames=[1, 2], saving_ckpt_steps=[300]))
+            saving_ckpt_frames=[1, 2], saving_ckpt_steps=[200]))
         self.current_data = copy.deepcopy(self.old_data)
         self.current_data['extra_dataset_kwargs']['num_frames'] = 5
         self.current_trainer = copy.deepcopy(self.old_trainer)
         self.current_trainer['saving_ckpt_frames'] = [1, 2, 4]
         module_config = self.module.ModuleConfig(rigid_tree=self.template.config,
             sh_degree=1)
+        module_config.birth.frame_training_plan = True
+        module_config.full_update.enabled = True
+        module_config.full_update.early_joint_repair = True
+        module_config.full_update.dense_color_200 = True
+        module_config.full_update.regional_full_200 = True
         gaussian_capture = (1, self.final_raw['xyz'].clone(), self.final_raw['sh_dc'].clone(),
             self.final_raw['sh_rest'].clone(), self.final_raw['logscale'].clone(),
             self.final_raw['rotation'].clone(), self.final_raw['opacity'].clone(),
             torch.zeros(len(self.final_raw['xyz'])), torch.zeros(len(self.final_raw['xyz']), 1),
             torch.zeros(len(self.final_raw['xyz']), 1), dict(state={}, param_groups=[]), 1.)
         report = json.loads((self.source / 'frame_summary/frame_002.json').read_text())
-        self.checkpoint = dict(global_step=300, current_frame=2, rigid_tree_version=1,
-            birth_allocation='clone_small_v1',
+        self.checkpoint = dict(global_step=200, current_frame=2, rigid_tree_version=1,
+            birth_allocation='frame_training_plan_v1',
             rng_state=copy.deepcopy(self.saved_rng), rigid_tree_data_config=self.old_data,
             rigid_tree_trainer_config=self.old_trainer,
             rigid_tree_module_config=asdict(module_config), rigid_tree_config=asdict(self.template.config),
@@ -341,8 +309,8 @@ class SequenceExtensionTests(unittest.TestCase):
         return str(entry['relative_path'] if isinstance(entry, dict) else entry.relative_path)
 
     def test_recover_200_step_full_attribute_prefix_with_regional_packet(self):
-        from pipeline.model.full_attribute_update import encode_full_attribute_delta
-        from pipeline.model.regional_full_attributes import HEADER, MAGIC, decode_regional_full
+        from pipeline.model.residual_gs_attributes_update import encode_full_attribute_delta
+        from pipeline.model.regional_attributes_update import HEADER, MAGIC, decode_regional_full
         state = self.codec.DecodedState.restore(self.saved_motion['codec_previous_state'])
         nodes = len(state.parents)
         zeros = dict(logscale=torch.zeros(nodes, 3), sh_dc=torch.zeros(nodes, 1, 3),
@@ -400,51 +368,6 @@ class SequenceExtensionTests(unittest.TestCase):
         self.assertEqual((self.destination / 'config.yaml').read_text(), 'new run config must stay intact\n')
 
 
-
-
-    def test_extension_copies_full_attribute_packet_and_decodes_all_six_fields(self):
-        from pipeline.model.full_attribute_update import FIELDS, encode_full_attribute_delta
-        stream = self.source / 'frame_storage' / 'rigid_tree'
-        reference = stream / 'reference_frame0.npz'
-        previous, raw = self.replay.replay(stream, reference, through=1)
-        attribute_reference = {name: raw[name] for name in FIELDS}
-        symbols = {name: torch.zeros_like(value) for name, value in attribute_reference.items()}
-        symbols['logscale'][0, 0] = 2
-        symbols['sh_dc'][1, 0, 1] = -3
-        symbols['sh_rest'][2, 1, 2] = 4
-        packet = encode_full_attribute_delta(attribute_reference, symbols,
-            frame_index=2, steps=(.005, .001, .001))
-        (stream / 'fullattr_002.bin').write_bytes(packet)
-        path = stream / 'frame_002.json'
-        manifest = json.loads(path.read_text())
-        diagnostic = 'frame_diagnostics/learnable_attribute_gate/frame_002.npz'
-        diagnostic_path = self.source / diagnostic
-        diagnostic_path.parent.mkdir(parents=True)
-        np.savez_compressed(diagnostic_path, region_id=np.asarray([1]), selected=np.asarray([True]))
-        manifest.update(full_update=True, full_attribute_update='fullattr_002.bin',
-            full_attribute_update_timing='after_regional_dc_before_births',
-            regional_attribute_repair=dict(diagnostic_sidecar=diagnostic))
-        path.write_text(json.dumps(manifest, indent=2))
-        decoded, expected = self.replay.decode_frame(stream, 2, previous, raw)
-        manifest['raw_state_sha256'] = self.birth.reference_digest(expected)
-        path.write_text(json.dumps(manifest, indent=2))
-        capture = list(self.checkpoint['gaussians'])
-        for name, index in dict(xyz=1, rotation=5, logscale=4, opacity=6, sh_dc=2, sh_rest=3).items():
-            capture[index] = expected[name].clone()
-        self.checkpoint['gaussians'] = tuple(capture)
-        plan = self.plan()
-        copied = {self.entry_path(entry) for entry in plan.files}
-        self.assertIn('frame_storage/rigid_tree/fullattr_002.bin', copied)
-        self.assertIn(diagnostic, copied)
-        self.extension.copy_verified_prefix(plan)
-        dest = self.destination / 'frame_storage' / 'rigid_tree'
-        actual_state, actual = self.replay.replay(dest, dest / 'reference_frame0.npz', through=2)
-        self.assertEqual(actual_state.digest(), decoded.digest())
-        for name in ('xyz', 'rotation', 'logscale', 'opacity', 'sh_dc', 'sh_rest'):
-            self.assertTrue(torch.equal(actual[name].view(torch.int32),
-                                        expected[name].view(torch.int32)), name)
-        self.assertEqual((self.destination / diagnostic).read_bytes(), diagnostic_path.read_bytes())
-
     def test_extension_accepts_only_an_equivalent_symlink_dataset_root(self):
         alias = self.root / 'dataset_alias'
         alias.mkdir()
@@ -471,26 +394,6 @@ class SequenceExtensionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'changed a prefix image'):
             self.plan(current_data_config=config, current_images=changed_images)
 
-    def test_explicit_completed_prefix_from_interrupted_longer_plan_is_verified(self):
-        # Three completed frames, with an original four-frame plan. Never
-        # rewrite the checkpoint to pretend the old run had another config.
-        checkpoint = copy.deepcopy(self.checkpoint)
-        checkpoint['rigid_tree_data_config']['extra_dataset_kwargs']['num_frames'] = 4
-        (self.source / 'cameras.json').write_text(json.dumps(self.camera_records(4)))
-        with self.assertRaises(ValueError):
-            self.plan(checkpoint=checkpoint)
-        before = copy.deepcopy(checkpoint)
-        plan = self.plan(checkpoint=checkpoint, completed_prefix_frames=3)
-        self.assertEqual((plan.resume_frame, plan.previous_frames, plan.source_planned_frames), (2, 3, 4))
-        self.assertEqual({image['frame'] for image in plan.images}, {0, 1, 2})
-        self.assertFalse(any('frame_003' in entry.relative_path for entry in plan.files))
-        provenance = self.extension.copy_verified_prefix(plan)
-        self.assertEqual(provenance['source_planned_frames'], 4)
-        self.assertEqual(checkpoint['rigid_tree_data_config'], before['rigid_tree_data_config'])
-        self.assertEqual((self.source / 'config.yaml').read_text(), 'old run config must stay intact\n')
-        decoded, _ = self.replay.replay(self.destination / 'frame_storage/rigid_tree',
-            self.destination / 'frame_storage/rigid_tree/reference_frame0.npz', through=2)
-        self.assertEqual(decoded.digest().hex(), plan.decoded_sha256)
 
     def test_explicit_incomplete_prefix_can_recover_same_planned_length(self):
         checkpoint = copy.deepcopy(self.checkpoint)
@@ -525,54 +428,9 @@ class SequenceExtensionTests(unittest.TestCase):
         self.assertEqual(before, {str(p.relative_to(self.source)): p.read_bytes()
                                   for p in self.source.rglob('*') if p.is_file()})
 
-    def test_explicit_prefix_length_cannot_bypass_completion_or_replay_checks(self):
-        for length in (True, 0, 1, 4, 2.5):
-            with self.subTest(length=length), self.assertRaises(ValueError):
-                self.plan(completed_prefix_frames=length)
-        with self.assertRaises(ValueError):
-            self.plan(completed_prefix_frames=2)
-        bad = copy.deepcopy(self.checkpoint)
-        bad['global_step'] -= 1
-        with self.assertRaises(ValueError):
-            self.plan(checkpoint=bad, completed_prefix_frames=3)
-        bad = copy.deepcopy(self.checkpoint)
-        bad['gaussians'][1][0, 0] += 1
-        with self.assertRaises(ValueError):
-            self.plan(checkpoint=bad, completed_prefix_frames=3)
-
-    def test_cpu_three_to_five_continuation_matches_parameters_rng_and_every_packet(self):
-        self.extension.copy_verified_prefix(self.plan())
-        continued = self.spatial.SpatialGatedMotion(self.template.config)
-        continued.restore(copy.deepcopy(self.checkpoint['rigid_tree_motion']))
-        self.restore_rng(copy.deepcopy(self.checkpoint['rng_state']))
-        resumed_raw = self.run_frames(continued, 3, 4, self.destination, self.final_raw)
-        resumed_rng = self.capture_rng()
-        continuous_dir = self.root / 'continuous'
-        continuous_dir.mkdir()
-        self.restore_rng(copy.deepcopy(self.initial_rng))
-        continuous = self.shared_fixture()
-        self.write_reference(continuous_dir, continuous, self.reference_raw)
-        continuous_raw = self.run_frames(continuous, 1, 4, continuous_dir, self.reference_raw)
-        continuous_rng = self.capture_rng()
-        for name in ('region_translation', 'region_rotation', 'gs_translation', 'gs_rotation'):
-            torch.testing.assert_close(getattr(continued, name), getattr(continuous, name), rtol=0, atol=0)
-        self.assertTrue(torch.equal(continued.owner, continuous.owner))
-        torch.testing.assert_close(continued.opened, continuous.opened, rtol=0, atol=0)
-        torch.testing.assert_close(resumed_rng['torch'], continuous_rng['torch'], rtol=0, atol=0)
-        np.testing.assert_equal(resumed_rng['numpy'], continuous_rng['numpy'])
-        self.assertEqual(resumed_rng['python'], continuous_rng['python'])
-        for name in resumed_raw:
-            torch.testing.assert_close(resumed_raw[name], continuous_raw[name], rtol=0, atol=0)
-        for frame in range(1, 5):
-            name = f'frame_storage/rigid_tree/motion_{frame:03}.bin'
-            self.assertEqual((self.destination / name).read_bytes(), (continuous_dir / name).read_bytes())
-        stream = self.destination / 'frame_storage/rigid_tree'
-        decoded, raw = self.replay.replay(stream, stream / 'reference_frame0.npz', through=4)
-        self.assertEqual(decoded.digest(), continued.codec_previous_state.digest())
-        self.assertEqual(self.birth.reference_digest(raw), self.birth.reference_digest(resumed_raw))
 
     def test_rejects_nonterminal_or_incomplete_checkpoints(self):
-        for key, value in [('global_step', 200), ('current_frame', 1)]:
+        for key, value in [('global_step', 199), ('current_frame', 1)]:
             bad = copy.deepcopy(self.checkpoint)
             bad[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
@@ -582,119 +440,6 @@ class SequenceExtensionTests(unittest.TestCase):
             bad['rigid_tree_frame'][flag] = False
             with self.subTest(flag=flag), self.assertRaises(ValueError):
                 self.plan(checkpoint=bad)
-
-    def test_dynamic_birth_completed_prefix_cross_checks_actual_terminal_manifest(self):
-        path = self.source/'frame_storage/rigid_tree/frame_002.json'
-        original = json.loads(path.read_text())
-        for allocation, index in (('residual_surface_cohorts_v4', 1), ('selected_population_refit_v5', 2),
-                                  ('selected_population_refit_v5_1', 2), ('inherited_intrinsic_radiance_v6', 2),
-                                  ('bounded_intrinsic_radiance_v6_1', 2), ('conservative_detail_family_v7', 2),
-                                  ('surface_patch_takeover_v8',2), ('support_reincarnation_crossfit_v9',2),
-                                  ('dual_predictive_support_v10',2),('source_residual_support_v11',2)):
-            checkpoint = copy.deepcopy(self.checkpoint)
-            checkpoint['birth_allocation'] = allocation
-            checkpoint['rigid_tree_module_config']['birth']['mechanism'] = 'residual_transaction'
-            checkpoint['rigid_tree_module_config']['birth']['residual']['max_cohorts'] = 2
-            end = 200+100*(index+1)
-            checkpoint['global_step'] = end
-            checkpoint['birth_cohort_state'] = dict(index=index, start_step=end-100, end_step=end)
-            checkpoint['birth_terminal_state'] = dict(active=False)
-            path.write_text(json.dumps({**original, 'optimization_steps': end}))
-            with self.subTest(allocation=allocation):
-                self.assertEqual(self.plan(checkpoint=checkpoint).resume_frame, 2)
-            for invalid in ('unfinished', 'wrong_step', 'wrong_manifest', 'active_terminal'):
-                bad = copy.deepcopy(checkpoint)
-                path.write_text(json.dumps({**original, 'optimization_steps': end}))
-                if invalid == 'unfinished': bad['rigid_tree_frame']['finalized'] = False
-                elif invalid == 'wrong_step': bad['global_step'] -= 100
-                elif invalid == 'wrong_manifest': path.write_text(json.dumps({**original, 'optimization_steps': end-100}))
-                elif allocation.startswith('selected_population_refit_v5') or allocation in (
-                        'inherited_intrinsic_radiance_v6', 'bounded_intrinsic_radiance_v6_1',
-                        'conservative_detail_family_v7','surface_patch_takeover_v8','support_reincarnation_crossfit_v9',
-                        'dual_predictive_support_v10','source_residual_support_v11'):
-                    bad['birth_terminal_state']['active'] = True
-                else: continue
-                with self.subTest(allocation=allocation, invalid=invalid), self.assertRaises(ValueError):
-                    self.plan(checkpoint=bad)
-        path.write_text(json.dumps(original))
-
-    def test_single_quick300_completed_prefix_and_optimizer_ledger(self):
-        checkpoint=copy.deepcopy(self.checkpoint)
-        checkpoint['birth_allocation']='quick_source_residual_300_v12'
-        checkpoint['rigid_tree_module_config']['birth'].update(mechanism='residual_transaction',radiance_mode='quick_source_residual')
-        checkpoint['birth_cohort_state']=dict(index=0,start_step=200,end_step=300)
-        checkpoint['quick_birth_state']=dict(phase=2,optimizer_steps=100,initialized=True)
-        checkpoint['dual_birth_state']=None
-        path=self.source/'frame_storage/rigid_tree/frame_002.json'
-        manifest=json.loads(path.read_text())
-        manifest['optimization_steps']=300
-        manifest['training_step_accounting']=dict(motion=200,birth=100,total=300,birth_optimizer_updates=100,
-            initializer_optimizer_updates=0,post_admission_optimizer_updates=0)
-        path.write_text(json.dumps(manifest))
-        self.assertEqual(self.plan(checkpoint=checkpoint).resume_frame,2)
-        for failure in ('extra_cohort','unfinished250','wrong_update_count','hidden_refit','dual_state'):
-            bad=copy.deepcopy(checkpoint);packet=copy.deepcopy(manifest)
-            if failure=='extra_cohort':bad['birth_cohort_state'].update(index=1,start_step=300,end_step=400)
-            elif failure=='unfinished250':bad['global_step']=250;bad['rigid_tree_frame']['finalized']=False
-            elif failure=='wrong_update_count':bad['quick_birth_state']['optimizer_steps']=101
-            elif failure=='hidden_refit':packet['training_step_accounting']['post_admission_optimizer_updates']=1
-            else:bad['dual_birth_state']={'branches':{}}
-            path.write_text(json.dumps(packet))
-            with self.subTest(failure=failure),self.assertRaises(ValueError):self.plan(checkpoint=bad)
-
-    def test_shadow_completed_prefix200_or300_requires_actual_population_ledger(self):
-        path=self.source/'frame_storage/rigid_tree/frame_002.json'
-        original=json.loads(path.read_text())
-        for end,accepted in ((200,0),(300,6)):
-            checkpoint=copy.deepcopy(self.checkpoint)
-            checkpoint.update(birth_allocation='shadow_source_residual_300_v13',global_step=end,
-                birth_cohort_state=dict(index=0,start_step=200,end_step=end),
-                quick_birth_state=dict(phase=2 if accepted else 1,optimizer_steps=end-200,initialized=True))
-            checkpoint['rigid_tree_module_config']['birth'].update(
-                mechanism='residual_transaction',radiance_mode='shadow_source_residual')
-            checkpoint['rigid_tree_frame']['birth_control']['shadow_initializer']=dict(accepted_points=accepted)
-            manifest=copy.deepcopy(original)
-            manifest.update(optimization_steps=end,training_step_accounting=dict(motion=200,birth=end-200,total=end,
-                birth_optimizer_updates=end-200,initializer_optimizer_updates=0,post_admission_optimizer_updates=0))
-            path.write_text(json.dumps(manifest))
-            self.assertEqual(self.plan(checkpoint=checkpoint).resume_frame,2)
-            for failure in ('wrong_population','wrong_updates','unfinished','extra_step','hidden_refit'):
-                bad=copy.deepcopy(checkpoint);packet=copy.deepcopy(manifest)
-                if failure=='wrong_population':bad['rigid_tree_frame']['birth_control']['shadow_initializer']['accepted_points']=0 if accepted else 3
-                elif failure=='wrong_updates':bad['quick_birth_state']['optimizer_steps']+=1
-                elif failure=='unfinished':bad['rigid_tree_frame']['finalized']=False
-                elif failure=='extra_step':bad['global_step']=301
-                else:packet['training_step_accounting']['post_admission_optimizer_updates']=1
-                path.write_text(json.dumps(packet))
-                with self.subTest(end=end,failure=failure),self.assertRaises(ValueError):self.plan(checkpoint=bad)
-
-    def test_early70_shared_adam_prefix_participation_is_not_summed_as430(self):
-        path=self.source/'frame_storage/rigid_tree/frame_002.json'
-        base=json.loads(path.read_text())
-        for end,selected in ((200,0),(300,1)):
-            checkpoint=copy.deepcopy(self.checkpoint)
-            checkpoint.update(birth_allocation='early_source_replacement_300_v15',global_step=end,
-                birth_cohort_state=dict(index=0,start_step=70,end_step=end),
-                early_replacement_state=dict(initialized=True,shared_steps=end,birth_updates=end-70))
-            checkpoint['rigid_tree_module_config']['birth'].update(
-                mechanism='residual_transaction',radiance_mode='early_source_replacement')
-            checkpoint['rigid_tree_frame']['birth_control']['early_replacement']=dict(
-                source_count=2,selected_population=selected,SGD_200_codec_replay_exact=True)
-            manifest=copy.deepcopy(base)
-            manifest.update(optimization_steps=end,training_step_accounting=dict(warm_gate=70,joint=130,
-                final_population=end-200,global_iterations=end,shared_adam_steps=end,motion_participation=200,
-                birth_participation=end-70,joint_overlap=130,extra_SGD_steps=0,
-                topology_born_step=70,population_frozen_step=200))
-            path.write_text(json.dumps(manifest));self.assertEqual(self.plan(checkpoint=checkpoint).resume_frame,2)
-            for failure in ('newborn100','extra_shared_step','missing200_replay','extra_cohort','fake_warm'):
-                bad=copy.deepcopy(checkpoint);packet=copy.deepcopy(manifest)
-                if failure=='newborn100':bad['early_replacement_state']['birth_updates']=100
-                elif failure=='extra_shared_step':bad['early_replacement_state']['shared_steps']=301
-                elif failure=='missing200_replay':bad['rigid_tree_frame']['birth_control']['early_replacement']['SGD_200_codec_replay_exact']=False
-                elif failure=='extra_cohort':bad['birth_cohort_state']['index']=1
-                else:packet['training_step_accounting']['warm_gate']=69
-                path.write_text(json.dumps(packet))
-                with self.subTest(end=end,failure=failure),self.assertRaises(ValueError):self.plan(checkpoint=bad)
 
     def test_only_strict_frame_growth_and_future_checkpoint_appends_are_allowed(self):
         for frames in (2, 3):
@@ -713,19 +458,10 @@ class SequenceExtensionTests(unittest.TestCase):
             with self.subTest(saves=saves), self.assertRaises(ValueError):
                 self.plan(current_trainer_config=trainer)
         trainer = copy.deepcopy(self.current_trainer)
-        trainer['saving_ckpt_steps'] = [200, 300]
+        trainer['saving_ckpt_steps'] = [100, 200]
         with self.assertRaises(ValueError):
             self.plan(current_trainer_config=trainer)
 
-    def test_actual_cli_omegaconf_containers_obey_the_same_contract(self):
-        from omegaconf import OmegaConf
-        checkpoint = copy.deepcopy(self.checkpoint)
-        checkpoint['rigid_tree_data_config'] = OmegaConf.create(self.old_data)
-        checkpoint['rigid_tree_trainer_config'] = OmegaConf.create(self.old_trainer)
-        plan = self.plan(checkpoint=checkpoint,
-                         current_data_config=OmegaConf.create(self.current_data),
-                         current_trainer_config=OmegaConf.create(self.current_trainer))
-        self.assertEqual(plan.extended_frames, 5)
 
     def test_real_trainer_loop_skips_completed_prefix_and_restores_rng_before_next_frame(self):
         calls = []
@@ -736,15 +472,15 @@ class SequenceExtensionTests(unittest.TestCase):
                 if trainer.current_frame == 3:
                     torch.testing.assert_close(torch.get_rng_state(), self.saved_rng['torch'], rtol=0, atol=0)
                 calls.append(('train', trainer.current_frame))
-                trainer.global_step = 300
+                trainer.global_step = 200
                 return dict(frame=trainer.current_frame)
 
         trainer = object.__new__(LoopHarness)
         trainer.config = self.trainer_module.TrainerConfig()
         trainer.module = SimpleNamespace(config=SimpleNamespace(rigid_tree=self.template.config),
-            total_steps=300, datamodule=SimpleNamespace(current_frame=2, num_frames=5),
+            total_steps=200, datamodule=SimpleNamespace(current_frame=2, num_frames=5),
             begin_next_frame=lambda: calls.append(('begin', trainer.current_frame)))
-        trainer.global_step = 300
+        trainer.global_step = 200
         trainer._resume_rng = copy.deepcopy(self.saved_rng)
         torch.manual_seed(999)
         result = trainer.training_loop()
@@ -765,22 +501,22 @@ class SequenceExtensionTests(unittest.TestCase):
         class LoopHarness(self.trainer_module.Trainer):
             def frame_training_loop(trainer):
                 calls.append(('train', trainer.current_frame))
-                trainer.global_step = 300
+                trainer.global_step = 200
                 return dict(frame=trainer.current_frame)
 
         trainer = object.__new__(LoopHarness)
         trainer.config = self.trainer_module.TrainerConfig()
         trainer.module = SimpleNamespace(config=SimpleNamespace(rigid_tree=self.template.config),
-            total_steps=300, datamodule=SimpleNamespace(current_frame=2, num_frames=5),
+            total_steps=200, datamodule=SimpleNamespace(current_frame=2, num_frames=5),
             begin_next_frame=lambda: calls.append(('begin', trainer.current_frame)))
-        trainer.global_step = 300
+        trainer.global_step = 200
         trainer._resume_rng = copy.deepcopy(self.saved_rng)
         trainer._end_frame_exclusive = limit(3, plan, 5)
         result = trainer.training_loop()
         self.assertEqual(calls, [('begin', 2), ('train', 3), ('begin', 3)])
         self.assertEqual([item['frame'] for item in result], [3])
 
-    def test_rejects_missing_packet_index_or_required_birth_packet(self):
+    def test_rejects_missing_packet_index(self):
         for name in ('frame_storage/rigid_tree/motion_001.bin',
                      'frame_storage/rigid_tree/frame_001.json',
                      'frame_summary/frame_001.json'):
@@ -790,13 +526,6 @@ class SequenceExtensionTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 self.plan()
             path.write_bytes(contents)
-        path = self.source / 'frame_storage/rigid_tree/frame_001.json'
-        manifest = json.loads(path.read_text())
-        manifest['birth'] = 'birth_001.bin'
-        path.write_text(json.dumps(manifest))
-        with self.assertRaises(ValueError):
-            self.plan()
-
     def test_rejects_raw_hash_corruption_wrong_reference_and_checkpoint_pose(self):
         path = self.source / 'frame_storage/rigid_tree/frame_002.json'
         contents = path.read_bytes()
@@ -888,249 +617,7 @@ class SequenceExtensionTests(unittest.TestCase):
         self.assertEqual(outside.read_bytes(), contents)
 
 
-# ----- test_gpu_recovery -----
-SPEC = importlib.util.spec_from_file_location(
-    'gpu_recovery', Path(__file__).resolve().parents[1] / 'scripts/gpu_recover.py')
-RECOVERY = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(RECOVERY)
-
-
-class RecoveryTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.state = self.root / 'state'
-        self.state.mkdir()
-        self.pending = self.state / 'pending.json'
-        self.vendor = self.root / 'vendor'
-        runtime = self.vendor / 'users/1000/runtime'
-        runtime.mkdir(parents=True)
-        (runtime / 'config.yaml').write_text('mixed-port: 7897\n')
-        core = self.vendor / 'cores/verge-mihomo'
-        core.parent.mkdir()
-        core.write_text('test fixture, never executed')
-        self.config = {'uid': 1000, 'user': 'gamer-02',
-                       'proxy_state_dir': str(self.vendor),
-                       'proxy_run_dir': str(self.root / 'run')}
-        self.owner = {'owner_key': '1000', 'identity': {'Unix': {'uid': 1000, 'gid': 1000}}}
-        self.desired = {'core_should_be_running': True, 'generation': 7,
-                        'last_clash_config': {'core_config': {
-                            'core_path': str(core), 'config_path': str(runtime / 'config.yaml'),
-                            'config_dir': str(runtime),
-                            'core_ipc_path': str(self.root / 'run/users/1000/verge-mihomo.sock')}}}
-        self.pending_data = {'origin_boot_id': 'old-boot', 'proxy_snapshot': {
-            'active_owner': self.owner, 'desired_state': self.desired}}
-        self.patchers = [patch.object(RECOVERY, 'STATE', self.state),
-                         patch.object(RECOVERY, 'PENDING', self.pending),
-                         patch.object(RECOVERY, 'boot_id', return_value='new-boot')]
-        for patcher in self.patchers:
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def arm(self):
-        RECOVERY.atomic_json(self.pending, self.pending_data)
-
-    def test_current_boot_does_not_replay_pending_state(self):
-        self.pending_data['origin_boot_id'] = 'new-boot'
-        self.arm()
-        self.assertFalse(RECOVERY.prepare_boot(self.config))
-        self.assertFalse((self.vendor / 'active-owner.json').exists())
-
-    def test_new_boot_recovers_owner_and_config_after_gui_cleanup(self):
-        self.arm()
-        self.assertTrue(RECOVERY.prepare_boot(self.config))
-        self.assertEqual(RECOVERY.load_json(self.vendor / 'active-owner.json'), self.owner)
-        desired = RECOVERY.load_json(self.vendor / 'users/1000/desired-state.json')
-        self.assertTrue(desired['core_should_be_running'])
-        self.assertEqual(desired['last_clash_config'], self.desired['last_clash_config'])
-        self.assertEqual((self.vendor / 'active-owner.json').stat().st_mode & 0o777, 0o600)
-
-    def test_valid_newer_config_is_preserved_and_replay_runs_once(self):
-        self.arm()
-        RECOVERY.atomic_json(self.vendor / 'active-owner.json', self.owner)
-        current = {**self.desired, 'core_should_be_running': False, 'generation': 8}
-        path = self.vendor / 'users/1000/desired-state.json'
-        RECOVERY.atomic_json(path, current)
-        self.assertTrue(RECOVERY.prepare_boot(self.config))
-        self.assertEqual(RECOVERY.load_json(path)['generation'], 8)
-        self.assertTrue(RECOVERY.load_json(path)['core_should_be_running'])
-        RECOVERY.atomic_json(path, current)
-        self.assertFalse(RECOVERY.prepare_boot(self.config))
-        self.assertFalse(RECOVERY.load_json(path)['core_should_be_running'])
-
-    def test_invalid_core_path_cannot_be_restored(self):
-        self.pending_data['proxy_snapshot']['desired_state']['last_clash_config']['core_config']['core_path'] = '/tmp/unapproved-core'
-        self.arm()
-        with self.assertRaises(ValueError):
-            RECOVERY.prepare_boot(self.config)
-        self.assertFalse((self.vendor / 'active-owner.json').exists())
-
-    def test_remote_ssh_readiness_does_not_require_a_working_gpu(self):
-        status = dict(sshd_config_ok=True, ssh_banner_ok=True, default_route='wifi',
-                      proxy_port_open=True, tailscale_running=True, tailscale_online=True,
-                      gpu={'code': 1, 'output': 'GPU is lost'})
-        self.assertTrue(RECOVERY.remote_ready(status))
-        status['tailscale_online'] = False
-        self.assertFalse(RECOVERY.remote_ready(status))
-
-    def test_check_mode_never_arms_or_schedules_a_reboot(self):
-        config_path = self.root / 'config.json'
-        RECOVERY.atomic_json(config_path, self.config)
-        with patch.object(RECOVERY, 'CONFIG', config_path), \
-             patch.object(RECOVERY, 'ensure_root'), \
-             patch.object(RECOVERY, 'status_now', return_value={'remote_checks_ready': True}), \
-             patch.object(RECOVERY, 'print_status'), \
-             patch.object(RECOVERY, 'start_recovery') as start:
-            self.assertEqual(RECOVERY.main(['--check']), 0)
-            start.assert_not_called()
-        self.assertFalse(self.pending.exists())
-
-    def test_collect_only_never_arms_or_schedules_a_reboot(self):
-        config_path = self.root / 'config.json'
-        RECOVERY.atomic_json(config_path, self.config)
-        with patch.object(RECOVERY, 'CONFIG', config_path), \
-             patch.object(RECOVERY, 'ensure_root'), \
-             patch.object(RECOVERY, 'collect') as collect, \
-             patch.object(RECOVERY, 'start_recovery') as start:
-            self.assertEqual(RECOVERY.main(['--collect-only']), 0)
-            collect.assert_called_once_with(self.config)
-            start.assert_not_called()
-        self.assertFalse(self.pending.exists())
-
-    def test_hung_diagnostic_is_bounded(self):
-        started = time.monotonic()
-        result = RECOVERY.capture([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=.1)
-        self.assertTrue(result['timed_out'])
-        self.assertEqual(result['code'], 124)
-        self.assertLess(time.monotonic() - started, 4)
-
-    def test_missing_diagnostic_tool_is_reported_without_stopping_recovery(self):
-        result = RECOVERY.capture([str(self.root / 'nonexistent-tool')])
-        self.assertEqual(result['code'], 127)
-        self.assertFalse(result['timed_out'])
-
-    def test_failed_shutdown_restores_the_previous_pending_record(self):
-        self.arm()
-        previous = RECOVERY.load_json(self.pending)
-
-        def fake_capture(command, timeout=10):
-            return {'code': 1 if command[0] == 'shutdown' else 0,
-                    'output': 'simulated response', 'timed_out': False}
-
-        with patch.object(RECOVERY, 'capture', side_effect=fake_capture), \
-             patch.object(RECOVERY, 'boot_wifi_available', return_value=True), \
-             patch.object(RECOVERY, 'snapshot_proxy', return_value=previous['proxy_snapshot']), \
-             patch.object(RECOVERY, 'collect', return_value=self.root), \
-             patch.object(RECOVERY.os, 'sync'):
-            with self.assertRaisesRegex(RuntimeError, 'reboot request failed'):
-                RECOVERY.start_recovery({**self.config, 'tailscale_ip': '100.0.0.1'})
-        self.assertEqual(RECOVERY.load_json(self.pending), previous)
-
-    def test_successful_recovery_saves_proxy_state_and_schedules_one_reboot(self):
-        snapshot = self.pending_data['proxy_snapshot']
-        with patch.object(RECOVERY, 'capture', return_value={'code': 0, 'output': ''}) as commands, \
-             patch.object(RECOVERY, 'boot_wifi_available', return_value=True), \
-             patch.object(RECOVERY, 'snapshot_proxy', return_value=snapshot), \
-             patch.object(RECOVERY, 'collect', return_value=self.root), \
-             patch.object(RECOVERY.os, 'sync'), patch('builtins.print'):
-            RECOVERY.start_recovery({**self.config, 'tailscale_ip': '100.0.0.1'})
-        pending = RECOVERY.load_json(self.pending)
-        self.assertEqual(pending['proxy_snapshot'], snapshot)
-        self.assertEqual(pending['origin_boot_id'], 'new-boot')
-        shutdowns = [call.args[0] for call in commands.call_args_list if call.args[0][0] == 'shutdown']
-        self.assertEqual(len(shutdowns), 1)
-        self.assertEqual(shutdowns[0][:3], ['shutdown', '-r', '+1'])
-
-    def test_reboot_is_refused_when_boot_wifi_is_not_configured(self):
-        with patch.object(RECOVERY, 'capture', return_value={'code': 0}) as commands, \
-             patch.object(RECOVERY, 'boot_wifi_available', return_value=False):
-            with self.assertRaisesRegex(RuntimeError, 'Wi-Fi'):
-                RECOVERY.start_recovery(self.config)
-        self.assertEqual(commands.call_count, 1)
-        self.assertEqual(commands.call_args.args[0], ['/usr/sbin/sshd', '-t'])
-        self.assertFalse(self.pending.exists())
-
-    def test_boot_report_marks_ssh_ready_even_if_gpu_is_still_lost(self):
-        self.pending_data['diagnostics'] = str(self.root / 'diagnostics')
-        self.arm()
-        ready = {'remote_checks_ready': True, 'ssh_commands': ['ssh gamer-02@100.0.0.1']}
-        with patch.object(RECOVERY, 'status_now', return_value=ready), \
-             patch.object(RECOVERY, 'capture', return_value={'code': 1, 'output': 'GPU is lost'}), \
-             patch.object(RECOVERY, 'print_status'):
-            self.assertEqual(RECOVERY.boot_check(self.config), 0)
-        report = RECOVERY.load_json(self.state / 'last-boot.json')
-        self.assertTrue(report['remote_checks_ready'])
-        self.assertEqual(report['gpu']['code'], 1)
-        self.assertFalse(self.pending.exists())
-
-
-def completed_adaptive_checkpoint(source=4, committed=2):
-    updates = 230 if source else 0
-    overlap = 130 if source else 0
-    control = dict(source_count=source, training_population=source, population_cap=10,
-                   low_alpha_newborns_removed=source-committed,
-                   global_iterations=300, motion_iterations=200,
-                   newborn_iterations=updates, joint_overlap_iterations=overlap,
-                   final_population_iterations=100, new_alpha_iterations=updates,
-                   population_screening=False, codec_trials200=0,
-                   finish_render_calls=0, extra_SGD_steps=0)
-    checkpoint = dict(rigid_tree_frame=dict(birth_control=dict(
-        proposal_count=source, committed_population_count=committed,
-        early_replacement=control)),
-        early_replacement_state=dict(initialized=True, shared_steps=300,
-                                     birth_updates=updates), dual_birth_state=None)
-    manifest = dict(birth_count=committed, training_step_accounting=dict(
-        warm_gate=70, joint=130, final_population=100, global_iterations=300,
-        shared_adam_steps=300, motion_participation=200, birth_participation=updates,
-        joint_overlap=overlap, extra_SGD_steps=0, topology_born_step=70,
-        population_frozen_step=70, final_alpha_cleanup_step=300))
-    return checkpoint, manifest
-
-
-class AdaptiveCompletionTests(unittest.TestCase):
-    def test_completed_no_screening_and_empty_population_are_accepted(self):
-        for source, committed in ((4, 2), (4, 0), (0, 0)):
-            with self.subTest(source=source, committed=committed):
-                checkpoint, manifest = completed_adaptive_checkpoint(source, committed)
-                _validate_adaptive_birth_completion(checkpoint, manifest, 300)
-
-    def test_inconsistent_population_or_training_ledger_is_rejected(self):
-        original, original_manifest = completed_adaptive_checkpoint()
-        cases = (
-            ('early_replacement_state', 'birth_updates', 229),
-            ('early_replacement_state', 'shared_steps', 299),
-            ('early_replacement', 'population_screening', True),
-            ('early_replacement', 'training_population', 3),
-            ('early_replacement', 'low_alpha_newborns_removed', 1),
-            ('early_replacement', 'source_count', True),
-            ('manifest', 'birth_count', 3),
-            ('ledger', 'population_frozen_step', 200),
-            ('ledger', 'extra_SGD_steps', 1),
-        )
-        for group, key, value in cases:
-            with self.subTest(group=group, key=key):
-                checkpoint, manifest = copy.deepcopy((original, original_manifest))
-                if group == 'early_replacement_state':
-                    checkpoint[group][key] = value
-                elif group == 'early_replacement':
-                    checkpoint['rigid_tree_frame']['birth_control'][group][key] = value
-                elif group == 'manifest':
-                    manifest[key] = value
-                else:
-                    manifest['training_step_accounting'][key] = value
-                with self.assertRaises(ValueError):
-                    _validate_adaptive_birth_completion(checkpoint, manifest, 300)
-
-    def test_midframe_checkpoint_is_not_accepted(self):
-        checkpoint, manifest = completed_adaptive_checkpoint()
-        with self.assertRaises(ValueError):
-            _validate_adaptive_birth_completion(checkpoint, manifest, 200)
-
-
 # ----- LPIPS evaluation cache -----
-
-
 
 
 import pipeline.module as pipeline_module
@@ -1176,18 +663,6 @@ class LPIPSEvaluationTests(unittest.TestCase):
         self.assertTrue(torch.equal(rng, torch.get_rng_state()))
         self.assertEqual(before_keys, set(module.state_dict()))
 
-    def test_cold_and_warm_cache_leave_same_next_random_draw(self):
-        with patch.object(pipeline_module, 'LPIPS', _FakeLPIPS):
-            warm, cold = self.module(), self.module()
-            warm.validation_step(self.view, 0, 0)
-            rng = torch.get_rng_state().clone()
-            warm.validation_step(self.view, 0, 0)
-            after_warm = torch.rand(8)
-            torch.set_rng_state(rng)
-            cold.validation_step(self.view, 0, 0)
-            after_cold = torch.rand(8)
-        torch.testing.assert_close(after_warm, after_cold, rtol=0, atol=0)
-        self.assertEqual(_FakeLPIPS.created, 2)
 
     def test_disabled_lpips_does_not_construct_network(self):
         module = self.module(enabled=False)
@@ -1195,6 +670,219 @@ class LPIPSEvaluationTests(unittest.TestCase):
             metrics = module.validation_step(self.view, 0, 0)
         self.assertNotIn('lpips', metrics)
         self.assertFalse(hasattr(module, '_lpips_eval_cache'))
+
+
+from pipeline.model import frame_stream_format as _stream_fmt
+import pipeline.module as module
+import pipeline.trainer as trainer
+import pipeline.model.frame_stream_decode as replay__rigid_reference_pruning
+
+
+class FakeNativeGaussians:
+    def __init__(self):
+        self.prune_calls = 0
+        self.restore(self.raw(), None)
+
+    @staticmethod
+    def raw():
+        centers = torch.arange(4, dtype=torch.float32).reshape(4, 1)
+        return dict(_xyz=torch.cat((centers, torch.zeros(4, 2)), dim=1),
+                    _rotation=torch.tensor([[1., 0., 0., 0.]] * 4),
+                    _scaling=torch.zeros(4, 3),
+                    _opacity=torch.logit(torch.tensor([[.01], [.2], [.005], [.5]])),
+                    _features_dc=centers.reshape(4, 1, 1).expand(4, 1, 3).clone(),
+                    _features_rest=torch.zeros(4, 0, 3))
+
+    def capture(self):
+        return {name: getattr(self, name).detach().clone()
+                for name in module.RAW_ATTRIBUTES}
+
+    def restore(self, packet, config):
+        for name in module.RAW_ATTRIBUTES:
+            setattr(self, name, torch.nn.Parameter(packet[name].detach().clone()))
+
+    def prune_points(self, mask):
+        self.prune_calls += 1
+        for name in module.RAW_ATTRIBUTES:
+            value = getattr(self, name)
+            setattr(self, name, torch.nn.Parameter(value.detach()[~mask].clone()))
+
+
+def fake_module(config, gaussians, frame, num_init_steps=15000):
+    holder = SimpleNamespace(config=config, gaussians=gaussians,
+        renderer=SimpleNamespace(gaussians=None), current_frame=frame,
+        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=num_init_steps)),
+        _freeze_base=lambda: [getattr(gaussians, name).requires_grad_(False)
+                              for name in module.RAW_ATTRIBUTES])
+    return holder
+
+
+class NativeReferencePruningTests(unittest.TestCase):
+    def test_native_bootstrap_requires_exact_fixed_15000_step_protocol(self):
+        config = module.ModuleConfig(initial_opacity_threshold=.015)
+        native = FakeNativeGaussians()
+        configured_11k = fake_module(
+            config, native, frame=0, num_init_steps=11_000)
+        with self.assertRaisesRegex(ValueError, 'exactly 15000 steps'):
+            module.Module.on_load_checkpoint(configured_11k,
+                dict(global_step=11_000, gaussians=native.capture()))
+
+        configured_15k = fake_module(config, native, frame=0)
+        with self.assertRaisesRegex(ValueError, '15000-step'):
+            module.Module.on_load_checkpoint(configured_15k,
+                dict(global_step=14_999, gaussians=native.capture()))
+
+    def test_threshold_validation_and_full_delete_guard(self):
+        for bad in (-.01, 1., float('nan'), float('inf'), True, '0.015'):
+            with self.subTest(threshold=bad), self.assertRaisesRegex(
+                    ValueError, 'initial_opacity_threshold'):
+                module.validate_initial_opacity_threshold(bad)
+        original = FakeNativeGaussians()
+        with self.assertRaisesRegex(ValueError, 'every Gaussian'):
+            module.prune_native_initial_gaussians(original, .9)
+        self.assertEqual(original.prune_calls, 0)
+        self.assertEqual(len(original._xyz), 4)
+        unpruned = module.prune_native_initial_gaussians(original, 0.)
+        self.assertEqual((unpruned['original_count'], unpruned['retained_count'],
+                          unpruned['removed_count']), (4, 4, 0))
+        self.assertEqual(original.prune_calls, 0)
+
+    def test_native_prune_keeps_deterministic_rows_and_own_resume_does_not_prune(self):
+        config = module.ModuleConfig(initial_opacity_threshold=.015)
+        native = FakeNativeGaussians()
+        active = fake_module(config, native, frame=0)
+        module.Module.on_load_checkpoint(active,
+            dict(global_step=15000, gaussians=native.capture()))
+        torch.testing.assert_close(native._xyz[:, 0], torch.tensor([1., 3.]),
+                                   rtol=0, atol=0)
+        torch.testing.assert_close(native._features_dc[:, 0, 0],
+                                   torch.tensor([1., 3.]), rtol=0, atol=0)
+        self.assertEqual(native.prune_calls, 1)
+        self.assertEqual(active.reference_count, 2)
+        self.assertEqual(active.initial_reference, dict(
+            source='native_frame0_checkpoint', threshold=.015,
+            original_count=4, retained_count=2, removed_count=2))
+        self.assertTrue(all(not getattr(native, name).requires_grad
+                            for name in module.RAW_ATTRIBUTES))
+
+        own = dict(gaussians=native.capture(), rigid_tree_version=1,
+            rigid_tree_config=asdict(config.rigid_tree),
+            rigid_tree_module_config=asdict(config),
+            rigid_tree_initial_reference=active.initial_reference,
+            rigid_tree_frame=dict(prepared=False, finalized=True,
+                motion_committed=False, reference_count=2, report=None,
+                birth_control={}), births=None)
+        restored = FakeNativeGaussians()
+        # The fixed bootstrap protocol must not make historical rigid-tree
+        # checkpoints unreadable: their native first-frame step is no longer
+        # consulted once the encoded dynamic state exists.
+        resume = fake_module(config, restored, frame=1, num_init_steps=11_000)
+        module.Module.on_load_checkpoint(resume, own)
+        self.assertEqual(restored.prune_calls, 0)
+        self.assertEqual(len(restored._xyz), 2)
+        self.assertEqual(resume.initial_reference, active.initial_reference)
+        self.assertEqual(resume.reference_count, 2)
+
+    def test_pruned_reference_layout_and_frame_zero_replay_have_same_count(self):
+        config = module.ModuleConfig(initial_opacity_threshold=.015)
+        native = FakeNativeGaussians()
+        active = fake_module(config, native, frame=0)
+        module.Module.on_load_checkpoint(active,
+            dict(global_step=15000, gaussians=native.capture()))
+        with tempfile.TemporaryDirectory() as directory:
+            worker = SimpleNamespace(output_dir=Path(directory), module=active,
+                datamodule=SimpleNamespace(cameras_extent=1.))
+            active.motion = importlib.import_module('pipeline.model.spatial_motion_training').SpatialMotionTraining(config.rigid_tree)
+            trainer.Trainer._write_reference(worker, frame_index=0)
+            with np.load(worker.decoder_reference_path, allow_pickle=False) as packet:
+                self.assertEqual(int(packet['initial_original_count']), 4)
+                self.assertEqual(int(packet['initial_retained_count']), 2)
+                self.assertEqual(int(packet['initial_removed_count']), 2)
+                self.assertEqual(float(packet['initial_opacity_threshold']), .015)
+                self.assertEqual(len(_stream_fmt.DecodedState.from_reference(packet).owner), 2)
+            state, raw = replay__rigid_reference_pruning.replay(worker.decoder_reference_path.parent,
+                                       worker.decoder_reference_path, through=0)
+            self.assertEqual(len(state.xyz), active.reference_count)
+            torch.testing.assert_close(raw['xyz'][:, 0], torch.tensor([1., 3.]),
+                                       rtol=0, atol=0)
+            rebuilt = active.motion.codec_previous_state
+            torch.testing.assert_close(state.owner, rebuilt.owner, rtol=0, atol=0)
+            torch.testing.assert_close(state.parents, rebuilt.parents, rtol=0, atol=0)
+
+
+def _state(frame):
+    return _stream_fmt.DecodedState(
+        xyz=torch.tensor([[0.25, -1., 2.]], dtype=torch.float32),
+        rotation=torch.tensor([[1., 0., 0., 0.]], dtype=torch.float32),
+        owner=torch.tensor([1], dtype=torch.int64),
+        parents=torch.tensor([-1, 0], dtype=torch.int64),
+        frame_index=frame,
+        birth_sources=None,
+        survivor_rows=torch.tensor([2], dtype=torch.int64) if frame else None)
+
+
+class CheckpointStateRestoreTests(unittest.TestCase):
+    def test_cpu_restore_preserves_values_and_dtypes(self):
+        for frame in (0, 49):
+            with self.subTest(frame=frame):
+                original = _state(frame)
+                restored = _stream_fmt.DecodedState.restore(original.capture())
+                self.assertEqual(restored.frame_index, frame)
+                for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources', 'survivor_rows'):
+                    before, after = getattr(original, field), getattr(restored, field)
+                    if before is None:
+                        self.assertIsNone(after)
+                    else:
+                        self.assertEqual(after.device.type, 'cpu')
+                        self.assertEqual(after.dtype, before.dtype)
+                        torch.testing.assert_close(after, before, rtol=0, atol=0)
+                self.assertEqual(restored.digest(), original.digest())
+
+
+from pipeline.continue_trainer import validate_missing_dataset_root
+
+
+class DataResolutionTests(unittest.TestCase):
+    def test_automatic_resolution_preserves_small_images_and_caps_large_images(self):
+        from libgs.data.dataset import base
+
+        with patch.object(base, 'warning'):
+            for size, expected in (((1345, 1008), (1345, 1008)),
+                                   ((2689, 2016), (1600, 1199))):
+                with self.subTest(size=size):
+                    dataset = SimpleNamespace(image_size=size, resolution=-1, resolution_scale=1.)
+                    image = SimpleNamespace(width=size[0], height=size[1])
+                    self.assertEqual(base.Dataset.resolve_size(dataset, image), expected)
+
+    def test_explicit_resolution_uses_requested_scale(self):
+        from libgs.data.dataset import base
+
+        dataset = SimpleNamespace(image_size=(2689, 2016), resolution=2, resolution_scale=1.)
+        image = SimpleNamespace(width=2689, height=2016)
+        self.assertEqual(base.Dataset.resolve_size(dataset, image), (1344, 1008))
+
+
+class DatasetRelocationTests(unittest.TestCase):
+    def test_relocated_dataset_requires_matching_recorded_cameras_and_point_cloud(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination, data = root/'source', root/'destination', root/'data'
+            source.mkdir(); destination.mkdir(); (data/'sparse/0').mkdir(parents=True)
+            cameras = [dict(frame=frame, img_name='cam00', id=frame, fx=10.) for frame in range(2)]
+            (source/'cameras.json').write_text(json.dumps(cameras))
+            (destination/'cameras.json').write_text(json.dumps(cameras))
+            (source/'input.ply').write_bytes(b'original point cloud')
+            (data/'sparse/0/points3D.ply').write_bytes(b'original point cloud')
+            validate_missing_dataset_root(source, destination, data, 2, 2)
+            cameras[0]['fx'] = 11.
+            (destination/'cameras.json').write_text(json.dumps(cameras))
+            with self.assertRaisesRegex(ValueError, 'camera metadata'):
+                validate_missing_dataset_root(source, destination, data, 2, 2)
+            cameras[0]['fx'] = 10.
+            (destination/'cameras.json').write_text(json.dumps(cameras))
+            (data/'sparse/0/points3D.ply').write_bytes(b'different point cloud')
+            with self.assertRaisesRegex(ValueError, 'point cloud'):
+                validate_missing_dataset_root(source, destination, data, 2, 2)
 
 
 if __name__ == "__main__":

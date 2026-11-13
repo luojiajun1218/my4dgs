@@ -1,3 +1,9 @@
+"""训练管线的配置与组装入口。
+
+定义顶层配置，创建并连接数据模块、模型和训练器，供 libgs 调用；
+具体数据处理、模型计算及训练调度分别由对应文件负责。
+"""
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -23,14 +29,10 @@ class Config(BaseConfig):
     resume_prefix_dir: Optional[Path] = None
     resume_completed_prefix_frames: Optional[int] = None
     resume_last_frame: Optional[int] = None
+    # Opt in only when a historical dataset root was removed after relocation.
+    resume_allow_unverified_data_root: bool = False
     diagnostic_train_camera: Optional[str] = None
-    color_drift_branch: Optional[str] = None
-    color_fork_capture: bool = False
-    color_last_frame: Optional[int] = None
-    color_verify_forward: bool = False
     gate_refine_image_ste: bool = False
-    gate_fork_from_step150: bool = False
-    gate_last_frame: Optional[int] = None
     gui_ip: str = "127.0.0.1"
     gui_port: int = 6009
     gui_enabled: bool = True
@@ -62,17 +64,8 @@ class Pipeline(BasePipeline):
         self.datamodule = DataModule(self.config.data)
         self.module = Module(self.config.module, datamodule=self.datamodule)
         self.module.gui_enabled = self.config.gui_enabled
-        branch = self.config.color_drift_branch
-        if branch not in (None, 'none', 'shared', 'point', 'shared_point'):
-            raise ValueError('Unknown color drift branch')
-        if (branch is not None or self.config.color_fork_capture or self.config.color_last_frame is not None) and not (
-                self.config.module.full_update.color_only and self.config.module.full_update.color_point_budget and
-                self.config.module.feature_dc_update.enabled and self.config.module.full_update.train_attributes):
-            raise ValueError('Color forking requires the bounded shared-plus-point color plan')
-        self.module.color_drift_branch = branch
-        self.module.color_verify_forward = self.config.color_verify_forward
-        if not isinstance(self.config.gate_refine_image_ste, bool) or not isinstance(self.config.gate_fork_from_step150, bool):
-            raise ValueError('Gate STE and fork flags must be boolean')
+        if not isinstance(self.config.gate_refine_image_ste, bool):
+            raise ValueError('Gate STE flag must be boolean')
         gate=self.config.module.rigid_tree.spatial_gate
         if self.config.gate_refine_image_ste and not (gate.frame_training_plan and gate.shared_image_recode and
                 gate.joint_image_gradients and not gate.hierarchical_private and not gate.private_full_motion and not gate.predictor_image_weight):
@@ -89,8 +82,7 @@ class Pipeline(BasePipeline):
         self.trainer.resume_prefix_dir = self.config.resume_prefix_dir
         self.trainer.resume_completed_prefix_frames = self.config.resume_completed_prefix_frames
         self.trainer.resume_last_frame = self.config.resume_last_frame
+        if not isinstance(self.config.resume_allow_unverified_data_root, bool):
+            raise ValueError('resume_allow_unverified_data_root must be boolean')
+        self.trainer.resume_allow_unverified_data_root = self.config.resume_allow_unverified_data_root
         self.trainer.diagnostic_train_camera = self.config.diagnostic_train_camera
-        self.trainer.color_fork_capture = self.config.color_fork_capture
-        self.trainer.color_last_frame = self.config.color_last_frame
-        self.trainer.gate_fork_from_step150 = self.config.gate_fork_from_step150
-        self.trainer.gate_last_frame = self.config.gate_last_frame

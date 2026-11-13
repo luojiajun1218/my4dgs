@@ -10,7 +10,7 @@
 
 实现位置：`pipeline/module.py` 的稳定反向调度、`pipeline/model/full_attribute_update.py` 与 `regional_full_attributes.py` 的逐字段码率和 gate 代理、`pipeline/model/spatial_gate.py` 与 `spatial_gated_motion.py` 的 gate 开放时机。默认参数仍保留旧方案；本实验配置 `config/coffee_stable_attr_gate131_shrest025_30dynamic_20261109.yaml`。本组 `gate_refine_image_ste=false`：131–180 步有区域属性渲染与运动/属性码率代理梯度，但运动位置和旋转的渲染梯度未直接进入 gate；不是完整的运动渲染感知 gate 对照。
 
-运行 `output/experiments/coffee_stable_attr_gate131_shrest025_30dynamic_20261109/20261109T163108_4fb922`。用于比较的 best 为 `output/experiments/coffee_fullattr_gate_alpha005_resume210_300frames_20261109/20261109T150159_61cdb0` 的前 30 个动态帧；两组共享首帧文件 SHA256 相同、每帧的 200 次训练相机序列相同，但训练轨迹独立且 GPU 训练可能非确定。cam00 此前参与开发选型，并非独立最终测试集。实验开启逐属性一致性诊断，不进入码流。
+运行 `output/experiments/coffee_stable_attr_gate131_shrest025_30dynamic_20261109/20261109T163108_4fb922`。用于比较的 best 为 `output/best/coffee_martini` 的前 30 个动态帧；两组共享首帧文件 SHA256 相同、每帧的 200 次训练相机序列相同，但训练轨迹独立且 GPU 训练可能非确定。cam00 此前参与开发选型，并非独立最终测试集。实验开启逐属性一致性诊断，不进入码流。
 
 ## 结果
 

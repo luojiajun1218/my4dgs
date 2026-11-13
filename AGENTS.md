@@ -1,6 +1,6 @@
 运行项目前记得 conda activate ReConGS
 数据通过软链接访问，不复制大型数据。
-本地 data/colmap4d/flame_steak 指向 /home/gamer-02/Documents/DeepLearning/ReCon-GS/data/colmap4d/flame_steak；其帧图像与 COLMAP 文件链接到 /home/gamer-02/Documents/DeepLearning/S2GS/data/standard_flame_steak_300。当前 配置使用 resolution: -1、num_frames: 300，并加载共享首帧；libgs 会自动缩小宽图。
+本地 data/n3dv/flame_steak 的帧通过软链接访问共享的半分辨率去畸变图像，本地 COLMAP 相机内参与图像尺寸匹配；当前配置使用 resolution: -1、num_frames: 300，并加载共享首帧。
 output 中历史结果仅用于读取；目录可能包含软链接，不修改链接目标。新实验使用新的 experiment_name。Git 不保存原始训练产物。
 
 # 特别须知
@@ -19,8 +19,11 @@ output 中历史结果仅用于读取；目录可能包含软链接，不修改�
 
 ## 项目结构与模块组织
 
-`main.py` 是训练入口，默认使用 `--pipeline=my4dgs`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。`pipeline/__init__.py` 为 `libgs` 提供加载入口，`_compat.py` 兼容旧的 `pipeline.ReCon-GS` 导入，无需保留中间目录。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
-不要没事就写test文件，非必要不写test文件
+`main.py` 是训练入口，默认直接加载 `pipeline`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。首帧静态训练核心位于 `pipeline/first_frame/`，由 `scripts/train_first_frame.py` 调用，不依赖项目外 ReCon-GS 源码。`pipeline/__init__.py` 按需导出训练入口。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
+30帧以内（包括30帧）的实验结果都放`tmp/`文件夹内
+当全300帧实验的效果超过`output/best`文件夹中记录的时候，你询问用户“需不需要把结果移到`output/best`中”。注意这里是整体移过去，不是软链接。
+不要没事就写test文件，非必要不写test文件，无必要也不跑测试。
+逐帧训练方案：当前 `pipeline/per_frame_training.py` 只维护 200 步区域和逐点全属性更新。新增或改进逐帧训练方案时，新建独立的 Python 文件，并在 `pipeline/module.py` 的控制器导入处选择一个方案，不要把多个方案堆叠到同一个文件。
 
 ## 构建、测试与开发命令
 
@@ -46,6 +49,6 @@ python main.py --config=config/xxxxx.yaml
 - 你的输出最好简短并通俗易懂
 
 ## goal模式须知（进入goal模式必读）
-- goal模式自动运行时，尽量别做什么对照实验，我们的目的是为了发论文，是为了整体的效果变好才让你继续自动运行的。目前还在改进效果，还没到消融实验的阶段。
+- goal模式自动运行时，尽量别做什么对照实验，我们的目的是为了发论文，是为了整体的效果变好才让你继续自动运行的。
+- goal模式你可以先跑30帧看下结果，结果好的话再跑300帧。你应该分析下30帧的结果，然后找出可能的提升（无论是超参数还是机制方法），然后再跑300帧的。
 - 现在最大的问题应该是这里的机制不work，我需要你自动分析实验结果，找出可能的原因（代码逻辑上的疏忽 / 整体方法的问题）并加以改进。
-

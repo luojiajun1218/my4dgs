@@ -1,1 +1,4 @@
-"""Gaussian models, shared motion, and incremental stream codecs."""
+"""模型层：GS 数据、区域与逐点更新、空间 gate 和逐帧码流。
+
+具体实现按各文件开头的职责说明维护；训练总调度位于 pipeline 的上层模块。
+"""

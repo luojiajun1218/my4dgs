@@ -1,4 +1,10 @@
-"""Codec tests."""
+"""检查逐帧码流的往返和播放一致性。
+
+覆盖运动、透明度及全属性的编码解码，检查码流损坏、边界值和参考状态校验，
+以及解码后多帧状态与原始属性的一致性。属性优化和训练调度由各自测试文件负责。
+"""
+
+from pipeline.model import frame_stream_format as _stream_fmt, frame_stream_encode as _stream_enc, frame_stream_decode as _stream_dec
 
 import sys
 from pathlib import Path
@@ -6,70 +12,41 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import copy
 import hashlib
-import importlib
 import json
 import lzma
 import struct
 import tempfile
 import unittest
 import zlib
-from dataclasses import asdict
-from io import BytesIO
-from types import SimpleNamespace
-from unittest import mock
 from unittest.mock import patch
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 
-from pipeline.model import rigid_tree_codec as M, sparse_integer_codec as S
-from pipeline.model import sparse_integer_codec as layout
-from pipeline.model.birth_quantization import (
-    QuantizedNewGaussianView,
-    RAW_ATTRIBUTES,
-    RAW_FIELDS,
-    materialize_quantized_gaussians,
-    model_raw,
-)
-from pipeline.model.frame_plan_birth import nearest_old_references
-from pipeline.model.gaussian import GaussianModel
-from pipeline.model.legacy_opacity_codec import (
-    HEADER,
-    MAGIC,
-    decode_opacity_delta,
-    opacity_reference_hash,
-)
-from pipeline.model.rigid_residual_tree import RigidTreeConfig, quaternion_multiply, rotation_vector_quaternion
-from pipeline.model.rigid_tree_birth_codec import export_birth_attributes
-from pipeline.model.rigid_tree_codec import DecodedState, decode_motion
-from pipeline.model.sparse_updates import (
+from pipeline.model.frame_stream_format import RAW_FIELDS
+from pipeline.model.frame_stream_format import (OPACITY_HEADER as HEADER, OPACITY_MAGIC as MAGIC, opacity_reference_hash)
+from pipeline.model.frame_stream_decode import (decode_opacity_delta)
+from pipeline.model.rigid_residual_tree import RigidTreeConfig
+from pipeline.model.frame_stream_decode import (decode_motion)
+from pipeline.model import residual_gs_attributes_update as fua
+from pipeline.model.frame_stream_format import FIELDS, PLANAR_MAGIC, DecodedState, _reference_hash
+from pipeline.model.frame_stream_encode import _encode_body, encode_motion
+from pipeline.model.frame_stream_decode import decode_frame, decode_full_attribute_delta
+from pipeline.model.residual_gs_attributes_update import (
+    ResidualAppearanceAttributes, FullUpdateConfig, encode_full_attribute_delta,
     OpacityUpdateConfig,
     QuantizedOpacityUpdate,
     encode_opacity_delta,
-    sparse_block_support,
 )
-from pipeline.model.spatial_gated_motion import SpatialGatedMotion
-from pipeline.module import (
-    BirthConfig,
-    Module,
-    replace_low_opacity_gaussians,
-    restore_retired_reference,
-)
-from pipeline.trainer import Trainer
-from scripts import benchmark_rigid_residual_tree as benchmark
-from scripts.benchmark_rigid_residual_tree import _decode_frame
-from scripts.replay_rigid_tree import decode_frame, replay
-from tests import test_spatial_motion as spatial_tests
+from pipeline.model.spatial_motion_training import SpatialMotionTraining
+from tests import test_regional_attributes_update as spatial_tests
 
 
 # ----- test_rigid_tree_compression -----
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-CODEC = importlib.import_module('pipeline.model.rigid_tree_codec')
-RIGID = importlib.import_module('pipeline.model.rigid_residual_tree')
+FULL_ATTRIBUTE_STEPS = (.005, .001, .001)
 
 
 def packet_fixture(count=256):
@@ -78,90 +55,30 @@ def packet_fixture(count=256):
     rotation[:, 0] = 1
     owner = torch.ones(count, dtype=torch.long)
     parents = torch.tensor([-1, 0], dtype=torch.long)
-    prior = CODEC.DecodedState(xyz, rotation, owner, parents, 0)
+    prior = _stream_fmt.DecodedState(xyz, rotation, owner, parents, 0)
     region = torch.zeros(2, 3, dtype=torch.int16)
     gs_translation = torch.full((count, 3), 42, dtype=torch.int16)
     gs_rotation = torch.full((count, 3), 7, dtype=torch.int16)
     args = (prior, 1, 1., torch.arange(count), owner, parents,
             region, region, gs_translation, gs_rotation,
-            torch.tensor([0]), torch.tensor([[999., 0., 0.]]),
-            torch.tensor([[1., 0., 0., 0.]]), .01, .01)
+            torch.empty(0, dtype=torch.long), torch.empty(0, 3),
+            torch.empty(0, 4), .01, .01)
     return prior, args
 
 
-def legacy_packet(args, **kwargs):
-    """Build a pre-delta wire fixture without adding a legacy writer mode."""
-    def absolute_sparse_write(result, translation, rotation):
-        active_t = translation.ne(0).any(-1)
-        active_r = rotation.ne(0).any(-1)
-        active = torch.where(active_t | active_r)[0].tolist()
-        result.extend(CODEC._uvar(len(active)))
-        for row in active:
-            flags = int(active_t[row]) | (int(active_r[row]) << 1)
-            result.extend(CODEC._uvar(row))
-            result.append(flags)
-            if flags & 1:
-                result.extend(struct.pack('<3h', *translation[row].tolist()))
-            if flags & 2:
-                result.extend(struct.pack('<3h', *rotation[row].tolist()))
-
-    with mock.patch.object(CODEC, '_sparse_write', absolute_sparse_write):
-        new_raw = CODEC.encode_motion(*args, **kwargs)
-    old_magic = (CODEC.DUAL_STEP_MAGIC if new_raw.startswith(
-        CODEC.DUAL_STEP_DELTA_MAGIC) else CODEC.MAGIC)
-    content = old_magic + new_raw[4:-CODEC.CHECKSUM_BYTES]
-    return content + hashlib.sha256(content).digest()[:CODEC.CHECKSUM_BYTES]
-
-
 class MotionPacketCompressionTests(unittest.TestCase):
-    def test_compressed_and_legacy_packets_replay_identically(self):
-        prior, args = packet_fixture()
-        delta_raw = CODEC.encode_motion(*args)
-        legacy = legacy_packet(args)
-        packed = CODEC.encode_motion(*args, compression='auto')
-        assert legacy.startswith(CODEC.MAGIC)
-        assert delta_raw.startswith(CODEC.DELTA_MAGIC)
-        assert packed.startswith((CODEC.DELTA_COMPRESSED_MAGIC,
-                                  CODEC.DELTA_LZMA_COMPRESSED_MAGIC))
-        assert len(packed) < len(delta_raw)
-        old_state = CODEC.decode_motion(legacy, prior)
-        new_state = CODEC.decode_motion(packed, prior)
-        assert CODEC.decode_motion(delta_raw, prior).digest() == old_state.digest()
-        for name in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources'):
-            torch.testing.assert_close(getattr(new_state, name), getattr(old_state, name),
-                                       rtol=0, atol=0)
-        assert new_state.digest() == old_state.digest()
-        info = CODEC.motion_packet_info(packed)
-        assert info == dict(format=('RSC1-zlib' if packed.startswith(
-                                CODEC.DELTA_COMPRESSED_MAGIC) else 'RSL1-lzma'),
-                            stored_bytes=len(packed),
-                            raw_stream_bytes=len(delta_raw),
-                            compression_savings_bytes=len(delta_raw) - len(packed))
-        for wrapper in (CODEC.compress_motion_packet(legacy, mode='zlib'),
-                        CODEC.LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(legacy)) +
-                        lzma.compress(legacy, format=lzma.FORMAT_XZ, preset=9)):
-            assert CODEC.decode_motion(wrapper, prior).digest() == old_state.digest()
-
-
-    def test_auto_compression_keeps_incompressible_legacy_packet(self):
-        seed = b'rigid-tree-incompressible-fixture'
-        body = b''.join(hashlib.sha256(seed + i.to_bytes(4, 'little')).digest()
-                        for i in range(16))
-        raw = CODEC.MAGIC + body
-        raw += hashlib.sha256(raw).digest()[:CODEC.CHECKSUM_BYTES]
-        assert CODEC.compress_motion_packet(raw, mode='auto') == raw
 
 
     def test_compressed_packet_rejects_mutation_truncation_trailing_and_bomb(self):
         prior, args = packet_fixture()
-        packet = CODEC.encode_motion(*args, compression='zlib')
+        packet = _stream_enc.encode_motion(*args, compression='zlib')
         damaged = bytearray(packet)
         damaged[len(damaged) // 2] ^= 1
         for candidate in (bytes(damaged), packet[:-1], packet + b'X',
-                          CODEC.DELTA_COMPRESSED_MAGIC + CODEC._uvar(
-                              CODEC.MAX_RAW_PACKET_BYTES + 1) + packet[5:]):
+                          _stream_fmt.DELTA_COMPRESSED_MAGIC + _stream_fmt._uvar(
+                              _stream_fmt.MAX_RAW_PACKET_BYTES + 1) + packet[5:]):
             try:
-                CODEC.decode_motion(candidate, prior)
+                _stream_dec.decode_motion(candidate, prior)
             except ValueError:
                 pass
             else:
@@ -170,605 +87,77 @@ class MotionPacketCompressionTests(unittest.TestCase):
 
     def test_lzma_packet_roundtrips_and_rejects_damage_trailers_and_expansion(self):
         prior, args = packet_fixture()
-        raw = CODEC.encode_motion(*args)
-        packet = (CODEC.DELTA_LZMA_COMPRESSED_MAGIC + CODEC._uvar(len(raw)) +
+        raw = _stream_enc.encode_motion(*args)
+        packet = (_stream_fmt.DELTA_LZMA_COMPRESSED_MAGIC + _stream_fmt._uvar(len(raw)) +
                   lzma.compress(raw, format=lzma.FORMAT_XZ, preset=9))
-        assert CODEC.uncompressed_motion_packet(packet) == raw
-        assert CODEC.decode_motion(packet, prior).digest() == (
-            CODEC.decode_motion(raw, prior).digest())
-        assert CODEC.motion_packet_info(packet)['stored_bytes'] == len(packet)
+        assert _stream_dec.uncompressed_motion_packet(packet) == raw
+        assert _stream_dec.decode_motion(packet, prior).digest() == (
+            _stream_dec.decode_motion(raw, prior).digest())
+        assert _stream_dec.motion_packet_info(packet)['stored_bytes'] == len(packet)
         for bad in (packet[:-1], packet + b'X',
-                    packet[:5] + CODEC._uvar(len(raw) - 1) + packet[6:],
-                    CODEC.DELTA_LZMA_COMPRESSED_MAGIC + CODEC._uvar(
-                        CODEC.MAX_RAW_PACKET_BYTES + 1) + packet[6:]):
+                    packet[:5] + _stream_fmt._uvar(len(raw) - 1) + packet[6:],
+                    _stream_fmt.DELTA_LZMA_COMPRESSED_MAGIC + _stream_fmt._uvar(
+                        _stream_fmt.MAX_RAW_PACKET_BYTES + 1) + packet[6:]):
             try:
-                CODEC.uncompressed_motion_packet(bad)
+                _stream_dec.uncompressed_motion_packet(bad)
             except ValueError:
                 pass
             else:
                 raise AssertionError('Damaged LZMA stream was accepted')
 
 
-    def test_proximal_gs_keeps_large_signal_and_zeroes_small_signal(self):
-        from test_spatial_motion import SpatialGatedMotionTests
-        model = SpatialGatedMotionTests().model()
-        model.config.gs_translation_lr = model.config.gs_rotation_lr = .01
-        model.last_step = 2
-        translation_grad = torch.zeros_like(model.gs_translation)
-        rotation_grad = torch.zeros_like(model.gs_rotation)
-        translation_grad[0, 0] = rotation_grad[0, 0] = 1e-8
-        translation_grad[1, 0] = rotation_grad[1, 0] = 1e-2
-        model.gs_translation.grad = translation_grad
-        model.gs_rotation.grad = rotation_grad
-        model.optimizer_step()
-        model._proximal_gs_blocks()
-        assert bool((model.gs_translation[0] == 0).all())
-        assert bool((model.gs_rotation[0] == 0).all())
-        assert bool(model.gs_translation[1].ne(0).any())
-        assert bool(model.gs_rotation[1].ne(0).any())
-        assert model.last_metrics['motion/prox_zero_translation_blocks'] >= 1
-        diagnostics = model.loss_terms(2, diagnostics=True)
-        assert int(diagnostics['gs_translation_active_blocks']) == 1
-        assert int(diagnostics['gs_rotation_active_blocks']) == 1
-
-
-    def test_proximal_gs_handles_one_optimizer_block_without_moments(self):
-        from test_spatial_motion import SpatialGatedMotionTests
-        model = SpatialGatedMotionTests().model()
-        model.config.gs_translation_lr = model.config.gs_rotation_lr = .01
-        model.last_step = 2
-        gradient = torch.zeros_like(model.gs_translation)
-        gradient[0, 0] = 1e-8
-        gradient[1, 0] = 1e-2
-        model.gs_translation.grad = gradient
-        model.optimizer_step()
-        model._proximal_gs_blocks()
-        assert model.gs_rotation not in model.optimizer.state
-        assert bool((model.gs_translation[0] == 0).all())
-        assert bool(model.gs_translation[1].ne(0).any())
-
-
 # ----- test_rigid_lossless_codecs -----
 sys.path.insert(0, str(ROOT))
-BIRTH = importlib.import_module('pipeline.model.rigid_tree_birth_codec')
-MOTION = importlib.import_module('pipeline.model.rigid_tree_codec')
-QUANT = importlib.import_module('pipeline.model.birth_quantization')
-REPLAY = importlib.import_module('scripts.replay_rigid_tree')
-
-
-def appearance_fixture(rest=2, symbols_override=None):
-    count = 3
-    base = dict(
-        xyz=torch.zeros(count, 3),
-        rotation=torch.tensor([[1., 0., 0., 0.]] * count),
-        logscale=torch.arange(9, dtype=torch.float32).reshape(3, 3) / 8,
-        opacity=torch.arange(3, dtype=torch.float32).reshape(3, 1) / 8,
-        sh_dc=torch.arange(9, dtype=torch.float32).reshape(3, 1, 3) / 8,
-        sh_rest=torch.arange(9 * rest, dtype=torch.float32).reshape(3, rest, 3) / 8)
-    source = torch.tensor([2, 0])
-    symbols = {name: torch.zeros_like(base[name][source]) for name in BIRTH.ATTRIBUTES}
-    symbols['logscale'][0] = torch.tensor([-32768., 32767., 32768.])
-    symbols['opacity'][:, 0] = torch.tensor([-1., 0.])
-    if rest:
-        symbols['sh_rest'][1, 0, 0] = -32769.
-    if symbols_override is not None:
-        symbols_override(symbols)
-    predictor = {name: base[name][source] for name in symbols}
-    steps = {name: .125 for name in symbols}
-    raw = {name: predictor[name] + symbols[name] * steps[name]
-           for name in symbols}
-    xyz = torch.ones(2, 3)
-    rotation = base['rotation'][:2]
-    return base, raw, symbols, steps, predictor, source, xyz, rotation
-
-
-class BirthSymbolCodecTests(unittest.TestCase):
-    def test_exact_float32_bytes_and_field_widths(self):
-        base, raw, symbols, steps, predictor, source, xyz, rotation = appearance_fixture()
-        packet = BIRTH.encode_birth_symbols(
-            raw, 3, symbols=symbols, steps=steps, predictor=predictor,
-            source_rows=source)
-        header = BIRTH.SYMBOL_HEADER.unpack_from(packet)
-        self.assertEqual(header[:4], (BIRTH.SYMBOL_MAGIC, 3, 2, 2))
-        self.assertEqual(header[4:8], (4, 2, 2, 4))
-        decoded = BIRTH.decode_birth_attributes(packet, base, xyz, rotation, source)
-        for name in BIRTH.ATTRIBUTES:
-            torch.testing.assert_close(decoded[name], raw[name], rtol=0, atol=0)
-            self.assertEqual(decoded[name].numpy().tobytes(),
-                             raw[name].numpy().tobytes())
-        self.assertEqual(decoded['xyz'].numpy().tobytes(), xyz.numpy().tobytes())
-
-    def test_zero_rest_and_legacy_read(self):
-        base, raw, symbols, steps, predictor, source, xyz, rotation = (
-            appearance_fixture(rest=0))
-        packet = BIRTH.encode_birth_symbols(
-            raw, 3, symbols=symbols, steps=steps, predictor=predictor,
-            source_rows=source)
-        decoded = BIRTH.decode_birth_attributes(packet, base, xyz, rotation, source)
-        self.assertEqual(decoded['sh_rest'].shape, (2, 0, 3))
-        legacy = BIRTH.encode_birth_attributes(raw, 3)
-        old = BIRTH.decode_birth_attributes(legacy, base, xyz, rotation)
-        for name in BIRTH.ATTRIBUTES:
-            self.assertEqual(old[name].numpy().tobytes(), raw[name].numpy().tobytes())
-
-    def test_export_uses_symbols_or_exactness_fallback(self):
-        base, raw, symbols, steps, predictor, source, xyz, rotation = appearance_fixture()
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'birth.bin'
-            info = BIRTH.export_birth_attributes(
-                path, raw, 3, symbols=symbols, steps=steps,
-                predictor=predictor, source_rows=source)
-            self.assertFalse(info['exactness_fallback'])
-            self.assertEqual(info['archive_bytes'], path.stat().st_size)
-            self.assertEqual(path.read_bytes()[:4], BIRTH.SYMBOL_MAGIC)
-            changed = dict(raw)
-            changed['opacity'] = raw['opacity'].clone()
-            changed['opacity'][0, 0] += .01
-            info = BIRTH.export_birth_attributes(
-                path, changed, 3, symbols=symbols, steps=steps,
-                predictor=predictor, source_rows=source)
-            self.assertTrue(info['exactness_fallback'])
-            self.assertEqual(path.read_bytes()[:4], BIRTH.MAGIC)
-            decoded = BIRTH.decode_birth_attributes(
-                path.read_bytes(), base, xyz, rotation, source)
-            self.assertEqual(decoded['opacity'].numpy().tobytes(),
-                             changed['opacity'].numpy().tobytes())
-
-    def test_invalid_sources_steps_shapes_and_noninteger_symbols(self):
-        base, raw, symbols, steps, predictor, source, xyz, rotation = appearance_fixture()
-        packet = BIRTH.encode_birth_symbols(
-            raw, 3, symbols=symbols, steps=steps, predictor=predictor,
-            source_rows=source)
-        for bad_source in (None, torch.tensor([-1, 0]), torch.tensor([0, 3]),
-                           torch.tensor([0]), torch.tensor([0., 1.])):
-            with self.assertRaises(ValueError):
-                BIRTH.decode_birth_attributes(packet, base, xyz, rotation,
-                                              bad_source)
-        with self.assertRaises(ValueError):
-            BIRTH.decode_birth_attributes(packet, base, xyz[:1], rotation, source)
-        for invalid in (0., -1., float('nan'), float('inf'), 1e100):
-            bad_steps = dict(steps, opacity=invalid)
-            with self.assertRaises(ValueError):
-                BIRTH.encode_birth_symbols(
-                    raw, 3, symbols=symbols, steps=bad_steps,
-                    predictor=predictor, source_rows=source)
-        malformed = dict(symbols, opacity=symbols['opacity'][:1])
-        with self.assertRaises(ValueError):
-            BIRTH.encode_birth_symbols(
-                raw, 3, symbols=malformed, steps=steps, predictor=predictor,
-                source_rows=source)
-        fractional = dict(symbols, opacity=symbols['opacity'] + .25)
-        self.assertIsNone(BIRTH.encode_birth_symbols(
-            raw, 3, symbols=fractional, steps=steps, predictor=predictor,
-            source_rows=source))
-        excessive = dict(symbols, opacity=torch.full_like(symbols['opacity'], 2. ** 31))
-        self.assertIsNone(BIRTH.encode_birth_symbols(
-            raw, 3, symbols=excessive, steps=steps, predictor=predictor,
-            source_rows=source))
-
-    def test_header_body_corruption_truncation_and_trailer(self):
-        base, raw, symbols, steps, predictor, source, xyz, rotation = appearance_fixture()
-        packet = BIRTH.encode_birth_symbols(
-            raw, 3, symbols=symbols, steps=steps, predictor=predictor,
-            source_rows=source)
-        altered_step = bytearray(packet)
-        altered_step[19] ^= 1
-        altered_width = bytearray(packet)
-        altered_width[14] = 2
-        altered_crc = bytearray(packet)
-        altered_crc[BIRTH.SYMBOL_HEADER.size - 1] ^= 1
-        for bad in (packet[:-1], packet + b'X', bytes(altered_step),
-                    bytes(altered_width), bytes(altered_crc)):
-            with self.assertRaises(ValueError):
-                BIRTH.decode_birth_attributes(bad, base, xyz, rotation, source)
-
-    def test_valid_crc_cannot_hide_nonfinite_reconstruction_or_base(self):
-        base, raw, symbols, steps, predictor, source, xyz, rotation = appearance_fixture()
-        packet = BIRTH.encode_birth_symbols(
-            raw, 3, symbols=symbols, steps=steps, predictor=predictor,
-            source_rows=source)
-        body = zlib.decompress(packet[BIRTH.SYMBOL_HEADER.size:])
-        bad = bytearray(packet)
-        struct.pack_into('<f', bad, 18, 3e38)
-        checksum = zlib.crc32(bad[:BIRTH.SYMBOL_HEADER.size - 4] + body)
-        struct.pack_into('<I', bad, BIRTH.SYMBOL_HEADER.size - 4, checksum)
-        with self.assertRaisesRegex(ValueError, 'Nonfinite reconstructed'):
-            BIRTH.decode_birth_attributes(bytes(bad), base, xyz, rotation, source)
-        invalid_base = dict(base, opacity=base['opacity'].clone())
-        invalid_base['opacity'][0, 0] = float('nan')
-        with self.assertRaisesRegex(ValueError, 'Invalid base opacity'):
-            BIRTH.decode_birth_attributes(packet, invalid_base, xyz, rotation, source)
 
 
 class MotionEnvelopeTests(unittest.TestCase):
     @staticmethod
     def raw_packet(body):
-        raw = MOTION.DUAL_STEP_MAGIC + body
-        return raw + hashlib.sha256(raw).digest()[:MOTION.CHECKSUM_BYTES]
+        raw = _stream_fmt.DUAL_STEP_MAGIC + body
+        return raw + hashlib.sha256(raw).digest()[:_stream_fmt.CHECKSUM_BYTES]
 
     def test_auto_compares_actual_packet_lengths(self):
         for body in (b'A' * 10000, bytes(range(256)) * 20):
             raw = self.raw_packet(body)
-            zlib_packet = MOTION.compress_motion_packet(raw, mode='zlib')
-            lzma_packet = (MOTION.DUAL_STEP_LZMA_COMPRESSED_MAGIC +
-                           MOTION._uvar(len(raw)) +
+            zlib_packet = _stream_enc.compress_motion_packet(raw, mode='zlib')
+            lzma_packet = (_stream_fmt.DUAL_STEP_LZMA_COMPRESSED_MAGIC +
+                           _stream_fmt._uvar(len(raw)) +
                            lzma.compress(raw, format=lzma.FORMAT_XZ, preset=9))
-            chosen = MOTION.compress_motion_packet(raw, mode='auto')
+            chosen = _stream_enc.compress_motion_packet(raw, mode='auto')
             self.assertEqual(len(chosen), min(map(len, (raw, zlib_packet, lzma_packet))))
-            self.assertEqual(MOTION.uncompressed_motion_packet(chosen), raw)
-            self.assertEqual(MOTION.uncompressed_motion_packet(lzma_packet), raw)
-            self.assertEqual(MOTION.motion_packet_info(lzma_packet)['stored_bytes'],
+            self.assertEqual(_stream_dec.uncompressed_motion_packet(chosen), raw)
+            self.assertEqual(_stream_dec.uncompressed_motion_packet(lzma_packet), raw)
+            self.assertEqual(_stream_dec.motion_packet_info(lzma_packet)['stored_bytes'],
                              len(lzma_packet))
 
     def test_lzma_rejects_damage_trailer_and_expansion(self):
         raw = self.raw_packet(b'A' * 10000)
-        prefix = MOTION.DUAL_STEP_LZMA_COMPRESSED_MAGIC
+        prefix = _stream_fmt.DUAL_STEP_LZMA_COMPRESSED_MAGIC
         lz = lzma.compress(raw, format=lzma.FORMAT_XZ, preset=9)
-        good = prefix + MOTION._uvar(len(raw)) + lz
-        for bad in (good[:-1], good + b'X', prefix + MOTION._uvar(len(raw) - 1) + lz,
-                    prefix + MOTION._uvar(MOTION.MAX_RAW_PACKET_BYTES + 1) + lz):
+        good = prefix + _stream_fmt._uvar(len(raw)) + lz
+        for bad in (good[:-1], good + b'X', prefix + _stream_fmt._uvar(len(raw) - 1) + lz,
+                    prefix + _stream_fmt._uvar(_stream_fmt.MAX_RAW_PACKET_BYTES + 1) + lz):
             with self.assertRaises(ValueError):
-                MOTION.uncompressed_motion_packet(bad)
+                _stream_dec.uncompressed_motion_packet(bad)
 
     def test_delta_sparse_rows_reject_zero_gap_overflow_and_truncation(self):
         for payload in (
-            MOTION._uvar(1) + MOTION._uvar(0) + b'\x01' + struct.pack('<3h', 1, 0, 0),
-            MOTION._uvar(1) + MOTION._uvar(3) + b'\x01' + struct.pack('<3h', 1, 0, 0),
-            MOTION._uvar(1) + MOTION._uvar(1) + b'\x01' + b'\x01\x00',
+            _stream_fmt._uvar(1) + _stream_fmt._uvar(0) + b'\x01' + struct.pack('<3h', 1, 0, 0),
+            _stream_fmt._uvar(1) + _stream_fmt._uvar(3) + b'\x01' + struct.pack('<3h', 1, 0, 0),
+            _stream_fmt._uvar(1) + _stream_fmt._uvar(1) + b'\x01' + b'\x01\x00',
         ):
             with self.assertRaises(ValueError):
-                MOTION._sparse_read(MOTION._Reader(payload), 2, delta_rows=True)
-        valid = (MOTION._uvar(2) + MOTION._uvar(1) + b'\x01' +
-                 struct.pack('<3h', 1, 0, 0) + MOTION._uvar(1) + b'\x02' +
+                _stream_dec._sparse_read(_stream_fmt._Reader(payload), 2, delta_rows=True)
+        valid = (_stream_fmt._uvar(2) + _stream_fmt._uvar(1) + b'\x01' +
+                 struct.pack('<3h', 1, 0, 0) + _stream_fmt._uvar(1) + b'\x02' +
                  struct.pack('<3h', 0, 1, 0))
-        translation, rotation = MOTION._sparse_read(
-            MOTION._Reader(valid), 2, delta_rows=True)
+        translation, rotation = _stream_dec._sparse_read(
+            _stream_fmt._Reader(valid), 2, delta_rows=True)
         torch.testing.assert_close(translation[0], torch.tensor([1, 0, 0], dtype=torch.int16))
         torch.testing.assert_close(rotation[1], torch.tensor([0, 1, 0], dtype=torch.int16))
 
 
-class FullReplayTests(unittest.TestCase):
-    def test_rtb2_two_frame_owner_edit_and_birth_replay(self):
-        base, _, _, steps, _, _, _, _ = appearance_fixture()
-        prior = MOTION.DecodedState(base['xyz'], base['rotation'],
-                                    torch.tensor([1, 2, 2]),
-                                    torch.tensor([-1, 0, 0]), 0)
-        zeros_region = torch.zeros(3, 3, dtype=torch.int16)
-        zeros_gs = torch.zeros(3, 3, dtype=torch.int16)
-        edited_owner = prior.owner.clone()
-        edited_owner[2] = 1
-        birth_xyz = torch.tensor([[1., 2., 3.]])
-        birth_q = torch.tensor([[1., 0., 0., 0.]])
-        motion1 = MOTION.encode_motion(
-            prior, 1, 1., torch.arange(3), edited_owner, prior.parents,
-            zeros_region, zeros_region, zeros_gs, zeros_gs,
-            torch.tensor([2]), birth_xyz, birth_q, .01, .01,
-            compression='auto')
-        state1 = MOTION.decode_motion(motion1, prior)
-        self.assertEqual(int(state1.owner[-1]), 1)
-        self.assertNotEqual(int(prior.owner[2]), int(state1.owner[-1]))
-        symbols = {name: torch.ones_like(base[name][2:3])
-                   for name in BIRTH.ATTRIBUTES}
-        predictor = {name: base[name][2:3] for name in BIRTH.ATTRIBUTES}
-        newborn = {name: predictor[name] + symbols[name] * steps[name]
-                   for name in BIRTH.ATTRIBUTES}
-        birth1 = BIRTH.encode_birth_symbols(
-            newborn, 3, symbols=symbols, steps=steps,
-            predictor=predictor, source_rows=torch.tensor([2]))
-        self.assertTrue(birth1.startswith(BIRTH.SYMBOL_MAGIC))
-        raw1 = {name: torch.cat((base[name], newborn[name]))
-                for name in BIRTH.ATTRIBUTES}
-        raw1.update(xyz=state1.xyz, rotation=state1.rotation)
-        zeros_next = torch.zeros(4, 3, dtype=torch.int16)
-        motion2 = MOTION.encode_motion(
-            state1, 2, 1., torch.arange(4), state1.owner, state1.parents,
-            zeros_region, zeros_region, zeros_next, zeros_next,
-            torch.empty(0, dtype=torch.long), torch.empty(0, 3),
-            torch.empty(0, 4), .01, .01, compression='auto')
-        state2 = MOTION.decode_motion(motion2, state1)
-        with tempfile.TemporaryDirectory() as directory:
-            stream = Path(directory)
-            reference = stream / 'reference_frame0.npz'
-            np.savez_compressed(reference,
-                **{name: value.numpy() for name, value in base.items()},
-                owner=prior.owner.numpy(), parents=prior.parents.numpy(),
-                frame_index=np.array(0, dtype=np.int32))
-            (stream / 'motion_001.bin').write_bytes(motion1)
-            (stream / 'birth_001.bin').write_bytes(birth1)
-            (stream / 'motion_002.bin').write_bytes(motion2)
-            (stream / 'frame_001.json').write_text(json.dumps(dict(
-                frame=1, decoded_state_sha256=state1.digest().hex(),
-                raw_state_sha256=QUANT.reference_digest(raw1))))
-            (stream / 'frame_002.json').write_text(json.dumps(dict(
-                frame=2, decoded_state_sha256=state2.digest().hex(),
-                raw_state_sha256=QUANT.reference_digest(raw1))))
-            actual_state, actual_raw = REPLAY.replay(stream, reference, 2)
-            self.assertEqual(actual_state.digest(), state2.digest())
-            self.assertEqual(QUANT.reference_digest(actual_raw),
-                             QUANT.reference_digest(raw1))
-
-
-# ----- test_rigid_reference_pruning -----
 sys.path.insert(0, str(ROOT))
-module = importlib.import_module('pipeline.module')
-trainer = importlib.import_module('pipeline.trainer')
-gaussian = importlib.import_module('pipeline.model.gaussian')
-codec = importlib.import_module('pipeline.model.rigid_tree_codec')
-replay__rigid_reference_pruning = importlib.import_module('scripts.replay_rigid_tree')
-
-
-class FakeNativeGaussians:
-    def __init__(self):
-        self.prune_calls = 0
-        self.restore(self.raw(), None)
-
-    @staticmethod
-    def raw():
-        centers = torch.arange(4, dtype=torch.float32).reshape(4, 1)
-        return dict(_xyz=torch.cat((centers, torch.zeros(4, 2)), dim=1),
-                    _rotation=torch.tensor([[1., 0., 0., 0.]] * 4),
-                    _scaling=torch.zeros(4, 3),
-                    _opacity=torch.logit(torch.tensor([[.01], [.2], [.005], [.5]])),
-                    _features_dc=centers.reshape(4, 1, 1).expand(4, 1, 3).clone(),
-                    _features_rest=torch.zeros(4, 0, 3))
-
-    def capture(self):
-        return {name: getattr(self, name).detach().clone()
-                for name in module.RAW_ATTRIBUTES}
-
-    def restore(self, packet, config):
-        for name in module.RAW_ATTRIBUTES:
-            setattr(self, name, torch.nn.Parameter(packet[name].detach().clone()))
-
-    def prune_points(self, mask):
-        self.prune_calls += 1
-        for name in module.RAW_ATTRIBUTES:
-            value = getattr(self, name)
-            setattr(self, name, torch.nn.Parameter(value.detach()[~mask].clone()))
-
-
-def fake_module(config, gaussians, frame, num_init_steps=15000):
-    holder = SimpleNamespace(config=config, gaussians=gaussians,
-        renderer=SimpleNamespace(gaussians=None), current_frame=frame,
-        trainer=SimpleNamespace(config=SimpleNamespace(num_init_steps=num_init_steps)),
-        _freeze_base=lambda: [getattr(gaussians, name).requires_grad_(False)
-                              for name in module.RAW_ATTRIBUTES])
-    return holder
-
-
-class NativeReferencePruningTests(unittest.TestCase):
-    def test_native_bootstrap_requires_exact_fixed_15000_step_protocol(self):
-        config = module.ModuleConfig(initial_opacity_threshold=.015)
-        native = FakeNativeGaussians()
-        configured_11k = fake_module(
-            config, native, frame=0, num_init_steps=11_000)
-        with self.assertRaisesRegex(ValueError, 'exactly 15000 steps'):
-            module.Module.on_load_checkpoint(configured_11k,
-                dict(global_step=11_000, gaussians=native.capture()))
-
-        configured_15k = fake_module(config, native, frame=0)
-        with self.assertRaisesRegex(ValueError, '15000-step'):
-            module.Module.on_load_checkpoint(configured_15k,
-                dict(global_step=14_999, gaussians=native.capture()))
-
-    def test_threshold_validation_and_full_delete_guard(self):
-        for bad in (-.01, 1., float('nan'), float('inf'), True, '0.015'):
-            with self.subTest(threshold=bad), self.assertRaisesRegex(
-                    ValueError, 'initial_opacity_threshold'):
-                module.validate_initial_opacity_threshold(bad)
-        original = FakeNativeGaussians()
-        with self.assertRaisesRegex(ValueError, 'every Gaussian'):
-            module.prune_native_initial_gaussians(original, .9)
-        self.assertEqual(original.prune_calls, 0)
-        self.assertEqual(len(original._xyz), 4)
-        unpruned = module.prune_native_initial_gaussians(original, 0.)
-        self.assertEqual((unpruned['original_count'], unpruned['retained_count'],
-                          unpruned['removed_count']), (4, 4, 0))
-        self.assertEqual(original.prune_calls, 0)
-
-    def test_native_prune_keeps_deterministic_rows_and_own_resume_does_not_prune(self):
-        config = module.ModuleConfig(initial_opacity_threshold=.015)
-        native = FakeNativeGaussians()
-        active = fake_module(config, native, frame=0)
-        module.Module.on_load_checkpoint(active,
-            dict(global_step=15000, gaussians=native.capture()))
-        torch.testing.assert_close(native._xyz[:, 0], torch.tensor([1., 3.]),
-                                   rtol=0, atol=0)
-        torch.testing.assert_close(native._features_dc[:, 0, 0],
-                                   torch.tensor([1., 3.]), rtol=0, atol=0)
-        self.assertEqual(native.prune_calls, 1)
-        self.assertEqual(active.reference_count, 2)
-        self.assertEqual(active.initial_reference, dict(
-            source='native_frame0_checkpoint', threshold=.015,
-            original_count=4, retained_count=2, removed_count=2))
-        self.assertTrue(all(not getattr(native, name).requires_grad
-                            for name in module.RAW_ATTRIBUTES))
-
-        own = dict(gaussians=native.capture(), rigid_tree_version=1,
-            rigid_tree_config=asdict(config.rigid_tree),
-            rigid_tree_module_config=asdict(config),
-            rigid_tree_initial_reference=active.initial_reference,
-            rigid_tree_frame=dict(prepared=False, finalized=True,
-                motion_committed=False, reference_count=2, report=None,
-                birth_control={}), births=None)
-        restored = FakeNativeGaussians()
-        # The fixed bootstrap protocol must not make historical rigid-tree
-        # checkpoints unreadable: their native first-frame step is no longer
-        # consulted once the encoded dynamic state exists.
-        resume = fake_module(config, restored, frame=1, num_init_steps=11_000)
-        module.Module.on_load_checkpoint(resume, own)
-        self.assertEqual(restored.prune_calls, 0)
-        self.assertEqual(len(restored._xyz), 2)
-        self.assertEqual(resume.initial_reference, active.initial_reference)
-        self.assertEqual(resume.reference_count, 2)
-
-    def test_pruned_reference_layout_and_frame_zero_replay_have_same_count(self):
-        config = module.ModuleConfig(initial_opacity_threshold=.015)
-        native = FakeNativeGaussians()
-        active = fake_module(config, native, frame=0)
-        module.Module.on_load_checkpoint(active,
-            dict(global_step=15000, gaussians=native.capture()))
-        with tempfile.TemporaryDirectory() as directory:
-            worker = SimpleNamespace(output_dir=Path(directory), module=active,
-                datamodule=SimpleNamespace(cameras_extent=1.))
-            active.motion = importlib.import_module('pipeline.model.spatial_gated_motion').SpatialGatedMotion(config.rigid_tree)
-            trainer.Trainer._write_reference(worker, frame_index=0)
-            with np.load(worker.decoder_reference_path, allow_pickle=False) as packet:
-                self.assertEqual(int(packet['initial_original_count']), 4)
-                self.assertEqual(int(packet['initial_retained_count']), 2)
-                self.assertEqual(int(packet['initial_removed_count']), 2)
-                self.assertEqual(float(packet['initial_opacity_threshold']), .015)
-                self.assertEqual(len(M.DecodedState.from_reference(packet).owner), 2)
-            state, raw = replay__rigid_reference_pruning.replay(worker.decoder_reference_path.parent,
-                                       worker.decoder_reference_path, through=0)
-            self.assertEqual(len(state.xyz), active.reference_count)
-            torch.testing.assert_close(raw['xyz'][:, 0], torch.tensor([1., 3.]),
-                                       rtol=0, atol=0)
-            rebuilt = active.motion.codec_previous_state
-            torch.testing.assert_close(state.owner, rebuilt.owner, rtol=0, atol=0)
-            torch.testing.assert_close(state.parents, rebuilt.parents, rtol=0, atol=0)
-
-
-class ActiveRenderCacheTests(unittest.TestCase):
-    @staticmethod
-    def model(trainable):
-        result = gaussian.GaussianModel(0)
-        raw = dict(_xyz=torch.tensor([[-.25, 0., 0.], [.25, 0., 0.]]),
-                   _rotation=torch.tensor([[1., 0., 0., 0.]] * 2),
-                   _scaling=torch.full((2, 3), -.4),
-                   _opacity=torch.tensor([[.1], [-.2]]),
-                   _features_dc=torch.tensor([[[.2, .4, .6]], [[.8, .3, .1]]]),
-                   _features_rest=torch.zeros(2, 0, 3))
-        for name, value in raw.items():
-            setattr(result, name, torch.nn.Parameter(value, requires_grad=trainable))
-        return result
-
-    @staticmethod
-    def image(model):
-        # A small differentiable image assembled from the same renderer inputs.
-        pixels = torch.linspace(-1., 1., 7)
-        centers = model.get_xyz[:, :1]
-        width = model.get_scaling[:, :1]
-        alpha = model.get_opacity
-        rotation = model.get_rotation
-        color = model.get_features[:, 0, :] * (rotation[:, :1] + rotation[:, 1:2])
-        coverage = torch.exp(-.5 * ((centers - pixels) / width).square()) * alpha
-        return coverage.T @ color
-
-    def test_cache_preserves_image_and_attribute_gradients(self):
-        cached, uncached = self.model(True), self.model(True)
-        uncached.render_attribute_cache = False
-        left, right = self.image(cached), self.image(uncached)
-        torch.testing.assert_close(left, right, rtol=0, atol=0)
-        left.square().sum().backward()
-        right.square().sum().backward()
-        for name in module.RAW_ATTRIBUTES:
-            torch.testing.assert_close(getattr(cached, name).grad,
-                                       getattr(uncached, name).grad,
-                                       rtol=0, atol=0)
-
-    def test_frozen_cache_preserves_motion_gradient_and_invalidates_on_change(self):
-        cached, uncached = self.model(False), self.model(False)
-        uncached.render_attribute_cache = False
-        cached.rigid_xyz = cached._xyz.detach().clone().requires_grad_()
-        uncached.rigid_xyz = uncached._xyz.detach().clone().requires_grad_()
-        cached.rigid_rotation = cached._rotation.detach().clone().requires_grad_()
-        uncached.rigid_rotation = uncached._rotation.detach().clone().requires_grad_()
-        with torch.no_grad():
-            self.assertIs(cached.get_features, cached.get_features)
-            self.assertIs(cached.get_scaling, cached.get_scaling)
-            self.assertIs(cached.get_opacity, cached.get_opacity)
-        left, right = self.image(cached), self.image(uncached)
-        torch.testing.assert_close(left, right, rtol=0, atol=0)
-        left.square().sum().backward()
-        right.square().sum().backward()
-        torch.testing.assert_close(cached.rigid_xyz.grad, uncached.rigid_xyz.grad,
-                                   rtol=0, atol=0)
-        torch.testing.assert_close(cached.rigid_rotation.grad,
-                                   uncached.rigid_rotation.grad, rtol=0, atol=0)
-        self.assertGreater(float(cached.rigid_rotation.grad.abs().sum()), 0.)
-        with torch.no_grad():
-            old = cached.get_opacity
-            cached._opacity.add_(.25)
-            self.assertIsNot(cached.get_opacity, old)
-            torch.testing.assert_close(cached.get_opacity,
-                                       torch.sigmoid(cached._opacity), rtol=0, atol=0)
-
-
-class TerminalBirthTests(unittest.TestCase):
-    def test_final_optimizer_update_precedes_prune_without_new_split(self):
-        quantization = importlib.import_module('pipeline.model.birth_quantization')
-        events = []
-        births = gaussian.BirthGaussianModel(0)
-        fields = dict(_xyz=torch.zeros(2, 3),
-                      _rotation=torch.tensor([[1., 0., 0., 0.]] * 2),
-                      _scaling=torch.zeros(2, 3),
-                      _opacity=torch.logit(torch.tensor([[.005], [.002]])),
-                      _features_dc=torch.zeros(2, 1, 3),
-                      _features_rest=torch.zeros(2, 0, 3))
-        for name, value in fields.items():
-            setattr(births, name, torch.nn.Parameter(value))
-        births.max_radii2D = torch.zeros(2)
-        births.xyz_gradient_accum = torch.zeros(2, 1)
-        births.denom = torch.zeros(2, 1)
-        births.source_rows = torch.tensor([0, 1])
-        groups = [(key, attr) for key, attr in (
-            ('xyz', '_xyz'), ('f_dc', '_features_dc'),
-            ('f_rest', '_features_rest'), ('opacity', '_opacity'),
-            ('scaling', '_scaling'), ('rotation', '_rotation'))]
-        births.optimizer = torch.optim.Adam([
-            dict(name=key, params=[getattr(births, attr)])
-            for key, attr in groups], lr=1.)
-        births._opacity.grad = torch.tensor([[-1.], [0.]])
-        original_step = births.optimizer.step
-        original_zero = births.optimizer.zero_grad
-        original_prune = births.prune_points
-        def step():
-            events.append('step')
-            original_step()
-        def zero_grad(**kwargs):
-            events.append('zero')
-            original_zero(**kwargs)
-        def prune_points(remove):
-            events.append('prune')
-            original_prune(remove)
-        births.optimizer.step = step
-        births.optimizer.zero_grad = zero_grad
-        births.prune_points = prune_points
-        births.add_densification_stats = lambda *args, **kwargs: None
-        def fail_densify(*args, **kwargs):
-            raise AssertionError('Terminal step must not split')
-        births.adaptive_densify_and_prune = fail_densify
-        config = module.ModuleConfig()
-        config.rigid_tree.motion_steps = 100
-        config.rigid_tree.birth_steps = 200
-        config.birth.densify_interval = 40  # Final step is a former split point.
-        active = SimpleNamespace(config=config, motion_committed=True,
-            births=births, gaussians=SimpleNamespace(_xyz=torch.zeros(2, 3)),
-            trainer=SimpleNamespace(global_step=300), motion_steps=100,
-            total_steps=300, datamodule=SimpleNamespace(cameras_extent=20.),
-            birth_control=dict(pruned=0, split_added=0),
-            finalize_frame=lambda: events.append('finalize'))
-        active._prune_terminal_births = lambda: module.Module._prune_terminal_births(active)
-        package = dict(visibility_filter=torch.tensor([False, False, True, True]),
-                       radii=torch.zeros(4), viewspace_points=None)
-        module.Module.post_training_step(active, package)
-        self.assertEqual(events, ['step', 'zero', 'prune', 'finalize'])
-        self.assertEqual(active.birth_control['pruned'], 1)
-        self.assertEqual(active.birth_control['split_added'], 0)
-        torch.testing.assert_close(births.source_rows, torch.tensor([0]),
-                                   rtol=0, atol=0)
-        self.assertEqual(len(births._xyz), 1)
-        reference = dict(xyz=torch.zeros(2, 3),
-            rotation=torch.tensor([[1., 0., 0., 0.]] * 2),
-            logscale=torch.zeros(2, 3), opacity=torch.zeros(2, 1),
-            sh_dc=torch.zeros(2, 1, 3), sh_rest=torch.zeros(2, 0, 3))
-        view = quantization.QuantizedNewGaussianView(
-            births, config.birth, 20., reference, source_rows=births.source_rows)
-        materialized, sources = quantization.materialize_quantized_gaussians(
-            reference, view)
-        self.assertEqual(len(materialized['xyz']), 3)
-        torch.testing.assert_close(sources, torch.tensor([0]), rtol=0, atol=0)
 
 
 # ----- test_sparse_integer_codec -----
@@ -776,15 +165,15 @@ sys.path.insert(0, str(ROOT))
 
 
 def wrapped(layout, raw_length, magics):
-    prefix = S._varint(raw_length) + S._varint(len(layout))
+    prefix = _stream_fmt._integer_varint(raw_length) + _stream_fmt._integer_varint(len(layout))
     return [magics[0] + prefix + layout,
             magics[1] + prefix + zlib.compress(layout, 6),
             magics[2] + prefix + lzma.compress(layout, preset=9)]
 
 
 def spatial_fixture():
-    from test_spatial_motion import SpatialGatedMotionTests
-    model = SpatialGatedMotionTests().model(repetitions=32)
+    from tests.test_regional_attributes_update import SpatialMotionTrainingTests
+    model = SpatialMotionTrainingTests().model(repetitions=32)
     prior = model.codec_previous_state
     rows = torch.arange(len(prior.xyz))
     rows = rows[(rows % 11) != 0]
@@ -798,10 +187,10 @@ def spatial_fixture():
     gr = torch.zeros_like(gt)
     gr[torch.arange(len(rows)), torch.randint(3, (len(rows),), generator=generator)] = 1
     gr[1] = torch.tensor([0, -32768, 32767], dtype=torch.int16)
-    sources = torch.tensor([0, len(rows) - 1])
+    sources = torch.empty(0, dtype=torch.long)
     args = (prior, 1, 1., rows, owner, prior.parents, rt, rr, gt, gr,
             sources, prior.xyz[rows[sources]] + .001, prior.rotation[rows[sources]], .001, .001)
-    raw = M.encode_motion(*args, gs_translation_step_extent=.001,
+    raw = _stream_enc.encode_motion(*args, gs_translation_step_extent=.001,
                           gs_rotation_step_rad=.001, spatial_open=prior.spatial_open)
     return prior, raw
 
@@ -816,7 +205,7 @@ def opacity_fixture():
     body = bytearray()
     previous = -1
     for row in rows.tolist():
-        body.extend(S._varint(row - previous))
+        body.extend(_stream_fmt._integer_varint(row - previous))
         body.extend(struct.pack('<h', int(symbols[row, 0])))
         previous = row
     prefix = HEADER.pack(MAGIC, 1, len(reference), len(rows), .125,
@@ -831,42 +220,40 @@ class SparseIntegerCodecTests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(2)
 
-    def test_vectorized_varints_preserve_legacy_bytes_at_boundaries(self):
+    def test_vectorized_varints_match_canonical_bytes_at_boundaries(self):
         import numpy as np
         values = np.r_[np.array([0, 1, 127, 128, 16383, 16384, 2097151, 2097152,
                                 268435455, 268435456, 0xffffffff], dtype=np.uint64),
                        np.random.default_rng(29).integers(0, 2**32, 2048, dtype=np.uint64)]
-        expected = b''.join(S._varint(value) for value in values)
-        self.assertEqual(S.encode_unsigned_values(values), expected)
-        self.assertEqual(S.encode_unsigned_values([]), b'')
+        expected = b''.join(_stream_fmt._integer_varint(value) for value in values)
+        self.assertEqual(_stream_enc.encode_unsigned_values(values), expected)
+        self.assertEqual(_stream_enc.encode_unsigned_values([]), b'')
 
-    def test_motion_all_envelopes_restore_exact_raw_and_state_with_deletions_births(self):
+    def test_motion_all_envelopes_restore_exact_raw_and_state(self):
         prior, raw = spatial_fixture()
-        layout = S.encode_motion_layout(raw)
-        expected = M.decode_motion(raw, prior)
-        for packet in wrapped(layout, len(raw), S.MOTION_MAGICS):
+        layout = _stream_enc.encode_motion_layout(raw)
+        expected = _stream_dec.decode_motion(raw, prior)
+        for packet in wrapped(layout, len(raw), _stream_fmt.MOTION_MAGICS):
             with self.subTest(magic=packet[:4]):
-                self.assertEqual(M.uncompressed_motion_packet(packet), raw)
-                actual = M.decode_motion(packet, prior)
+                self.assertEqual(_stream_dec.uncompressed_motion_packet(packet), raw)
+                actual = _stream_dec.decode_motion(packet, prior)
                 self.assertEqual(actual.digest(), expected.digest())
                 for name in ('xyz', 'rotation', 'owner', 'parents', 'survivor_rows', 'birth_sources'):
                     self.assertEqual(getattr(actual, name).numpy().tobytes(),
                                      getattr(expected, name).numpy().tobytes())
-                self.assertEqual(M.motion_packet_info(packet)['stored_bytes'], len(packet))
-        chosen = M.compress_motion_packet(raw)
-        old = [raw, M.compress_motion_packet(raw, 'zlib'),
-               M.SPATIAL_LZMA_COMPRESSED_MAGIC + M._uvar(len(raw)) + lzma.compress(raw, preset=9)]
+                self.assertEqual(_stream_dec.motion_packet_info(packet)['stored_bytes'], len(packet))
+        chosen = _stream_enc.compress_motion_packet(raw)
+        old = [raw, _stream_enc.compress_motion_packet(raw, 'zlib'),
+               _stream_fmt.SPATIAL_LZMA_COMPRESSED_MAGIC + _stream_fmt._uvar(len(raw)) + lzma.compress(raw, preset=9)]
         self.assertLessEqual(len(chosen), min(map(len, old)))
-        self.assertEqual(M.uncompressed_motion_packet(chosen), raw)
+        self.assertEqual(_stream_dec.uncompressed_motion_packet(chosen), raw)
 
     def test_opacity_auto_and_all_envelopes_keep_logits_reference_bits_and_symbols(self):
         reference, symbols, raw = opacity_fixture()
-        layout = S.encode_opacity_layout(raw)
-        legacy = raw[:HEADER.size] + zlib.compress(raw[HEADER.size:], 6)
-        expected = decode_opacity_delta(legacy, reference, frame_index=1)
+        layout = _stream_enc.encode_opacity_layout(raw)
         auto = encode_opacity_delta(reference, symbols, frame_index=1, step=.125)
-        self.assertLessEqual(len(auto), len(legacy))
-        for packet in [auto, *wrapped(layout, len(raw), S.OPACITY_MAGICS)]:
+        expected = decode_opacity_delta(auto, reference, frame_index=1)
+        for packet in [auto, *wrapped(layout, len(raw), _stream_fmt.OPACITY_MAGICS)]:
             decoded = decode_opacity_delta(packet, reference, frame_index=1)
             self.assertEqual(decoded.logits.numpy().tobytes(), expected.logits.numpy().tobytes())
             self.assertEqual(decoded.symbols.numpy().tobytes(), expected.symbols.numpy().tobytes())
@@ -882,8 +269,8 @@ class SparseIntegerCodecTests(unittest.TestCase):
         header = list(HEADER.unpack(raw[:HEADER.size]))
         header[6] ^= 1
         damaged = HEADER.pack(*header) + raw[HEADER.size:]
-        layout = S.encode_opacity_layout(damaged)
-        for packet in wrapped(layout, len(damaged), S.OPACITY_MAGICS):
+        layout = _stream_enc.encode_opacity_layout(damaged)
+        for packet in wrapped(layout, len(damaged), _stream_fmt.OPACITY_MAGICS):
             with self.subTest(magic=packet[:4]), self.assertRaisesRegex(ValueError, 'checksum'):
                 decode_opacity_delta(packet, reference, frame_index=1)
 
@@ -891,39 +278,29 @@ class SparseIntegerCodecTests(unittest.TestCase):
         prior, raw_motion = spatial_fixture()
         reference, _, raw_opacity = opacity_fixture()
         for raw, magics, transform, decode in [
-                (raw_motion, S.MOTION_MAGICS, S.encode_motion_layout,
-                 lambda p: M.decode_motion(p, prior)),
-                (raw_opacity, S.OPACITY_MAGICS, S.encode_opacity_layout,
+                (raw_motion, _stream_fmt.MOTION_MAGICS, _stream_enc.encode_motion_layout,
+                 lambda p: _stream_dec.decode_motion(p, prior)),
+                (raw_opacity, _stream_fmt.OPACITY_MAGICS, _stream_enc.encode_opacity_layout,
                  lambda p: decode_opacity_delta(p, reference))]:
             layout = transform(raw)
             for packet in wrapped(layout, len(raw), magics):
                 mutated = bytearray(packet)
                 mutated[-1] ^= 1
-                bad_length = magics[0] + S._varint(0xffffffff) + S._varint(len(layout)) + layout
+                bad_length = magics[0] + _stream_fmt._integer_varint(0xffffffff) + _stream_fmt._integer_varint(len(layout)) + layout
                 for bad in (packet[:-1], packet + b'X', bytes(mutated), bad_length):
                     with self.subTest(magic=packet[:4]), self.assertRaises(ValueError):
                         decode(bad)
 
     def test_planar_rejects_noncanonical_gaps_and_out_of_range_int16(self):
-        for payload in (b'\x80\x00', S._varint(65536)):
+        for payload in (b'\x80\x00', _stream_fmt._integer_varint(65536)):
             with self.assertRaises(ValueError):
-                S._read_values(S._Reader(payload), 1, 1)
-        for gap in (b'\0', S._varint(4)):
+                _stream_fmt._read_values(_stream_fmt._IntegerReader(payload), 1, 1)
+        for gap in (b'\0', _stream_fmt._integer_varint(4)):
             with self.assertRaises(ValueError):
-                S._Reader(gap).gaps(1, 3)
+                _stream_fmt._IntegerReader(gap).gaps(1, 3)
 
 
 # ----- test_gaussian_replacement -----
-class Rows:
-    def __init__(self, raw):
-        self.prune_calls = 0
-        for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-            setattr(self, attr, raw[name].detach().clone())
-
-    def prune_points(self, remove):
-        self.prune_calls += 1
-        for attr in RAW_ATTRIBUTES:
-            setattr(self, attr, getattr(self, attr)[~remove].clone())
 
 
 def reference_raw(rest=3):
@@ -944,385 +321,17 @@ def motion_model(raw):
     cfg.spatial_gate.start_step = cfg.spatial_gate.gate_start_step = 0
     cfg.spatial_gate.initial_logit = -2.
     cfg.validate()
-    motion = SpatialGatedMotion(cfg)
+    motion = SpatialMotionTraining(cfg)
     motion.setup(raw['xyz'], raw['rotation'], 2., frame_index=1)
     return motion
 
 
-def export_frame(directory, motion, raw, sources):
-    xyz, rotation = motion.materialized_pose()
-    base = {**raw, 'xyz': xyz, 'rotation': rotation}
-    newborn = {name: value[sources].clone() for name, value in base.items()}
-    if len(sources):
-        newborn['xyz'][:, 0] += .003
-        newborn['opacity'][:] = torch.logit(torch.tensor(.8))
-        if len(sources) > 1:
-            newborn['opacity'][-1] = torch.logit(torch.tensor(.001))
-        newborn['sh_dc'] += .01
-    view = (QuantizedNewGaussianView(Rows(newborn), BirthConfig(), 2., base, sources)
-            if len(sources) else None)
-    expected, _ = materialize_quantized_gaussians(base, view)
-    motion.register_materialized_layout(expected['xyz'], expected['rotation'], sources)
-    frame = motion.frame_index
-    motion.export_motion(directory / f'motion_{frame:03d}.bin')
-    expected['xyz'] = motion.codec_previous_state.xyz
-    expected['rotation'] = motion.codec_previous_state.rotation
-    if len(sources):
-        export_birth_attributes(directory / f'birth_{frame:03d}.bin',
-            {name: expected[name][-len(sources):] for name in RAW_FIELDS[2:]},
-            len(raw['xyz']),
-            symbols={name: view.symbols[name] for name in RAW_FIELDS[2:]},
-            steps={name: view.steps[name] for name in RAW_FIELDS[2:]},
-            predictor={name: view.predictor[name] for name in RAW_FIELDS[2:]},
-            source_rows=sources)
-    return expected
-
-
-class GaussianReplacementTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        torch.set_num_threads(2)
-
-    def test_replacement_retires_weak_old_and_new_rows_without_reordering(self):
-        raw = reference_raw()
-        model = Rows(raw)
-        model._opacity[-1] = torch.logit(torch.tensor(.001))
-        rows, retired, report = replace_low_opacity_gaussians(model, 2)
-        torch.testing.assert_close(rows, torch.arange(1, 7))
-        self.assertEqual(report['retired_older_count'], 1)
-        self.assertEqual(report['retired_previous_birth_count'], 1)
-        torch.testing.assert_close(retired['rows'], torch.tensor([0, 7]))
-        torch.testing.assert_close(model._features_dc, raw['sh_dc'][rows])
-
-    def test_empty_births_and_invalid_budgets_do_not_delete_points(self):
-        model = Rows(reference_raw())
-        for bad in (-1, 8, 9, True, 1.5):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                replace_low_opacity_gaussians(model, bad)
-        rows, retired, report = replace_low_opacity_gaussians(model, 0)
-        self.assertEqual(model.prune_calls, 0)
-        self.assertIsNone(retired)
-        self.assertEqual(report['retired_count'], 0)
-        torch.testing.assert_close(rows, torch.arange(8))
-        self.assertFalse(BirthConfig().replace_low_opacity)
-        with self.assertRaisesRegex(ValueError, 'replace_low_opacity'):
-            BirthConfig(replace_low_opacity=1).validate(100)
-
-    def test_opacity_ties_have_deterministic_retirement_order(self):
-        model = Rows(reference_raw())
-        model._opacity.fill_(0.)
-        rows, retired, _ = replace_low_opacity_gaussians(model, 2)
-        torch.testing.assert_close(retired['rows'], torch.tensor([0, 1]))
-        torch.testing.assert_close(rows, torch.arange(2, 8))
-
-    def test_replay_full_survivors_preserve_reference_and_do_not_alias(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            raw = reference_raw()
-            raw['logscale'][0, 0] = -0.
-            before = {name: value.clone() for name, value in raw.items()}
-            motion = motion_model(raw)
-            prior = copy.deepcopy(motion.frame_reference_state)
-            expected = export_frame(directory, motion, raw, torch.empty(0, dtype=torch.long))
-            decoded, result = decode_frame(directory, 1, prior, raw)
-            self.assertTrue(torch.equal(decoded.survivor_rows, torch.arange(len(raw['xyz']))))
-            for name in RAW_FIELDS:
-                self.assertTrue(torch.equal(result[name].contiguous().view(torch.int32),
-                                            expected[name].contiguous().view(torch.int32)), name)
-                self.assertTrue(torch.equal(raw[name].contiguous().view(torch.int32),
-                                            before[name].contiguous().view(torch.int32)), name)
-            for name in RAW_FIELDS[2:]:
-                self.assertNotEqual(result[name].data_ptr(), raw[name].data_ptr(), name)
-                result[name].add_(1.)
-                self.assertTrue(torch.equal(raw[name].contiguous().view(torch.int32),
-                                            before[name].contiguous().view(torch.int32)), name)
-
-    def test_cross_frame_births_deletions_replay_and_midframe_bootstrap(self):
-        # More births than deletions must still retire old appearance rows;
-        # inferring birth count from the net change would silently be wrong.
-        for new_count in (0, 1, 3):
-            with self.subTest(new_count=new_count), tempfile.TemporaryDirectory() as temporary:
-                directory = Path(temporary)
-                raw = reference_raw()
-                motion = motion_model(raw)
-                initial = copy.deepcopy(motion.frame_reference_state)
-                with torch.no_grad():
-                    motion.gs_translation[:, 0] = torch.arange(8) * .002
-                    motion.gs_rotation[:, 1] = torch.arange(8) * .001
-                first = export_frame(directory, motion, raw, torch.tensor([0, 6]))
-                prior, decoded_first = decode_frame(directory, 1, initial, raw)
-                for name in RAW_FIELDS:
-                    torch.testing.assert_close(decoded_first[name], first[name], rtol=0, atol=0)
-                full = tuple(value.clone() for value in motion._full_motion_symbols())
-                model = Rows(first)
-                rows, retired, report = replace_low_opacity_gaussians(model, 2)
-                self.assertEqual(report['retired_older_count'], 1)
-                self.assertEqual(report['retired_previous_birth_count'], 1)
-                kept = model_raw(model)
-                motion.setup(kept['xyz'], kept['rotation'], 2., frame_index=2, previous_rows=rows)
-                for actual, previous in zip(motion._full_motion_symbols(), full):
-                    expected = torch.cat((previous, previous[torch.tensor([0, 6])]))[rows]
-                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-                restored = SpatialGatedMotion(copy.deepcopy(motion.config))
-                restored.restore(copy.deepcopy(motion.capture()))
-                self.assertEqual(restored._survivor_mapping_bytes, motion._survivor_mapping_bytes)
-                rebuilt = restore_retired_reference(kept, prior, rows, retired)
-                for name in RAW_FIELDS:
-                    torch.testing.assert_close(rebuilt[name], first[name], rtol=0, atol=0)
-                bootstrap_module = SimpleNamespace(gaussians=model, motion=restored,
-                    frame_finalized=False, retired_reference=retired,
-                    initial_reference=dict(original_count=8, retained_count=8,
-                                           removed_count=0, threshold=0.))
-                worker = SimpleNamespace(output_dir=directory / 'resume', module=bootstrap_module,
-                    datamodule=SimpleNamespace(cameras_extent=2.))
-                Trainer._write_reference(worker, frame_index=1, state=prior)
-                state_from_bootstrap, raw_from_bootstrap = replay(
-                    worker.decoder_reference_path.parent, worker.decoder_reference_path, 1)
-                self.assertEqual(state_from_bootstrap.digest(), prior.digest())
-                for name in RAW_FIELDS:
-                    torch.testing.assert_close(raw_from_bootstrap[name], first[name], rtol=0, atol=0)
-                sources = torch.arange(new_count, dtype=torch.long)
-                second = export_frame(directory, restored, kept, sources)
-                for decode in (decode_frame, _decode_frame):
-                    current, decoded_second = decode(directory, 2, prior, first)
-                    torch.testing.assert_close(current.survivor_rows, rows)
-                    self.assertEqual(len(current.xyz), 8 + new_count)
-                    for name in RAW_FIELDS:
-                        torch.testing.assert_close(decoded_second[name], second[name], rtol=0, atol=0)
-                if new_count:
-                    model = Rows(second)
-                    rows, _, _ = replace_low_opacity_gaussians(model, new_count)
-                    third_base = model_raw(model)
-                    restored.setup(third_base['xyz'], third_base['rotation'], 2.,
-                                   frame_index=3, previous_rows=rows)
-                    third = export_frame(directory, restored, third_base,
-                                         torch.empty(0, dtype=torch.long))
-                    last, decoded_third = decode_frame(directory, 3, current, second)
-                    self.assertEqual(len(last.xyz), 8)
-                    for name in RAW_FIELDS:
-                        torch.testing.assert_close(decoded_third[name], third[name], rtol=0, atol=0)
-
-
 # ----- test_sparse_updates -----
-class SparseUpdateTests(unittest.TestCase):
+class OpacityStreamTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
 
-    def test_hard_block_values_and_zero_bin_has_no_sparse_gradient(self):
-        value = torch.tensor([[.02, 0., 0.], [.07, -.08, 0.]], requires_grad=True)
-        support = sparse_block_support(value, .1, differentiable=True)
-        torch.testing.assert_close(support, torch.tensor([0., 1.]), rtol=0, atol=0)
-        support.sum().backward()
-        self.assertEqual(float(value.grad[0, 0]), 0.)
-        self.assertGreater(float(value.grad[1, 0]), 0.)
-        self.assertLess(float(value.grad[1, 1]), 0.)
-        self.assertFalse(sparse_block_support(value.detach(), .1).requires_grad)
-
-    def test_rate_loss_reaches_both_motion_fields_and_keeps_discrete_value(self):
-        # Multiple GS per region make sharing cheaper than separate residuals.
-        # One identical GS per region has a valid symmetric zero derivative.
-        raw = {name: value.repeat_interleave(2, dim=0) for name, value in reference_raw().items()}
-        motion = motion_model(raw)
-        motion.config.differentiable_rate_support = True
-        with torch.no_grad():
-            motion.region_translation[1:, 0] = .6 * motion.steps[0]
-            motion.region_rotation[1:, 1] = .6 * motion.steps[3]
-            motion.gs_translation[:, 0] = .7 * motion.gs_steps[0]
-            motion.gs_rotation[:, 1] = .8 * motion.gs_steps[3]
-        loss = motion.loss_terms(5, False)['rate_loss']
-        parameters = [motion.region_translation, motion.region_rotation,
-                      motion.gs_translation, motion.gs_rotation]
-        gradients = torch.autograd.grad(loss, parameters)
-        for gradient in gradients:
-            self.assertGreater(float(gradient.abs().sum()), 0.)
-        motion.config.differentiable_rate_support = False
-        self.assertEqual(float(loss), float(motion.loss_terms(5, False)['rate_loss']))
-
-    def test_zero_opacity_symbols_keep_bits_and_image_gradient(self):
-        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, step=.1))
-        reference = torch.tensor([[-0.], [1.], [-2.]])
-        update.setup(reference)
-        with torch.no_grad():
-            update.delta[:] = torch.tensor([[.02], [.13], [-.08]])
-        logits = update()
-        self.assertEqual(int(logits.detach().view(torch.int32)[0]),
-                         int(reference.view(torch.int32)[0]))
-        logits.sigmoid().sum().backward()
-        self.assertTrue(bool(update.delta.grad.gt(0).all()))
-        self.assertTrue(torch.isfinite(update.delta.grad).all())
-        torch.testing.assert_close(update.canonical_logits(), logits.detach(), rtol=0, atol=0)
-
-    def test_opacity_rate_only_pushes_nonzero_quantized_updates(self):
-        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, step=.05))
-        update.setup(torch.zeros(3, 1))
-        with torch.no_grad():
-            update.delta[:] = torch.tensor([[.01], [.03], [-.1]])
-        terms = update.rate_terms(1.)
-        self.assertEqual(int(terms['active_rows']), 2)
-        terms['loss'].backward()
-        self.assertEqual(float(update.delta.grad[0]), 0.)
-        self.assertGreater(float(update.delta.grad[1]), 0.)
-        self.assertLess(float(update.delta.grad[2]), 0.)
-
-    def test_proximal_opacity_adam_keeps_only_image_second_moments(self):
-        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, proximal_regularization=True,
-                                                            l1_weight=.005))
-        update.setup(torch.tensor([[0.], [1.], [-1.]]))
-        with torch.no_grad():
-            update.delta[:] = torch.tensor([[.03], [-.1], [.2]])
-        image_loss = (update().sigmoid() - .6).square().mean()
-        gradient, = torch.autograd.grad(image_loss, [update.delta], retain_graph=True)
-        rate = update.rate_terms(.01)['loss']
-        self.assertFalse(rate.requires_grad)
-        (image_loss + rate).backward()
-        update.optimizer_step(0., proximal=False)
-        torch.testing.assert_close(update.optimizer.state[update.delta]['exp_avg_sq'],
-            gradient.square() * .001, atol=1e-15, rtol=1e-6)
-
-    def test_proximal_opacity_clears_weak_latents_and_retains_large_update(self):
-        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, proximal_regularization=True))
-        update.setup(torch.zeros(3,1))
-        with torch.no_grad():
-            update.delta[:] = torch.tensor([[.01],[.03],[2.]])
-        update.optimizer.state[update.delta] = dict(step=torch.tensor(1.),
-            exp_avg=torch.zeros_like(update.delta), exp_avg_sq=torch.full_like(update.delta, 1e-11))
-        update.delta.grad = torch.zeros_like(update.delta)
-        update.optimizer_step(1e-6, proximal=True)
-        self.assertEqual(float(update.delta[0]),0.)
-        self.assertEqual(float(update.delta[1]),0.)
-        self.assertEqual(float(update.delta[2]),2.)
-
-    def test_continuous_opacity_penalty_cannot_create_opposite_updates(self):
-        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, mode='alpha',
-            proximal_regularization=True, l1_weight=.005, learning_rate=.01))
-        update.setup(torch.zeros(3, 1))
-        with torch.no_grad():
-            update.delta[:, 0] = torch.tensor([.1, -.1, 1e-5])
-        update.optimizer.state[update.delta] = dict(step=torch.tensor(1.),
-            exp_avg=torch.zeros_like(update.delta), exp_avg_sq=torch.full_like(update.delta, 1e-8))
-        update.delta.grad = torch.zeros_like(update.delta)
-        update.optimizer_step(0., lr_factor=.2)
-        self.assertGreater(float(update.delta[0]), 0.)
-        self.assertLess(float(update.delta[0]), .1)
-        self.assertLess(float(update.delta[1]), 0.)
-        self.assertGreater(float(update.delta[1]), -.1)
-        self.assertEqual(float(update.delta[2]), 0.)
-        self.assertAlmostEqual(update.optimizer.param_groups[0]['lr'], .002)
-
-    def test_legacy_opacity_config_defaults_and_proximal_resume(self):
-        old = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True))
-        old.setup(torch.zeros(3,1))
-        saved = copy.deepcopy(old.capture())
-        saved['config'].pop('proximal_regularization')
-        restored = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True))
-        restored.restore(saved,torch.device('cpu'))
-        torch.testing.assert_close(old(),restored(),atol=0,rtol=0)
-        cfg = OpacityUpdateConfig(enabled=True,proximal_regularization=True)
-        one = QuantizedOpacityUpdate(cfg); one.setup(torch.zeros(3,1))
-        one().sigmoid().sum().backward(); one.optimizer_step(0.)
-        two = QuantizedOpacityUpdate(copy.deepcopy(cfg));two.restore(copy.deepcopy(one.capture()),torch.device('cpu'))
-        for current in (one,two):
-            current().sigmoid().sum().backward();current.optimizer_step(1e-8,proximal=True)
-        torch.testing.assert_close(one.delta,two.delta,atol=0,rtol=0)
-
-    def test_opacity_refit_keeps_zero_rows_frozen_and_removes_amplitude_bias(self):
-        cfg = OpacityUpdateConfig(enabled=True, mode='alpha', step=.01,
-            proximal_regularization=True, l1_weight=100., amplitude_refit_steps=20)
-        update = QuantizedOpacityUpdate(cfg)
-        update.setup(torch.zeros(3, 1))
-        with torch.no_grad():
-            update.delta[:, 0] = torch.tensor([.004, .1, -.1])
-        update.optimizer.state[update.delta] = dict(step=torch.tensor(1.),
-            exp_avg=torch.ones_like(update.delta), exp_avg_sq=torch.ones_like(update.delta))
-        update.prepare_step(80, 100)
-        self.assertIsNone(update.refit_support)
-        before = update.symbols().ne(0)
-        update.prepare_step(81, 100)
-        self.assertEqual(float(update.delta[0]), 0.)
-        self.assertNotIn(update.delta, update.optimizer.state)
-        self.assertFalse(update.rate_terms(100.)['loss'].requires_grad)
-        for _ in range(3):
-            # Huge rate/L1 penalties would erase all updates without refitting.
-            (-update.alphas().sum()).backward()
-            update.optimizer_step(100., proximal=True)
-            self.assertEqual(float(update.delta[0]), 0.)
-            self.assertFalse(bool((update.symbols().ne(0) & ~before).any()))
-        self.assertGreater(float(update.delta[1]), .1)
-
-    def test_opacity_refit_resume_and_survivor_selection_are_exact(self):
-        cfg = OpacityUpdateConfig(enabled=True, mode='alpha', step=.01, amplitude_refit_steps=20)
-        one = QuantizedOpacityUpdate(cfg)
-        one.setup(torch.zeros(3, 1))
-        with torch.no_grad():
-            one.delta[:, 0] = torch.tensor([0., .1, -.1])
-        one.prepare_step(81, 100)
-        one.alphas().sum().backward(); one.optimizer_step(0.)
-        two = QuantizedOpacityUpdate(copy.deepcopy(cfg))
-        two.restore(copy.deepcopy(one.capture()), torch.device('cpu'))
-        for update in (one, two):
-            update.prepare_step(82, 100)
-            update.alphas().sum().backward(); update.optimizer_step(1., proximal=True)
-            update.commit(torch.tensor([2, 0]))
-        torch.testing.assert_close(one.delta, two.delta, atol=0, rtol=0)
-        torch.testing.assert_close(one.canonical_logits(), two.canonical_logits(), atol=0, rtol=0)
-        self.assertEqual(float(two.delta[0]), 0.)
-        with tempfile.TemporaryDirectory() as directory:
-            packet = two.export(Path(directory)/'opacity_002.bin', 2)
-            decoded = decode_opacity_delta(Path(packet['path']).read_bytes(), two.reference[two.rows], frame_index=2)
-            torch.testing.assert_close(decoded.logits, two.canonical_logits(), atol=0, rtol=0)
-
-    def test_opacity_refit_validation_and_legacy_default(self):
-        for value in (True, -1, .5):
-            with self.assertRaises(ValueError):
-                OpacityUpdateConfig(enabled=True, amplitude_refit_steps=value).validate()
-        update = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True))
-        update.setup(torch.zeros(2, 1))
-        saved = copy.deepcopy(update.capture())
-        saved.pop('refit_support')
-        saved['config'].pop('amplitude_refit_steps')
-        update.restore(saved, torch.device('cpu'))
-        update.prepare_step(100, 100)
-        self.assertIsNone(update.refit_support)
-        bad = QuantizedOpacityUpdate(OpacityUpdateConfig(enabled=True, amplitude_refit_steps=100))
-        bad.setup(torch.zeros(2, 1))
-        with self.assertRaises(ValueError):
-            bad.prepare_step(1, 100)
-
-    def test_birth_opacity_joint_fit_retains_previous_frame_reference_and_resumes(self):
-        cfg = OpacityUpdateConfig(enabled=True, mode='alpha', step=.01,
-            joint_with_birth=True, proximal_regularization=True)
-        one = QuantizedOpacityUpdate(cfg)
-        one.setup(torch.tensor([[1.], [-1.], [0.]]))
-        one.commit(torch.tensor([2, 0]))
-        self.assertTrue(one.delta.requires_grad)
-        reference = one.reference.clone()
-        one.alphas().sum().backward(); one.optimizer_step(0.)
-        self.assertEqual(float(one.delta[1]), 0.)  # Deleted before birth.
-        two = QuantizedOpacityUpdate(copy.deepcopy(cfg))
-        two.restore(copy.deepcopy(one.capture()), torch.device('cpu'))
-        for current in (one, two):
-            self.assertTrue(current.delta.requires_grad)
-            current.alphas().sum().backward(); current.optimizer_step(0.)
-            current.finish()
-        torch.testing.assert_close(one.delta, two.delta, rtol=0, atol=0)
-        torch.testing.assert_close(two.reference, reference, rtol=0, atol=0)
-        finished = QuantizedOpacityUpdate(copy.deepcopy(cfg))
-        finished.restore(copy.deepcopy(two.capture()), torch.device('cpu'))
-        self.assertFalse(finished.delta.requires_grad)
-        with tempfile.TemporaryDirectory() as directory:
-            info = two.export(Path(directory)/'opacity_002.bin', 2)
-            decoded = decode_opacity_delta(Path(info['path']).read_bytes(), reference[two.rows], frame_index=2)
-            torch.testing.assert_close(decoded.logits, two.canonical_logits(), atol=0, rtol=0)
-
-    def test_alpha_mode_has_unsaturated_image_gradient_and_zero_bits(self):
-        cfg=OpacityUpdateConfig(enabled=True,mode='alpha',step=.01,learning_rate=.01)
-        update=QuantizedOpacityUpdate(cfg)
-        update.setup(torch.tensor([[-0.],[7.],[-7.]]))
-        output=update.alphas()
-        output.sum().backward()
-        torch.testing.assert_close(update.delta.grad,torch.ones(3,1),atol=0,rtol=0)
-        self.assertEqual(int(update().detach().view(torch.int32)[0]),int(update.reference.view(torch.int32)[0]))
 
     def test_alpha_mode_render_grid_and_exact_canonical_packet(self):
         cfg=OpacityUpdateConfig(enabled=True,mode='alpha',step=.01)
@@ -1337,17 +346,6 @@ class SparseUpdateTests(unittest.TestCase):
         torch.testing.assert_close(decoded.logits,update.canonical_logits(),atol=0,rtol=0)
         self.assertLess(float(decoded.logits[1].sigmoid()),.01)
 
-    def test_alpha_mode_bounds_and_checkpoint_state(self):
-        cfg=OpacityUpdateConfig(enabled=True,mode='alpha',step=.01)
-        update=QuantizedOpacityUpdate(cfg);update.setup(torch.tensor([[7.],[-7.],[0.]]))
-        with torch.no_grad():update.delta[:,0]=torch.tensor([20.,-20.,.11])
-        update.delta.grad=torch.zeros_like(update.delta)
-        update.optimizer_step(0.)
-        self.assertTrue(bool(update.delta.ge(-update.alpha_reference).all()))
-        self.assertTrue(bool(update.delta.le(1-update.alpha_reference).all()))
-        restored=QuantizedOpacityUpdate(copy.deepcopy(cfg));restored.restore(copy.deepcopy(update.capture()),torch.device('cpu'))
-        torch.testing.assert_close(update.alphas(),restored.alphas(),atol=0,rtol=0)
-        torch.testing.assert_close(update.canonical_logits(),restored.canonical_logits(),atol=0,rtol=0)
 
     def test_alpha_packet_is_invariant_to_survivor_selection_and_simd_tails(self):
         generator = torch.Generator().manual_seed(295)
@@ -1403,461 +401,99 @@ class SparseUpdateTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 encode_opacity_delta(reference, invalid, frame_index=2, step=.05)
 
-    def test_current_opacity_retires_previously_opaque_point_and_replays_births(self):
-        raw = reference_raw()
-        raw['opacity'][0] = torch.logit(torch.tensor(.99))
-        motion = motion_model(raw)
-        initial = copy.deepcopy(motion.frame_reference_state)
-        opacity_cfg = OpacityUpdateConfig(enabled=True, step=.05)
-        update = QuantizedOpacityUpdate(opacity_cfg)
-        update.setup(raw['opacity'])
-        with torch.no_grad():
-            update.delta[0] = -12.
-            update.delta[1] = .1
-        restored = QuantizedOpacityUpdate(copy.deepcopy(opacity_cfg))
-        restored.restore(copy.deepcopy(update.capture()), torch.device('cpu'))
-        torch.testing.assert_close(restored(), update(), rtol=0, atol=0)
-        holder = SimpleNamespace(opacity_update=restored, gaussians=Rows(raw), motion=motion,
-            config=SimpleNamespace(opacity_update=opacity_cfg), device=torch.device('cpu'),
-            birth_control=dict(previous_birth_count=3), retired_reference=None)
-        Module._commit_opacity_and_retire(holder)
-        self.assertEqual(holder.birth_control['retirement']['retired_count'], 1)
-        self.assertEqual(len(holder.gaussians._xyz), 7)
-        torch.testing.assert_close(motion.previous_rows, torch.arange(1, 8))
-        loaded_motion = SpatialGatedMotion(copy.deepcopy(motion.config))
-        loaded_motion.restore(copy.deepcopy(motion.capture()))
-        self.assertEqual(len(loaded_motion.gs_translation), 7)
-        holder.frame_finalized = False
-        holder.initial_reference = dict(original_count=8, retained_count=8,
-                                        removed_count=0, threshold=0.)
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            worker = SimpleNamespace(output_dir=directory/'resume', module=holder,
-                datamodule=SimpleNamespace(cameras_extent=2.))
-            Trainer._write_reference(worker, 0, initial)
-            with np.load(worker.decoder_reference_path) as reference:
-                for name in RAW_FIELDS:
-                    torch.testing.assert_close(torch.from_numpy(reference[name]), raw[name], rtol=0, atol=0)
-            current_raw = model_raw(holder.gaussians)
-            expected = export_frame(directory, loaded_motion, current_raw, torch.tensor([0]))
-            info = restored.export(directory/'opacity_001.bin', 1)
-            self.assertEqual(info['rows'], 1)  # Deleted point's large alpha delta is not transmitted.
-            manifest = dict(opacity_update='opacity_001.bin', opacity_update_timing='before_births')
-            (directory/'frame_001.json').write_text(json.dumps(manifest))
-            decoded, replayed = decode_frame(directory, 1, initial, raw)
-            self.assertEqual(len(decoded.xyz), 8)
-            for name in RAW_FIELDS:
-                torch.testing.assert_close(replayed[name], expected[name], rtol=0, atol=0)
-            manifest['opacity_update_timing'] = 'after_births'
-            (directory/'frame_001.json').write_text(json.dumps(manifest))
-            _, wrong = decode_frame(directory, 1, initial, raw)
-            self.assertFalse(torch.equal(wrong['opacity'], expected['opacity']))
-
-    def test_alpha_override_uses_quantized_values_with_gradient(self):
-        model = GaussianModel(1)
-        model._opacity = torch.nn.Parameter(torch.tensor([[2.]]), requires_grad=False)
-        override = torch.tensor([[-1.]], requires_grad=True)
-        model.rigid_opacity = override
-        model.get_opacity.sum().backward()
-        self.assertGreater(float(override.grad), 0.)
-        self.assertIsNone(model._opacity.grad)
-        model.rigid_opacity = None
-        torch.testing.assert_close(model.get_opacity, model._opacity.sigmoid())
-
-    def test_materialized_opacity_invalidates_previous_render_cache(self):
-        raw = reference_raw()
-        raw['opacity'][0] = 0.
-        model = GaussianModel(1)
-        from pipeline.model.birth_quantization import RAW_ATTRIBUTES
-        for name, attr in zip(RAW_FIELDS, RAW_ATTRIBUTES):
-            setattr(model, attr, torch.nn.Parameter(raw[name].clone(), requires_grad=False))
-        before = model.get_opacity.clone()
-        config = OpacityUpdateConfig(enabled=True)
-        update = QuantizedOpacityUpdate(config)
-        update.setup(raw['opacity'])
-        with torch.no_grad():
-            update.delta[0] = .1
-        holder = SimpleNamespace(opacity_update=update, gaussians=model,
-            motion=motion_model(raw), config=SimpleNamespace(opacity_update=config),
-            device=torch.device('cpu'), birth_control={}, retired_reference=None)
-        Module._commit_opacity_and_retire(holder)
-        self.assertFalse(torch.equal(model.get_opacity, before))
-        torch.testing.assert_close(model.get_opacity, update.canonical_logits().sigmoid(), rtol=0, atol=0)
-
 
 # ----- test_rigid_decoder_state_restore -----
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-DecodedState__rigid_decoder_state_restore = importlib.import_module(
-    'pipeline.model.rigid_tree_codec').DecodedState
 
 
-def _state(frame):
-    return DecodedState__rigid_decoder_state_restore(
-        xyz=torch.tensor([[0.25, -1., 2.]], dtype=torch.float32),
-        rotation=torch.tensor([[1., 0., 0., 0.]], dtype=torch.float32),
-        owner=torch.tensor([1], dtype=torch.int64),
-        parents=torch.tensor([-1, 0], dtype=torch.int64),
-        frame_index=frame,
-        birth_sources=torch.tensor([0], dtype=torch.int32) if frame else None,
-        survivor_rows=torch.tensor([2], dtype=torch.int64) if frame else None)
+class DecodedFrameConsistencyTests(unittest.TestCase):
+    def test_regional_updates_keep_inputs_and_outputs_independent(self):
+        nodes = 4
+        steps = dict(logscale=.005, sh_dc=.001, sh_rest=.001, opacity=.01)
+        devices = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
+        for appearance, opacity in ((True, False), (False, True), (True, True)):
+            symbols = dict(logscale=torch.zeros(nodes, 3, dtype=torch.int16),
+                           sh_dc=torch.zeros(nodes, 1, 3, dtype=torch.int16),
+                           sh_rest=torch.zeros(nodes, 3, 3, dtype=torch.int16),
+                           opacity=torch.zeros(nodes, 1, dtype=torch.int16))
+            if appearance:
+                symbols['logscale'][2, 0] = 2
+            if opacity:
+                symbols['opacity'][1, 0] = 1
+            packet = _stream_enc.encode_regional_full(symbols, steps, nodes, 1)
+            for device in devices:
+                with self.subTest(appearance=appearance, opacity=opacity, device=device):
+                    reference = dict(logscale=torch.full((nodes, 3), -.25),
+                                     sh_dc=torch.full((nodes, 1, 3), .5),
+                                     sh_rest=torch.full((nodes, 3, 3), -.75),
+                                     opacity=torch.full((nodes, 1), .25))
+                    snapshot = {name: value.clone() for name, value in reference.items()}
+                    capture = {} if device == 'cuda' else None
+                    gpu_reference = ({name: value.to(device) for name, value in reference.items()}
+                                     if capture is not None else None)
+                    result = _stream_dec.decode_regional_full(
+                        packet, reference, torch.arange(nodes), nodes, 1, device=device,
+                        gpu_reference=gpu_reference, gpu_capture=capture)
+                    if capture is not None:
+                        for name, value in capture.items():
+                            torch.testing.assert_close(value.cpu(), result[name], rtol=0, atol=1e-6)
+                    for name, value in result.items():
+                        torch.testing.assert_close(reference[name], snapshot[name], rtol=0, atol=0)
+                        value.reshape(-1)[0] += 1
+                        torch.testing.assert_close(reference[name], snapshot[name], rtol=0, atol=0)
 
+    def test_regional_zero_reference_hash_cache_keeps_reference_validation(self):
+        nodes = 4
+        symbols = dict(logscale=torch.zeros(nodes, 3, dtype=torch.int16),
+                       sh_dc=torch.zeros(nodes, 1, 3, dtype=torch.int16),
+                       sh_rest=torch.zeros(nodes, 3, 3, dtype=torch.int16),
+                       opacity=torch.zeros(nodes, 1, dtype=torch.int16))
+        symbols['logscale'][2, 0] = 2
+        steps = dict(logscale=.005, sh_dc=.001, sh_rest=.001, opacity=.01)
+        packet = _stream_enc.encode_regional_full(symbols, steps, nodes, 1)
+        reference = dict(logscale=torch.zeros(nodes, 3), sh_dc=torch.zeros(nodes, 1, 3),
+                         sh_rest=torch.zeros(nodes, 3, 3), opacity=torch.zeros(nodes, 1))
+        owner = torch.arange(nodes)
+        _stream_dec._regional_zero_reference_hash.cache_clear()
+        first = _stream_dec.decode_regional_full(packet, reference, owner, nodes, 1)
+        second = _stream_dec.decode_regional_full(packet, reference, owner, nodes, 1)
+        self.assertGreaterEqual(_stream_dec._regional_zero_reference_hash.cache_info().hits, 1)
+        torch.testing.assert_close(first['logscale'], second['logscale'], rtol=0, atol=0)
+        damaged = bytearray(packet)
+        prior_offset = _stream_fmt.REGIONAL_ATTRIBUTE_HEADER.size + struct.calcsize('<4sIII3dI')
+        damaged[prior_offset] ^= 1
+        with self.assertRaisesRegex(ValueError, 'reference'):
+            _stream_dec.decode_regional_full(bytes(damaged), reference, owner, nodes, 1)
 
-class DecodedStateRestoreTests(unittest.TestCase):
-    def test_cpu_restore_preserves_values_dtypes_and_optional_birth_sources(self):
-        for frame in (0, 49):
-            with self.subTest(frame=frame):
-                original = _state(frame)
-                restored = DecodedState__rigid_decoder_state_restore.restore(original.capture())
-                self.assertEqual(restored.frame_index, frame)
-                for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources', 'survivor_rows'):
-                    before, after = getattr(original, field), getattr(restored, field)
-                    if before is None:
-                        self.assertIsNone(after)
-                    else:
-                        self.assertEqual(after.device.type, 'cpu')
-                        self.assertEqual(after.dtype, before.dtype)
-                        torch.testing.assert_close(after, before, rtol=0, atol=0)
-                self.assertEqual(restored.digest(), original.digest())
-
-    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is unavailable')
-    def test_cuda_map_location_restores_previous_and_reference_to_cpu(self):
-        states = dict(codec_previous_state=_state(49).capture(),
-                      frame_reference_state=_state(48).capture())
-        buffer = BytesIO()
-        torch.save(states, buffer)
-        buffer.seek(0)
-        loaded = torch.load(buffer, map_location='cuda:0', weights_only=False)
-        for name, packet in loaded.items():
-            self.assertEqual(packet['parents'].device.type, 'cuda')
-            restored = DecodedState__rigid_decoder_state_restore.restore(packet)
-            self.assertEqual(restored.frame_index,
-                             49 if name == 'codec_previous_state' else 48)
-            for field in ('xyz', 'rotation', 'owner', 'parents', 'birth_sources', 'survivor_rows'):
-                value = getattr(restored, field)
-                if value is not None:
-                    self.assertEqual(value.device.type, 'cpu')
-                    self.assertEqual(value.dtype, packet[field].dtype)
-                    torch.testing.assert_close(value, packet[field].cpu(),
-                                               rtol=0, atol=0)
-
-
-# ----- test_legacy_opacity_replay -----
-LEGACY_CODEC = importlib.import_module('pipeline.model.legacy_opacity_codec')
-# Frozen OPD1/2/3 packets and their exact float32 logits from the prior codec.
-FIXTURES = [('logit', '4f5044310200000004000000030000000ad7233c0900000094861248bea0a68b72d66d0206c86a4ccebab4bc903ef00efc8aba755b3fea852a2cd91e785e63646460faf79f9199010009210206', '0ad7233c0000803f295c9f407b147ec0'), ('alpha', '4f5044320200000004000000030000000ad7233c09000000b5712892bea0a68b72d66d0206c86a4ccebab4bc903ef00efc8aba755b3fea852a2cd91e785e63646460faf79f9199010009210206', '98dc233d0000803fdf296640eb353fc0'), ('saturated_alpha', '4f5044330200000004000000030000000ad7233c09000000aadcc1dbbea0a68b72d66d0206c86a4ccebab4bc903ef00efc8aba755b3fea852a2cd91e785e63646460faf79f9199010009210206', '0ad7233c0000803f0efc8d407b147ec0')]
-
-
-class HistoricalOpacityReplayTests(unittest.TestCase):
-    def reference(self):
-        return torch.tensor([[0.], [1.], [5.], [-4.]], dtype=torch.float32)
-
-    def test_all_historical_coordinate_modes_reconstruct_exact_logits(self):
-        for mode, encoded, logits in FIXTURES:
-            with self.subTest(mode=mode):
-                actual = LEGACY_CODEC.decode_opacity_delta(bytes.fromhex(encoded), self.reference(), frame_index=2)
-                expected = torch.from_numpy(np.frombuffer(bytes.fromhex(logits), dtype='<f4').copy()).reshape(-1, 1)
-                torch.testing.assert_close(actual.logits, expected, rtol=0, atol=0)
-                self.assertEqual(actual.mode, mode)
-
-    def test_corrupt_packets_are_rejected(self):
-        for mode, encoded, _ in FIXTURES:
-            with self.subTest(mode=mode):
-                damaged = bytearray.fromhex(encoded)
-                damaged[-1] ^= 1
-                with self.assertRaises(ValueError):
-                    LEGACY_CODEC.decode_opacity_delta(bytes(damaged), self.reference(), frame_index=2)
-
-    def test_reference_and_frame_mismatches_are_rejected(self):
-        encoded = bytes.fromhex(FIXTURES[0][1])
-        with self.assertRaises(ValueError):
-            LEGACY_CODEC.decode_opacity_delta(encoded, self.reference() + .01, frame_index=2)
-        with self.assertRaises(ValueError):
-            LEGACY_CODEC.decode_opacity_delta(encoded, self.reference(), frame_index=3)
+    def test_raw_and_attribute_hashes_keep_exact_bytes_for_noncontiguous_and_empty_fields(self):
+        from pipeline.model.frame_stream_format import RAW_FIELDS, reference_digest
+        raw = reference_raw(rest=0)
+        raw['xyz'] = raw['xyz'].t().contiguous().t()
+        raw['xyz'][0, 0] = -0.
+        expected = hashlib.sha256()
+        for name in RAW_FIELDS:
+            value = raw[name].detach().cpu().contiguous()
+            expected.update(name.encode())
+            expected.update(str(tuple(value.shape)).encode())
+            expected.update(value.numpy().tobytes())
+        self.assertEqual(reference_digest(raw), expected.hexdigest())
+        expected = hashlib.sha256()
+        for name in _stream_fmt.FIELDS:
+            value = raw[name].detach().cpu().contiguous()
+            expected.update(name.encode())
+            expected.update(struct.pack('<I', value.ndim))
+            expected.update(struct.pack('<' + 'I' * value.ndim, *value.shape))
+            expected.update(value.numpy().tobytes())
+        self.assertEqual(_stream_fmt._reference_hash({name: raw[name] for name in _stream_fmt.FIELDS}),
+                         expected.digest())
 
 
 # ----- test_rigid_sequence_benchmark -----
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def frame_row(frame, seconds, psnr, decode_seconds=0., motion_bytes=0,
-              birth_bytes=0, manifest_index_bytes=None):
-    row = dict(frame=frame, timed_renders=50, render_seconds=seconds,
-                file_decode_verify_seconds=decode_seconds,
-                upload_seconds=decode_seconds,
-                motion_bytes=motion_bytes, birth_bytes=birth_bytes,
-                encoded_bytes=motion_bytes + birth_bytes,
-                quality=dict(psnr=psnr))
-    if manifest_index_bytes is not None:
-        row.update(payload_bytes=motion_bytes + birth_bytes,
-                   manifest_index_bytes=manifest_index_bytes,
-                   complete_update_bytes=motion_bytes + birth_bytes + manifest_index_bytes)
-    return row
-
-
-class SequenceAggregationTests(unittest.TestCase):
-    def test_render_fps_uses_total_renders_and_only_render_seconds(self):
-        rows = [frame_row(0, 1., 30., 100.),
-                frame_row(1, 2., 31., 200.),
-                frame_row(2, 4., 32., 300.)]
-        result = benchmark._sequence_groups(rows, segment_size=2)
-        overall = result['all_frames']
-        dynamic = result['dynamic_frames']
-        self.assertEqual(overall['total_timed_renders'], 150)
-        self.assertEqual(overall['total_render_seconds'], 7.)
-        self.assertAlmostEqual(overall['aggregate_fps'], 150 / 7)
-        self.assertEqual(overall['frame_fps_min'], 12.5)
-        self.assertAlmostEqual(overall['frame_fps_p05'], 13.75)
-        self.assertEqual(overall['psnr_mean'], 31.)
-        self.assertEqual(dynamic['total_timed_renders'], 100)
-        self.assertEqual(dynamic['total_render_seconds'], 6.)
-        self.assertAlmostEqual(dynamic['aggregate_fps'], 100 / 6)
-        self.assertEqual(dynamic['psnr_mean'], 31.5)
-        self.assertEqual(result['bootstrap_frame0']['frame_count'], 1)
-        self.assertEqual([(part['first_frame'], part['last_frame'])
-                          for part in result['all_segments']], [(0, 1), (2, 2)])
-        self.assertEqual([(part['first_frame'], part['last_frame'])
-                          for part in result['dynamic_segments']], [(1, 2)])
-
-    def test_all_300_and_dynamic_299_ranges_and_segment_weights(self):
-        rows = [frame_row(frame, 1. if frame < 150 else 2.,
-                          30. + frame / 1000., decode_seconds=999.,
-                          motion_bytes=frame, birth_bytes=2 * frame,
-                          manifest_index_bytes=0 if frame == 0 else 400 + len(str(frame)))
-                for frame in range(300)]
-        result = benchmark._sequence_groups(rows, segment_size=50)
-        self.assertEqual(result['all_frames']['frame_count'], 300)
-        self.assertEqual(result['dynamic_frames']['frame_count'], 299)
-        self.assertEqual(result['all_frames']['total_timed_renders'], 15000)
-        self.assertEqual(result['all_frames']['total_render_seconds'], 450.)
-        self.assertAlmostEqual(result['all_frames']['aggregate_fps'], 15000 / 450)
-        self.assertEqual([(x['first_frame'], x['last_frame'])
-                          for x in result['all_segments']],
-                         [(0, 49), (50, 99), (100, 149),
-                          (150, 199), (200, 249), (250, 299)])
-        self.assertEqual([(x['first_frame'], x['last_frame'])
-                          for x in result['dynamic_segments']],
-                         [(1, 50), (51, 100), (101, 150),
-                          (151, 200), (201, 250), (251, 299)])
-        storage = result['dynamic_frames']['storage']
-        self.assertEqual(storage['dynamic_frame_count'], 299)
-        self.assertEqual(storage['motion_bytes_total'], sum(range(1, 300)))
-        self.assertEqual(storage['birth_bytes_total'], 2 * sum(range(1, 300)))
-        self.assertEqual(storage['encoded_bytes_total'], 3 * sum(range(1, 300)))
-        self.assertEqual(storage['encoded_bytes_mean'], 450.)
-        self.assertAlmostEqual(storage['encoded_bytes_p95'], 3 * 284.1)
-        self.assertEqual(storage['encoded_bytes_max'], 897)
-        expected_index_total = sum(400 + len(str(frame)) for frame in range(1, 300))
-        self.assertEqual(storage['manifest_index_bytes_total'], expected_index_total)
-        self.assertEqual(storage['payload_bytes_mean'], storage['encoded_bytes_mean'])
-        self.assertAlmostEqual(storage['complete_update_bytes_mean'],
-                               (3 * sum(range(1, 300)) + expected_index_total) / 299)
-        self.assertEqual(storage['complete_update_bytes_max'], 897 + 403)
-        whole_storage = benchmark._summarize_sequence_storage(rows, reference_bytes=12345)
-        self.assertEqual(whole_storage['total_reference_and_dynamic_bytes'],
-                         12345 + 3 * sum(range(1, 300)))
-        self.assertEqual(whole_storage['total_reference_and_complete_update_bytes'],
-                         whole_storage['total_reference_and_dynamic_bytes'] + expected_index_total)
-        self.assertEqual(result['all_segments'][0]['storage']['encoded_bytes_total'],
-                         3 * sum(range(1, 50)))
-        self.assertEqual(result['bootstrap_frame0']['storage']['dynamic_frame_count'], 0)
-
-    def test_cache_selection_honors_explicit_flags(self):
-        module = SimpleNamespace(gaussians=SimpleNamespace(render_attribute_cache=True))
-        for requested, expected in ((None, True), (True, True), (False, False)):
-            with self.subTest(requested=requested):
-                args = SimpleNamespace(render_attribute_cache=requested)
-                self.assertIs(benchmark._selected_render_cache(module, args), expected)
-
-    def test_actual_packet_sizes_must_match_saved_summary(self):
-        with tempfile.TemporaryDirectory() as directory:
-            stream = Path(directory)
-            (stream / 'motion_001.bin').write_bytes(b'12345')
-            (stream / 'birth_001.bin').write_bytes(b'ab')
-            manifest = dict(motion='motion_001.bin', birth='birth_001.bin')
-            manifest_path = stream / 'frame_001.json'
-            manifest_path.write_text(json.dumps(manifest))
-            summary = dict(motion=dict(bytes=5), birth=dict(archive_bytes=2),
-                           encoded_bytes=7, shared_reference_bytes=11,
-                           decoder_reference='reference_frame0.npz')
-            measured = benchmark._actual_frame_storage(
-                stream, 1, manifest, summary, 11, 'reference_frame0.npz')
-            self.assertEqual(measured, dict(motion_bytes=5, birth_bytes=2,
-                encoded_bytes=7, payload_bytes=7,
-                manifest_index_bytes=manifest_path.stat().st_size,
-                complete_update_bytes=7 + manifest_path.stat().st_size))
-            summary['encoded_bytes'] = 8
-            with self.assertRaisesRegex(ValueError, 'storage summary'):
-                benchmark._actual_frame_storage(
-                    stream, 1, manifest, summary, 11, 'reference_frame0.npz')
-            summary['encoded_bytes'] = 7
-            (stream / 'birth_001.bin').write_bytes(b'abcd')
-            with self.assertRaisesRegex(ValueError, 'storage summary'):
-                benchmark._actual_frame_storage(
-                    stream, 1, manifest, summary, 11, 'reference_frame0.npz')
-
-    def test_manifest_actual_bytes_change_complete_mean_without_changing_payload(self):
-        with tempfile.TemporaryDirectory() as directory:
-            stream = Path(directory)
-            (stream / 'motion_001.bin').write_bytes(b'12345')
-            manifest = dict(motion='motion_001.bin', birth=None)
-            path = stream / 'frame_001.json'
-            path.write_text(json.dumps(manifest), encoding='utf-8')
-            summary = dict(motion=dict(bytes=5), birth=None, encoded_bytes=5,
-                           shared_reference_bytes=11, decoder_reference='reference_frame0.npz')
-            first = benchmark._actual_frame_storage(stream, 1, manifest, summary,
-                                                     11, 'reference_frame0.npz')
-            # UTF-8 byte length and formatting can differ from character count.
-            path.write_text(json.dumps({**manifest, 'note': '实际索引'},
-                                       ensure_ascii=False, indent=2), encoding='utf-8')
-            second = benchmark._actual_frame_storage(stream, 1, manifest, summary,
-                                                      11, 'reference_frame0.npz')
-            self.assertEqual(first['encoded_bytes'], second['encoded_bytes'])
-            self.assertEqual(second['manifest_index_bytes'], path.stat().st_size)
-            self.assertGreater(second['manifest_index_bytes'], first['manifest_index_bytes'])
-            self.assertGreater(second['manifest_index_bytes'], len(path.read_text(encoding='utf-8')))
-            rows = [frame_row(0, 1., 30., manifest_index_bytes=0),
-                    dict(frame=1, **first), dict(frame=2, **second)]
-            result = benchmark._summarize_sequence_storage(rows, reference_bytes=11)
-            dynamic = result['dynamic_packets']
-            self.assertEqual(dynamic['encoded_bytes_mean'], 5.)
-            self.assertEqual(dynamic['complete_update_bytes_mean'],
-                             (first['complete_update_bytes'] + second['complete_update_bytes']) / 2)
-            self.assertEqual(result['total_reference_and_complete_update_bytes'],
-                             11 + first['complete_update_bytes'] + second['complete_update_bytes'])
-            path.unlink()
-            with self.assertRaises(FileNotFoundError):
-                benchmark._actual_frame_storage(stream, 1, manifest, summary,
-                                                 11, 'reference_frame0.npz')
-
-    def test_frame_plan_complete_byte_fields_are_checked_without_double_counting(self):
-        with tempfile.TemporaryDirectory() as directory:
-            stream=Path(directory)
-            (stream/'motion_001.bin').write_bytes(b'12345')
-            (stream/'opacity_001.bin').write_bytes(b'alpha')
-            manifest=dict(motion='motion_001.bin',birth=None,opacity_update='opacity_001.bin')
-            path=stream/'frame_001.json'
-            path.write_text(json.dumps(manifest,indent=2))
-            size=path.stat().st_size
-            summary=dict(motion=dict(bytes=5),birth=None,opacity_update=dict(archive_bytes=5),
-                packet_bytes=10,manifest_bytes=size,complete_dynamic_update_bytes=10+size,
-                encoded_bytes=10+size,shared_reference_bytes=11,decoder_reference='reference_frame0.npz')
-            measured=benchmark._actual_frame_storage(stream,1,manifest,summary,11,'reference_frame0.npz')
-            self.assertEqual(measured['payload_bytes'],10)
-            self.assertEqual(measured['complete_update_bytes'],10+size)
-            stats=benchmark._summarize_sequence_storage([dict(frame=1,**measured)],11)
-            self.assertEqual(stats['total_reference_and_complete_update_bytes'],11+10+size)
-            for field in ('packet_bytes','manifest_bytes','complete_dynamic_update_bytes','encoded_bytes'):
-                with self.subTest(field=field):
-                    bad=dict(summary);bad[field]+=1
-                    with self.assertRaisesRegex(ValueError,'storage summary'):
-                        benchmark._actual_frame_storage(stream,1,manifest,bad,11,'reference_frame0.npz')
-            bad=dict(summary);del bad['packet_bytes']
-            with self.assertRaisesRegex(ValueError,'storage summary'):
-                benchmark._actual_frame_storage(stream,1,manifest,bad,11,'reference_frame0.npz')
-            path.write_text(json.dumps(manifest))
-            with self.assertRaisesRegex(ValueError,'storage summary'):
-                benchmark._actual_frame_storage(stream,1,manifest,summary,11,'reference_frame0.npz')
-
-    def test_historical_rows_cannot_silently_claim_zero_index_bytes(self):
-        row = frame_row(1, 1., 34., motion_bytes=50000)
-        summary = benchmark._summarize_sequence_storage([row], reference_bytes=11)
-        self.assertEqual(summary['dynamic_packets']['encoded_bytes_mean'], 50000.)
-        self.assertFalse(summary['dynamic_packets']['manifest_index_measured'])
-        self.assertIsNone(summary['dynamic_packets']['complete_update_bytes_mean'])
-        self.assertIsNone(summary['total_reference_and_complete_update_bytes'])
-        measured = frame_row(1, 1., 34., motion_bytes=50000, manifest_index_bytes=436)
-        measured['complete_update_bytes'] = 50000
-        with self.assertRaisesRegex(ValueError, 'include payload and manifest'):
-            benchmark._summarize_storage([measured])
-
-    def test_missing_duplicate_and_nonpositive_samples_fail(self):
-        for rows in ([frame_row(0, 1., 30.), frame_row(2, 1., 30.)],
-                     [frame_row(0, 1., 30.), frame_row(0, 1., 30.)]):
-            with self.subTest(rows=[x['frame'] for x in rows]):
-                with self.assertRaises(ValueError):
-                    benchmark._sequence_groups(rows, segment_size=50)
-        with self.assertRaises(ValueError):
-            benchmark.summarize_render_frames([frame_row(0, 0., 30.)])
-        with self.assertRaises(ValueError):
-            benchmark._sequence_groups([frame_row(0, 1., 30.)], 0)
-
-    def test_manifest_checks_decoded_and_full_raw_digests(self):
-        from importlib import import_module
-        digest = import_module('pipeline.model.birth_quantization').reference_digest
-        raw = dict(xyz=torch.zeros(1, 3), rotation=torch.tensor([[1., 0., 0., 0.]]),
-                   logscale=torch.zeros(1, 3), opacity=torch.zeros(1, 1),
-                   sh_dc=torch.zeros(1, 1, 3), sh_rest=torch.zeros(1, 0, 3))
-        decoded = type('Decoded', (), {'digest': lambda self: b'abc'})()
-        manifest = dict(frame=1, decoded_state_sha256=b'abc'.hex(),
-                        raw_state_sha256=digest(raw), total_count=1,
-                        reference='frame_storage/rigid_tree/reference_frame0.npz')
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'frame_001.json'
-            path.write_text(json.dumps(manifest))
-            benchmark._validate_stream_manifest(Path(directory), 1, decoded,
-                                                 raw, manifest['reference'])
-            manifest['raw_state_sha256'] = 'wrong'
-            path.write_text(json.dumps(manifest))
-            with self.assertRaisesRegex(ValueError, 'manifest'):
-                benchmark._validate_stream_manifest(Path(directory), 1,
-                                                     decoded, raw,
-                                                     manifest['reference'])
-
-
 class SurvivorCompositionTests(unittest.TestCase):
-    @staticmethod
-    def encode_birth(prior, rows, sources, xyz, rotation):
-        region = torch.zeros(len(prior.parents), 3, dtype=torch.int16)
-        point = torch.zeros(len(rows), 3, dtype=torch.int16)
-        packet = codec.encode_motion(prior, 1, 2., rows, prior.owner[rows], prior.parents,
-            region, region, point, point, sources, xyz, rotation, .001, .001,
-            gs_translation_step_extent=.001, gs_rotation_step_rad=.001,
-            spatial_open=prior.spatial_open, birth_pose_steps=(.001, .001))
-        return codec.decode_motion(packet, prior)
 
-    def test_newborn_wire_preserves_real_hemisphere_crossing_bits(self):
-        # Real Sear frame29 source bits and quantized offset. Decoding must not
-        # silently flip the newborn quaternion after adding these symbols.
-        raw = reference_raw()
-        motion = motion_model(raw)
-        prior = motion.frame_reference_state
-        source = torch.tensor([1049086535, 1060256257, -1093275528, -1090183663],
-                              dtype=torch.int32).view(torch.float32)
-        prior.rotation[2] = source
-        identity = rotation_vector_quaternion(source.new_zeros(1, 3))
-        predictor = F.normalize(quaternion_multiply(identity, source[None]), dim=-1)[0]
-        symbols = torch.tensor([249., -1086., -283., 824.])
-        actual = predictor + symbols * .001
-        self.assertLess(float((actual * predictor).sum()), 0.)
-        rows = torch.arange(len(prior.xyz))
-        decoded = self.encode_birth(prior, rows, torch.tensor([2]),
-                                    prior.xyz[2:3].clone(), actual[None])
-        self.assertTrue(torch.equal(decoded.rotation[-1].view(torch.int32), actual.view(torch.int32)))
-
-    def test_deleted_parent_reanchors_opposite_hemisphere_and_decodes(self):
-        target = F.normalize(torch.tensor([.5, -.4, -.7, .3]), dim=0)
-        raw = reference_raw()
-        raw['rotation'][:] = -target
-        motion = motion_model(raw)
-        prior = motion.frame_reference_state
-        rows = torch.tensor([0, 1, 3, 4, 5, 6, 7])  # Delete the old source row 2.
-        reference = {name: value[rows].clone() for name, value in raw.items()}
-        newborn = {name: raw[name][0:1].clone() for name in RAW_FIELDS}
-        newborn['rotation'] = target[None].detach()
-        sources = nearest_old_references(newborn, reference, 2.)
-        self.assertEqual(sources.tolist(), [0])
-        model = Rows(newborn)
-        model._rotation.requires_grad_()
-        view = QuantizedNewGaussianView(model, BirthConfig(), 2., reference, sources)
-        quantized = view.raw_value('rotation')
-        self.assertGreater(float((quantized.detach()[0] * target).sum().abs()), .999)
-        self.assertLess(float((quantized.detach()[0] * target).sum()), 0.)
-        gradient, = torch.autograd.grad(quantized.sum(), model._rotation)
-        self.assertTrue(bool(torch.isfinite(gradient).all()) and bool(gradient.ne(0).any()))
-        decoded = self.encode_birth(prior, rows, sources, view.raw_value('xyz').detach(),
-                                    quantized.detach())
-        self.assertTrue(torch.equal(decoded.rotation[-1].view(torch.int32),
-                                    quantized.detach()[0].view(torch.int32)))
 
     def test_nonspatial_matches_wire_with_survivors_and_owner_edits(self):
         prior,args=packet_fixture(16)
@@ -1869,15 +505,15 @@ class SurvivorCompositionTests(unittest.TestCase):
         steps=dict(gs_translation_step_extent=.0000123456789,gs_rotation_step_rad=.000987654321)
         inputs=(prior,1,metadata[0],rows,owner,parents,rt,rr,gt[rows],gr[rows],
             torch.empty(0,dtype=torch.long),torch.empty(0,3),torch.empty(0,4),*metadata[1:])
-        decoded=codec.decode_motion(codec.encode_motion(*inputs,**steps),prior)
-        xyz,q=codec.compose_decoded_survivors(prior,metadata[0],rows,owner,parents,
+        decoded=_stream_dec.decode_motion(_stream_enc.encode_motion(*inputs,**steps),prior)
+        xyz,q=_stream_fmt.compose_decoded_survivors(prior,metadata[0],rows,owner,parents,
             rt,rr,gt[rows],gr[rows],*metadata[1:],**steps)
         self.assertTrue(torch.equal(xyz,decoded.xyz));self.assertTrue(torch.equal(q,decoded.rotation))
 
     def test_spatial_relative_offsets_match_wire_and_never_recurse(self):
         for relative in (False,True):
             with self.subTest(relative=relative):
-                model=spatial_tests.SpatialGatedMotionTests().model(repetitions=2)
+                model=spatial_tests.SpatialMotionTrainingTests().model(repetitions=2)
                 prior=model.codec_previous_state
                 # Nonunit raw quaternions detect unwanted normalization.
                 prior.rotation=prior.rotation*1.00123
@@ -1891,35 +527,30 @@ class SurvivorCompositionTests(unittest.TestCase):
                 extent=1.234567890123;step=.000123456789;rstep=.00123456789
                 options=dict(gs_translation_step_extent=.0000123456789,gs_rotation_step_rad=.000987654321,
                     spatial_open=opened,spatial_relative=relative)
-                xyz,q=codec.compose_decoded_survivors(prior,extent,rows,owner,parents,rt,rr,gt,gr,step,rstep,**options)
-                sources=torch.tensor([0,len(rows)-1]);birth_xyz=xyz[sources]+.0001
-                birth_q=torch.nn.functional.normalize(q[sources],dim=-1)+.001
+                xyz,q=_stream_fmt.compose_decoded_survivors(prior,extent,rows,owner,parents,rt,rr,gt,gr,step,rstep,**options)
+                sources=torch.empty(0,dtype=torch.long);birth_xyz=torch.empty(0,3)
+                birth_q=torch.empty(0,4)
                 inputs=(prior,1,extent,rows,owner,parents,rt,rr,gt,gr,sources,birth_xyz,birth_q,step,rstep)
-                with patch.object(codec,'decode_motion',side_effect=AssertionError('encoder must not decode')):
-                    packet=codec.encode_motion(*inputs,birth_pose_steps=(.00001,.001),compression='auto',**options)
-                decoded=codec.decode_motion(packet,prior)
+                with patch.object(_stream_dec,'decode_motion',side_effect=AssertionError('encoder must not decode')):
+                    packet=_stream_enc.encode_motion(*inputs,birth_pose_steps=(.00001,.001),compression='auto',**options)
+                decoded=_stream_dec.decode_motion(packet,prior)
                 self.assertTrue(torch.equal(xyz,decoded.xyz[:len(rows)]))
                 self.assertTrue(torch.equal(q,decoded.rotation[:len(rows)]))
-                expected_xyz=xyz[sources]+torch.round((birth_xyz-xyz[sources])/.00001)*.00001
-                predictor=torch.nn.functional.normalize(q[sources],dim=-1)
-                expected_q=predictor+torch.round((birth_q-predictor)/.001)*.001
-                self.assertTrue(torch.equal(expected_xyz,decoded.xyz[len(rows):]))
-                self.assertTrue(torch.equal(expected_q,decoded.rotation[len(rows):]))
 
     def test_motion_convenience_method_does_not_mutate_or_encode(self):
-        model=spatial_tests.SpatialGatedMotionTests().model(repetitions=2)
+        model=spatial_tests.SpatialMotionTrainingTests().model(repetitions=2)
         before=model.codec_previous_state.digest()
-        with patch.object(codec,'encode_motion',side_effect=AssertionError('pure composition')):
+        with patch.object(_stream_enc,'encode_motion',side_effect=AssertionError('pure composition')):
             xyz,q=model.decoded_survivor_pose()
         self.assertEqual(before,model.codec_previous_state.digest())
         rt,rr,gt,gr=model._values(hard=True)
         empty=torch.empty(0,dtype=torch.long)
-        packet=codec.encode_motion(model.frame_reference_state,model.frame_index,model.extent,
+        packet=_stream_enc.encode_motion(model.frame_reference_state,model.frame_index,model.extent,
             model.previous_rows,model.owner,model.parents,rt,rr,gt,gr,empty,torch.empty(0,3),torch.empty(0,4),
             model.config.motion_xyz_step_extent,model.config.motion_rotation_step_rad,
             gs_translation_step_extent=model.config.gs_xyz_step_extent,gs_rotation_step_rad=model.config.gs_rotation_step_rad,
             spatial_open=model.opened,spatial_relative=model.relative_regions)
-        decoded=codec.decode_motion(packet,model.frame_reference_state)
+        decoded=_stream_dec.decode_motion(packet,model.frame_reference_state)
         self.assertTrue(torch.equal(xyz,decoded.xyz));self.assertTrue(torch.equal(q,decoded.rotation))
 
 
@@ -1928,12 +559,12 @@ class BulkSparseDecodeTests(unittest.TestCase):
         rng=np.random.default_rng(728)
         values=np.r_[np.array([0,1,127,128,16383,16384,65535,65536,2**28,2**32-1],dtype=np.uint64),
                      rng.integers(0,2**32,size=10001,dtype=np.uint64)]
-        encoded=layout.encode_unsigned_values(values)
+        encoded=_stream_enc.encode_unsigned_values(values)
         for count in (0,1,9,10,len(values)):
             with self.subTest(count=count):
-                scalar=layout._Reader(encoded+b'trailer');bulk=layout._Reader(encoded+b'trailer')
+                scalar=_stream_fmt._IntegerReader(encoded+b'trailer');bulk=_stream_fmt._IntegerReader(encoded+b'trailer')
                 expected=[scalar.integer() for _ in range(count)]
-                actual=layout._read_unsigned_values(bulk,count)
+                actual=_stream_fmt._read_unsigned_values(bulk,count)
                 self.assertEqual(actual.tolist(),expected)
                 self.assertEqual(bulk.cursor,scalar.cursor)
                 self.assertEqual(bytes(bulk.take(bulk.remaining)),bytes(scalar.take(scalar.remaining)))
@@ -1943,11 +574,11 @@ class BulkSparseDecodeTests(unittest.TestCase):
                   (b'\xff'*4+b'\x10',1),(b'\x80',1),(b'\x00',2),(b'\x00\x81\x00',2)]
         for data,count in examples:
             with self.subTest(data=data,count=count):
-                scalar=layout._Reader(data)
+                scalar=_stream_fmt._IntegerReader(data)
                 with self.assertRaises(ValueError):
                     for _ in range(count):scalar.integer()
                 with self.assertRaises(ValueError):
-                    layout._read_unsigned_values(layout._Reader(data),count)
+                    _stream_fmt._read_unsigned_values(_stream_fmt._IntegerReader(data),count)
 
     def test_large_mixed_sparse_blocks_reconstruct_exact_bytes_and_integer_arrays(self):
         rng=np.random.default_rng(7421)
@@ -1955,19 +586,19 @@ class BulkSparseDecodeTests(unittest.TestCase):
             t=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
             r=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
             t[rng.random(count)<.7]=0;r[rng.random(count)<.85]=0
-            raw=bytearray();codec._sparse_write(raw,t,r)
-            reader=layout._Reader(raw)
-            planar=layout._encode_sparse(reader,count)
-            reconstructed=layout._decode_sparse(layout._Reader(planar),count)
+            raw=bytearray();_stream_enc._sparse_write(raw,t,r)
+            reader=_stream_fmt._IntegerReader(raw)
+            planar=_stream_enc._encode_sparse(reader,count)
+            reconstructed=_stream_dec._decode_sparse(_stream_fmt._IntegerReader(planar),count)
             self.assertEqual(bytes(raw),reconstructed)
-            decoded_t,decoded_r=codec._sparse_read(codec._Reader(reconstructed),count,delta_rows=True)
+            decoded_t,decoded_r=_stream_dec._sparse_read(_stream_fmt._Reader(reconstructed),count,delta_rows=True)
             torch.testing.assert_close(decoded_t,torch.from_numpy(t),rtol=0,atol=0)
             torch.testing.assert_close(decoded_r,torch.from_numpy(r),rtol=0,atol=0)
 
     def test_gap_validation_preserves_survivor_and_deletion_boundaries(self):
         for values,limit,deletion,valid in [([1,1,1],3,False,True),([0,0,0],3,True,True),
                 ([1,2,1],3,False,False),([0],3,False,False),([0,0,1],3,True,False)]:
-            data=layout.encode_unsigned_values(values);reader=layout._Reader(data)
+            data=_stream_enc.encode_unsigned_values(values);reader=_stream_fmt._IntegerReader(data)
             if valid:self.assertEqual(reader.gaps(len(values),limit,deletion=deletion),data)
             else:
                 with self.assertRaises(ValueError):reader.gaps(len(values),limit,deletion=deletion)
@@ -1975,8 +606,8 @@ class BulkSparseDecodeTests(unittest.TestCase):
     def test_spatial_decode_does_not_compute_unused_rigid_pivots(self):
         model=spatial_tests.JointImageRateTests().model()
         payload=spatial_tests.JointImageRateTests.packet(model)
-        with patch.object(codec,'region_pivots',side_effect=AssertionError('unused spatial pivots')):
-            decoded=codec.decode_motion(payload,model.frame_reference_state)
+        with patch.object(_stream_dec,'region_pivots',side_effect=AssertionError('unused spatial pivots')):
+            decoded=_stream_dec.decode_motion(payload,model.frame_reference_state)
         xyz,q=model.materialized_pose()
         torch.testing.assert_close(decoded.xyz,xyz,rtol=0,atol=0)
         torch.testing.assert_close(decoded.rotation,q,rtol=0,atol=0)
@@ -1987,13 +618,13 @@ class BulkSparseDecodeTests(unittest.TestCase):
             t=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
             r=rng.integers(-32768,32768,size=(count,3),dtype=np.int16)
             t[rng.random(count)<.6]=0;r[rng.random(count)<.9]=0
-            raw=bytearray();codec._sparse_write(raw,t,r)
-            planar=layout._encode_sparse(layout._Reader(raw),count)
+            raw=bytearray();_stream_enc._sparse_write(raw,t,r)
+            planar=_stream_enc._encode_sparse(_stream_fmt._IntegerReader(raw),count)
             retained=[]
-            self.assertEqual(bytes(raw),layout._decode_sparse(layout._Reader(planar),count,decoded=retained))
+            self.assertEqual(bytes(raw),_stream_dec._decode_sparse(_stream_fmt._IntegerReader(planar),count,decoded=retained))
             sections={0:(len(raw),count,*retained[0])}
-            reader=codec._Reader(raw+b'trailer')
-            actual=codec._sparse_read(reader,count,delta_rows=True,sparse_sections=sections)
+            reader=_stream_fmt._Reader(raw+b'trailer')
+            actual=_stream_dec._sparse_read(reader,count,delta_rows=True,sparse_sections=sections)
             self.assertFalse(sections)
             self.assertEqual(bytes(reader.take(7)),b'trailer')
             for value,expected in zip(actual,(t,r)):
@@ -2002,196 +633,88 @@ class BulkSparseDecodeTests(unittest.TestCase):
     def test_retained_sections_cannot_bypass_zero_block_validation(self):
         for flag in (1,2,3):
             raw=b'\x01\x01'+bytes([flag])+b'\0'*(6*(bool(flag&1)+bool(flag&2)))
-            planar=layout._encode_sparse(layout._Reader(raw),1)
+            planar=_stream_enc._encode_sparse(_stream_fmt._IntegerReader(raw),1)
             with self.assertRaisesRegex(ValueError,'Redundant zero'):
-                codec._sparse_read(codec._Reader(raw),1,delta_rows=True)
+                _stream_dec._sparse_read(_stream_fmt._Reader(raw),1,delta_rows=True)
             with self.assertRaisesRegex(ValueError,'Redundant zero'):
-                layout._decode_sparse(layout._Reader(planar),1,decoded=[])
+                _stream_dec._decode_sparse(_stream_fmt._IntegerReader(planar),1,decoded=[])
 
     def test_retaining_an_empty_section_does_not_allocate_untrusted_population_size(self):
         retained=[]
-        with patch.object(layout.np,'zeros',side_effect=AssertionError('dense allocation before state check')):
-            self.assertEqual(layout._decode_sparse(layout._Reader(b'\0'),2**32-1,decoded=retained),b'\0')
+        with patch.object(_stream_fmt.np,'zeros',side_effect=AssertionError('dense allocation before state check')):
+            self.assertEqual(_stream_dec._decode_sparse(_stream_fmt._IntegerReader(b'\0'),2**32-1,decoded=retained),b'\0')
         self.assertTrue(all(value.size==0 for value in retained[0]))
 
     def test_whole_packet_uses_retained_sections_and_checks_original_checksum(self):
         model=spatial_tests.JointImageRateTests().model()
-        raw=codec.uncompressed_motion_packet(spatial_tests.JointImageRateTests.packet(model))
-        planar=layout.pack_layout(layout.encode_motion_layout(raw),len(raw),layout.MOTION_MAGICS)
-        expected=codec.decode_motion(raw,model.frame_reference_state)
-        original=codec._sparse_read
+        raw=_stream_dec.uncompressed_motion_packet(spatial_tests.JointImageRateTests.packet(model))
+        planar=_stream_enc.pack_layout(_stream_enc.encode_motion_layout(raw),len(raw),_stream_fmt.MOTION_MAGICS)
+        expected=_stream_dec.decode_motion(raw,model.frame_reference_state)
+        original=_stream_dec._sparse_read
         def checked(reader,count,**kwargs):
             self.assertIn(reader.cursor,kwargs['sparse_sections'])
             return original(reader,count,**kwargs)
-        with patch.object(codec,'_sparse_read',side_effect=checked) as read:
-            actual=codec.decode_motion(planar,model.frame_reference_state)
+        with patch.object(_stream_dec,'_sparse_read',side_effect=checked) as read:
+            actual=_stream_dec.decode_motion(planar,model.frame_reference_state)
         self.assertEqual(read.call_count,2)
         self.assertEqual(actual.digest(),expected.digest())
         damaged=raw[:-1]+bytes([raw[-1]^1])
-        packet=layout.pack_layout(layout.encode_motion_layout(damaged),len(damaged),layout.MOTION_MAGICS)
-        with patch.object(codec,'_compose_decoded_pose',side_effect=AssertionError('must validate first')), \
+        packet=_stream_enc.pack_layout(_stream_enc.encode_motion_layout(damaged),len(damaged),_stream_fmt.MOTION_MAGICS)
+        with patch.object(_stream_dec,'_compose_decoded_pose',side_effect=AssertionError('must validate first')), \
                 self.assertRaisesRegex(ValueError,'checksum'):
-            codec.decode_motion(packet,model.frame_reference_state)
+            _stream_dec.decode_motion(packet,model.frame_reference_state)
 
 
 # ----- Stream packet and GPU decoder parity -----
 
 
-
-from pipeline.model import rigid_tree_codec as codec
-from pipeline.model import rigid_tree_birth_codec as birth
-from pipeline.model.birth_quantization import RAW_FIELDS,reference_digest
-from pipeline.model.stream_packet import _birth_attributes,_opacity_symbols,read_stream_step
+from pipeline.model.frame_stream_format import RAW_FIELDS,reference_digest
+from pipeline.model.frame_stream_decode import (_opacity_symbols, read_stream_step)
 
 
-def make_stream(directory,births=2,rotate=False,nearest=False,inherit_rotation=False,colour=False,
-                scale=False,rest=3):
-    raw=reference_raw(rest=rest)
-    if nearest:raw['xyz'][0,0]=0.
+def make_stream(directory, births=0, inherit_rotation=False, preserve=False):
+    if births:
+        raise ValueError('Current test fixture only supports the fixed GS population')
+    raw=reference_raw()
     model=motion_model(raw);prior=model.frame_reference_state
-    if nearest:
-        from pipeline.model.spatial_gate import spatial_state_route,spatial_owner
-        first_leaf=sum(8**level for level in range(prior.spatial_paths.shape[1]))
-        prior.spatial_support_ball=torch.tensor([0.,0.,0.,.2],dtype=torch.float64)
-        prior.spatial_leaf_centers=torch.tensor([[-1.,0.,0.],[1.,0.,0.]],dtype=torch.float32)
-        prior.spatial_leaf_nodes=torch.tensor([first_leaf,first_leaf+1],dtype=torch.long)
-        prior.spatial_paths=spatial_state_route(prior.xyz,prior)
-        prior.owner=spatial_owner(prior.spatial_paths,prior.spatial_open)
-    rows=torch.tensor([0,2,3,4,5,6,7]);n=len(rows)
+    rows=torch.arange(len(prior.xyz)) if preserve else torch.tensor([0,2,3,4,5,6,7]);n=len(rows)
     rt=torch.zeros(len(prior.parents),3,dtype=torch.int16);rr=torch.zeros_like(rt)
     gt=torch.zeros(n,3,dtype=torch.int16);gr=torch.zeros_like(gt)
     gt[2]=torch.tensor([1,-2,0],dtype=torch.int16)
-    if rotate:gr[0,1]=1
     sources=torch.tensor([0,4][:births],dtype=torch.long)
-    xyz,q=codec.compose_decoded_survivors(prior,2.,rows,prior.owner[rows],prior.parents,
+    xyz,q=_stream_fmt.compose_decoded_survivors(prior,2.,rows,prior.owner[rows],prior.parents,
         rt,rr,gt,gr,.001,.001,spatial_open=prior.spatial_open,spatial_relative=True,
         inherit_birth_rotation=inherit_rotation)
     newborn_xyz=xyz[sources]+torch.tensor([.002,0.,-.002])
-    payload=codec.encode_motion(prior,1,2.,rows,prior.owner[rows],prior.parents,rt,rr,gt,gr,
+    payload=_stream_enc.encode_motion(prior,1,2.,rows,prior.owner[rows],prior.parents,rt,rr,gt,gr,
         sources,newborn_xyz,q[sources],.001,.001,spatial_open=prior.spatial_open,
         spatial_relative=True,birth_pose_steps=(.002,.001),
         inherit_birth_rotation=inherit_rotation,
         gs_translation_step_extent=.001,gs_rotation_step_rad=.001)
-    payload=codec.compress_motion_packet(payload)
-    decoded=codec.decode_motion(payload,prior)
+    payload=_stream_enc.compress_motion_packet(payload)
+    decoded=_stream_dec.decode_motion(payload,prior)
     current={name:value[rows].clone() for name,value in raw.items()}
     current['xyz']=decoded.xyz[:n];current['rotation']=decoded.rotation[:n]
     (directory/'motion_001.bin').write_bytes(payload)
-    if colour:
-        from pipeline.model.sparse_features import (REGIONAL_MAGIC, _regional_digest,
-                                                    decode_feature_dc_delta)
-        from pipeline.model.sparse_updates import encode_opacity_delta
-        reference=current['sh_dc'].clone()
-        table=torch.ones(len(prior.parents)*3,1,dtype=torch.int16)
-        packet=(REGIONAL_MAGIC+_regional_digest(reference,decoded.owner[:n],len(prior.parents))+
-                encode_opacity_delta(torch.zeros_like(table,dtype=torch.float32),table,
-                                     frame_index=1,step=.01))
-        (directory/'shdc_001.bin').write_bytes(packet)
-        current['sh_dc']=decode_feature_dc_delta(packet,reference,frame_index=1,
-            owner=decoded.owner[:n],node_count=len(prior.parents))
-    if scale:
-        from pipeline.model.sparse_logscale import encode_logscale_delta,decode_logscale_delta
-        if scale == 'anisotropic':
-            symbols=torch.zeros(n,3,dtype=torch.int8)
-            symbols[2]=torch.tensor([7,-3,2],dtype=torch.int8)
-        else:
-            symbols=torch.zeros(n,dtype=torch.int8);symbols[2]=7
-        packet=encode_logscale_delta(current['logscale'],symbols,
-            allowed_rows=decoded.gs_translation_rows,frame_index=1,step=.005)
-        (directory/'logscale_001.bin').write_bytes(packet)
-        current['logscale']=decode_logscale_delta(packet,current['logscale'],
-            allowed_rows=decoded.gs_translation_rows,frame_index=1).logscale
-    if births:
-        predictor={name:current[name][sources] for name in birth.ATTRIBUTES}
-        symbols={name:torch.ones_like(value) for name,value in predictor.items()}
-        steps={name:.125 for name in predictor}
-        newborn={name:predictor[name]+symbols[name]*steps[name] for name in predictor}
-        packet=birth.encode_birth_symbols(newborn,n,symbols=symbols,steps=steps,
-            predictor=predictor,source_rows=sources)
-        assert packet is not None
-        (directory/'birth_001.bin').write_bytes(packet)
-        for name in birth.ATTRIBUTES:current[name]=torch.cat((current[name],newborn[name]))
     current['xyz'],current['rotation']=decoded.xyz,decoded.rotation
     manifest=dict(frame=1,motion='motion_001.bin',birth='birth_001.bin' if births else None,
         opacity_update=None,old_count=n,birth_count=births,total_count=n+births,
         previous_count=len(prior.xyz),decoded_state_sha256=decoded.digest().hex(),
         raw_state_sha256=reference_digest(current))
-    if colour:
-        manifest.update(feature_dc_update='shdc_001.bin',feature_dc_update_timing='before_births')
-    if scale:
-        manifest.update(logscale_update='logscale_001.bin',logscale_update_timing='before_births')
     (directory/'frame_001.json').write_text(json.dumps(manifest))
     return prior,raw,decoded,current,manifest
 
 
 class StreamPacketTests(unittest.TestCase):
-    def test_gpu_certificate_uses_each_run_configured_image_size(self):
-        from types import SimpleNamespace
-        from scripts.benchmark_gpu_stream import _expected_image_shape
-        config=SimpleNamespace(data=SimpleNamespace(expected_image_size=[1344,1007]))
-        self.assertEqual(_expected_image_shape(config),(3,1007,1344))
-        for invalid in (None,[],[1344],[1344,0],[1344,True],[1344,1007.0]):
-            config.data.expected_image_size=invalid
-            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
-                _expected_image_shape(config)
 
-    def test_inherited_rotation_offsets_and_shared_colour_replay_before_newborn_prediction(self):
-        from scripts.replay_rigid_tree import decode_frame
-        for births in (0,2):
-            with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
-                directory=Path(folder)
-                prior,raw,expected,attributes,_=make_stream(
-                    directory,births,inherit_rotation=True,colour=True,scale=True)
-                step=read_stream_step(directory,1,region_count=len(prior.parents),
-                    depth=prior.spatial_paths.shape[1],rest=3)
-                self.assertTrue(step.inherit_birth_rotation)
-                self.assertTrue(step.relative)
-                self.assertEqual(step.stored_bytes,sum(p.stat().st_size for p in directory.iterdir()))
-                self.assertEqual(codec.uncompressed_motion_packet((directory/'motion_001.bin').read_bytes())[:4],b'SPG8')
-                self.assertTrue(torch.equal(expected.rotation[:step.old_count],raw['rotation'][[0,2,3,4,5,6,7]]))
-                if births:
-                    self.assertTrue(torch.equal(expected.rotation[step.old_count:],expected.rotation[step.sources]))
-                state,decoded=decode_frame(directory,1,prior,raw)
-                self.assertEqual(state.digest(),expected.digest())
-                self.assertEqual(reference_digest(decoded),reference_digest(attributes))
-
-    def test_anisotropic_logscale_is_counted_and_replayed_before_newborn_prediction(self):
-        from scripts.replay_rigid_tree import decode_frame
-        with tempfile.TemporaryDirectory() as folder:
-            directory=Path(folder)
-            prior,raw,expected,attributes,_=make_stream(
-                directory,2,inherit_rotation=True,scale='anisotropic')
-            step=read_stream_step(directory,1,region_count=len(prior.parents),
-                                  depth=prior.spatial_paths.shape[1],rest=3)
-            self.assertIn(step.logscale_update[:4],(b'SLA1',b'ZLA1'))
-            self.assertEqual(step.stored_bytes,sum(p.stat().st_size for p in directory.iterdir()))
-            state,decoded=decode_frame(directory,1,prior,raw)
-            self.assertEqual(state.digest(),expected.digest())
-            self.assertEqual(reference_digest(decoded),reference_digest(attributes))
-
-    def test_birth_symbols_and_absolute_fallback_match_original_attribute_decoder(self):
-        for rest in (0,3,15):
-            base,raw,symbols,steps,predictor,sources,xyz,q=appearance_fixture(rest=rest)
-            packets=[birth.encode_birth_attributes(raw,3),birth.encode_birth_symbols(raw,3,
-                symbols=symbols,steps=steps,predictor=predictor,source_rows=sources)]
-            for packet in packets:
-                parsed=_birth_attributes(packet,3,2,rest)
-                original=birth.decode_birth_attributes(packet,base,xyz,q,sources)
-                for index,name in enumerate(birth.ATTRIBUTES):
-                    actual=parsed.values[name].astype(np.float32)
-                    if parsed.steps is not None:
-                        actual=base[name][sources].numpy()+actual*np.float32(parsed.steps[index])
-                    self.assertEqual(actual.tobytes(),original[name].numpy().tobytes())
-                damaged=bytearray(packet);damaged[-1]^=1
-                with self.assertRaises(ValueError):_birth_attributes(damaged,3,2,rest)
 
     def test_opacity_parsing_keeps_original_rows_symbols_and_all_envelope_checks(self):
-        from pipeline.model.legacy_opacity_codec import decode_opacity_delta,HEADER
+        from pipeline.model.frame_stream_decode import (decode_opacity_delta)
+        from pipeline.model.frame_stream_format import (OPACITY_HEADER as HEADER)
         import zlib
         reference,symbols,raw=opacity_fixture()
-        planar=layout.encode_opacity_layout(raw)
-        for packet in [raw[:HEADER.size]+zlib.compress(raw[HEADER.size:]),
-                       *wrapped(planar,len(raw),layout.OPACITY_MAGICS)]:
+        planar=_stream_enc.encode_opacity_layout(raw)
+        for packet in wrapped(planar,len(raw),_stream_fmt.OPACITY_MAGICS):
             parsed=_opacity_symbols(packet,1,len(reference))
             original=decode_opacity_delta(packet,reference,frame_index=1)
             np.testing.assert_array_equal(parsed.rows,original.rows.numpy())
@@ -2199,113 +722,347 @@ class StreamPacketTests(unittest.TestCase):
             with self.assertRaises(ValueError):_opacity_symbols(packet,2,len(reference))
             with self.assertRaises(ValueError):_opacity_symbols(packet+b'x',1,len(reference))
 
-    def test_bulk_pose_tail_preserves_zero_birth_and_rejects_noncanonical_sources(self):
-        valid=layout._varint(0)+struct.pack('<2d',.001,.002)+b'\0'*7+b'\0'*16
-        layout._check_motion_tail(valid,1,3,7,offset=True)
-        layout._check_motion_tail(struct.pack('<2d',.001,.002)+b'\0'*16,0,3,7,offset=True)
-        for malformed in (b'\x80\0'+valid[1:],layout._varint(3)+valid[1:],valid[:-1]):
-            with self.assertRaises(ValueError):layout._check_motion_tail(malformed,1,3,7,offset=True)
-
-    def test_whole_packet_population_lineage_and_required_file_validation(self):
-        for births in (0,2):
-            with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
-                directory=Path(folder);prior,_,decoded,_,manifest=make_stream(directory,births)
-                arguments=dict(region_count=len(prior.parents),depth=prior.spatial_paths.shape[1],rest=3)
-                step=read_stream_step(directory,1,**arguments)
-                self.assertEqual(step.digest,decoded.digest())
-                np.testing.assert_array_equal(step.sources,decoded.birth_sources.numpy())
-                with self.assertRaises(ValueError):read_stream_step(directory,1,max_points=6,**arguments)
-                changed={**manifest,'previous_count':100}
-                (directory/'frame_001.json').write_text(json.dumps(changed))
-                with self.assertRaisesRegex(ValueError,'population'):read_stream_step(directory,1,**arguments)
-                changed={**manifest,'motion':'../unexpected.bin'}
-                (directory/'frame_001.json').write_text(json.dumps(changed))
-                with self.assertRaisesRegex(ValueError,'filename'):read_stream_step(directory,1,**arguments)
-
-    def test_unsupported_old_rotation_updates_fail_explicitly(self):
-        with tempfile.TemporaryDirectory() as folder:
-            directory=Path(folder);prior,*_=make_stream(directory,rotate=True)
-            with self.assertRaisesRegex(ValueError,'zero old rotation'):
-                read_stream_step(directory,1,region_count=len(prior.parents),depth=prior.spatial_paths.shape[1],rest=3)
-
 
 @unittest.skipUnless(torch.cuda.is_available(),'GPU incremental stream checks')
 class GPUStreamTests(unittest.TestCase):
-    def test_sh3_birth_and_regional_colour_match_cpu_bits(self):
-        from pipeline.model.gpu_stream import GPUStream
-        with tempfile.TemporaryDirectory() as folder:
-            directory=Path(folder)
-            prior,raw,expected,attributes,_=make_stream(
-                directory,2,inherit_rotation=True,colour=True,rest=15)
-            player=GPUStream(prior,raw,capacity=32)
-            self.assertEqual((player.rest,player.sh_degree,
-                              player.view.active_sh_degree),(15,3,3))
-            step=read_stream_step(directory,1,region_count=len(prior.parents),
-                                  depth=player.depth,rest=player.rest)
-            player.advance(step)
-            actual=player.capture_raw()
-            self.assertEqual(player.capture_state(actual).digest(),expected.digest())
-            self.assertEqual(reference_digest(actual),reference_digest(attributes))
-            self.assertEqual(player.view.active_sh_degree,3)
-            player.verify_render_inputs(attributes)
+    def test_general_playback_keeps_dense_and_deleted_ids_across_frames(self):
+        from scripts.frame_stream_player import GPUStream
+        for preserve in (True, False):
+            for births in (0,):
+                with self.subTest(preserve=preserve, births=births), tempfile.TemporaryDirectory() as folder:
+                    directory = Path(folder)
+                    prior, raw, first, expected, _ = make_stream(
+                        directory, births, inherit_rotation=True, preserve=preserve)
+                    player = GPUStream(prior, raw, capacity=32)
+                    player.advance_frame(directory, 1)
+                    self.assertEqual(player._dense_ids, preserve)
+                    actual = player.capture_raw()
+                    for name in RAW_FIELDS:
+                        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=1e-6)
+                    player.verify_render_inputs(expected, atol=1e-6)
 
-    def test_inherited_rotation_and_regional_colour_match_cpu_bits_with_newborns(self):
-        from pipeline.model.gpu_stream import GPUStream
-        for births in (0,2):
-            with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
-                directory=Path(folder)
-                prior,raw,expected,attributes,_=make_stream(
-                    directory,births,inherit_rotation=True,colour=True,scale=True)
-                player=GPUStream(prior,raw,capacity=32)
-                step=read_stream_step(directory,1,region_count=len(prior.parents),depth=player.depth,rest=player.rest)
-                player.advance(step)
-                actual=player.capture_raw()
-                self.assertEqual(player.capture_state(actual).digest(),expected.digest())
-                self.assertEqual(reference_digest(actual),reference_digest(attributes))
-                player.verify_render_inputs(attributes)
+                    # Follow with an identity survivor mapping, including
+                    # when the stable IDs already contain a deletion gap.
+                    count = len(first.xyz)
+                    rows = torch.arange(count)
+                    region = torch.zeros(len(first.parents), 3, dtype=torch.int16)
+                    point = torch.zeros(count, 3, dtype=torch.int16)
+                    sources = torch.empty(0, dtype=torch.long)
+                    payload = _stream_enc.encode_motion(
+                        first, 2, 2., rows, first.owner, first.parents,
+                        region, region, point, point, sources,
+                        torch.empty(0, 3), torch.empty(0, 4), .001, .001,
+                        spatial_open=first.spatial_open, spatial_relative=True,
+                        inherit_birth_rotation=True, gs_translation_step_extent=.001,
+                        gs_rotation_step_rad=.001)
+                    payload = _stream_enc.compress_motion_packet(payload)
+                    second = decode_motion(payload, first)
+                    expected = {**expected, 'xyz': second.xyz, 'rotation': second.rotation}
+                    (directory / 'motion_002.bin').write_bytes(payload)
+                    (directory / 'frame_002.json').write_text(json.dumps(dict(
+                        frame=2, motion='motion_002.bin', birth=None, opacity_update=None,
+                        previous_count=count, old_count=count, birth_count=0, total_count=count,
+                        decoded_state_sha256=second.digest().hex(),
+                        raw_state_sha256=reference_digest(expected))))
+                    player.advance_frame(directory, 2)
+                    self.assertEqual(player._dense_ids, preserve)
+                    actual = player.capture_raw()
+                    for name in RAW_FIELDS:
+                        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=1e-6)
+                    player.verify_render_inputs(expected, atol=1e-6)
 
-    def test_anisotropic_logscale_matches_cpu_bits_with_newborns(self):
-        from pipeline.model.gpu_stream import GPUStream
-        with tempfile.TemporaryDirectory() as folder:
-            directory=Path(folder)
-            prior,raw,expected,attributes,_=make_stream(
-                directory,2,inherit_rotation=True,scale='anisotropic')
-            player=GPUStream(prior,raw,capacity=32)
-            step=read_stream_step(directory,1,region_count=len(prior.parents),
-                                  depth=player.depth,rest=player.rest)
-            player.advance(step)
-            actual=player.capture_raw()
-            self.assertEqual(player.capture_state(actual).digest(),expected.digest())
-            self.assertEqual(reference_digest(actual),reference_digest(attributes))
-            player.verify_render_inputs(attributes)
 
-    def test_cooperative_nearest_leaf_keeps_exact_ties_and_routes_newborns_again(self):
-        from pipeline.model.gpu_stream import GPUStream
-        with tempfile.TemporaryDirectory() as folder:
-            directory=Path(folder);prior,raw,expected,attributes,_=make_stream(directory,nearest=True)
-            player=GPUStream(prior,raw,capacity=32)
-            step=read_stream_step(directory,1,region_count=len(prior.parents),depth=player.depth,rest=player.rest)
-            player.advance(step)
-            actual=player.capture_raw();state=player.capture_state(actual)
-            self.assertEqual(state.digest(),expected.digest())
-            self.assertEqual(reference_digest(actual),reference_digest(attributes))
-            first_leaf=sum(8**level for level in range(player.depth))
-            self.assertEqual(int(state.spatial_paths[0,-1]),first_leaf)
-            self.assertEqual(int(state.spatial_paths[step.old_count,-1]),first_leaf+1)
-            player.verify_render_inputs(attributes)
+class FullAttributeStreamTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required for cross-device quantization')
+    def test_cuda_half_bin_forward_matches_encoded_symbols(self):
+        ref = dict(logscale=torch.zeros(1, 3, device='cuda'),
+                   sh_dc=torch.zeros(1, 1, 3, device='cuda'),
+                   sh_rest=torch.zeros(1, 3, 3, device='cuda'))
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1, device='cuda'))])
+        update = ResidualAppearanceAttributes(FullUpdateConfig())
+        update.setup(ref, optimizer, (.001, .001, .001))
+        with torch.no_grad():
+            update.parameters['sh_dc'][0, 0, 0] = -0.07750000059604645
+        forward = update.apply(ref)['sh_dc'].detach().cpu()
+        symbols = update.symbols()
+        cpu_ref = {name: value.cpu() for name, value in ref.items()}
+        packet = encode_full_attribute_delta(cpu_ref, symbols, frame_index=1, steps=(.001, .001, .001))
+        decoded = decode_full_attribute_delta(packet, cpu_ref, frame_index=1)
+        self.assertTrue(torch.equal(forward, decoded['sh_dc']))
 
-    def test_real_packet_births_deletions_and_empty_birth_match_cpu_bits(self):
-        from pipeline.model.gpu_stream import GPUStream
-        for births in (0,2):
-            with self.subTest(births=births),tempfile.TemporaryDirectory() as folder:
-                directory=Path(folder);prior,raw,expected,attributes,_=make_stream(directory,births)
-                player=GPUStream(prior,raw,capacity=32)
-                step=read_stream_step(directory,1,region_count=len(prior.parents),depth=player.depth,rest=player.rest)
-                player.advance(step)
-                actual=player.capture_raw();state=player.capture_state(actual)
-                self.assertEqual(state.digest(),expected.digest())
-                self.assertEqual(reference_digest(actual),reference_digest(attributes))
-                player.verify_render_inputs(attributes)
+    def test_roundtrip_zero_preservation_reference_and_corruption(self):
+        ref = dict(logscale=torch.tensor([[-0., 1., 2.], [3., 4., 5.]]),
+                   sh_dc=torch.zeros(2, 1, 3), sh_rest=torch.zeros(2, 3, 3))
+        symbols = {k: torch.zeros_like(v) for k, v in ref.items()}
+        steps = (.005, .001, .001)
+        self.assertIsNone(encode_full_attribute_delta(ref, symbols, frame_index=10, steps=steps))
+        symbols['logscale'][1, 0] = -13
+        symbols['sh_dc'][0, 0, 0] = 12
+        symbols['sh_rest'][1, 2, 1] = 7
+        packet = encode_full_attribute_delta(ref, symbols, frame_index=10, steps=steps)
+        result = decode_full_attribute_delta(packet, ref, frame_index=10)
+        self.assertTrue(torch.signbit(result['logscale'][0, 0]))
+        for name, step in zip(FIELDS, steps):
+            self.assertTrue(torch.equal(result[name], torch.where(symbols[name].ne(0),
+                                           ref[name] + symbols[name] * step, ref[name])))
+        changed = {k: v.clone() for k, v in ref.items()}
+        changed['sh_dc'][0, 0, 1] = 1
+        with self.assertRaises(ValueError):
+            decode_full_attribute_delta(packet, changed, frame_index=10)
+        damaged = bytearray(packet); damaged[-1] ^= 1
+        with self.assertRaises(ValueError):
+            decode_full_attribute_delta(damaged, ref, frame_index=10)
+
+    def test_sparse_and_dense_use_fua3(self):
+        torch.manual_seed(9)
+        ref = dict(logscale=torch.zeros(3000, 3), sh_dc=torch.zeros(3000, 1, 3),
+                   sh_rest=torch.zeros(3000, 3, 3))
+        ref['logscale'][0, 0] = -0.
+        steps = (.005, .001, .001)
+        sparse = {k: torch.zeros_like(v) for k, v in ref.items()}
+        for index, name in enumerate(FIELDS):
+            sparse[name][1000 * index + 3].flatten()[0] = 25 + index
+        sparse['logscale'][0, 1] = 17
+        sparse['sh_rest'][-1, -1, -1] = -27
+        packet = encode_full_attribute_delta(ref, sparse, frame_index=10, steps=steps)
+        self.assertEqual(packet[:4], PLANAR_MAGIC)
+        decoded = decode_full_attribute_delta(packet, ref, frame_index=10)
+        self.assertTrue(torch.signbit(decoded['logscale'][0, 0]))
+        for name, step in zip(FIELDS, steps):
+            self.assertTrue(torch.equal(decoded[name], torch.where(sparse[name].ne(0),
+                ref[name] + sparse[name] * step, ref[name])))
+        dense = {k: torch.randint(-32767, 32768, v.shape).float() for k, v in ref.items()}
+        packet = encode_full_attribute_delta(ref, dense, frame_index=10, steps=steps)
+        self.assertEqual(packet[:4], PLANAR_MAGIC)
+        decoded = decode_full_attribute_delta(packet, ref, frame_index=10)
+        for name, step in zip(FIELDS, steps):
+            self.assertTrue(torch.equal(decoded[name], torch.where(dense[name].ne(0),
+                ref[name] + dense[name] * step, ref[name])))
+
+    def test_sparse_formats_materialize_exact_bits_without_mutating_reference(self):
+        torch.manual_seed(4242)
+        steps = (.005, .001, .002)
+        for rest in (0, 3, 15):
+            ref = dict(logscale=torch.randn(257, 3), sh_dc=torch.randn(257, 1, 3),
+                       sh_rest=torch.randn(257, rest, 3))
+            symbols = {name: torch.zeros_like(value, dtype=torch.int16) for name, value in ref.items()}
+            for name in FIELDS:
+                if not symbols[name][1].numel():
+                    continue
+                # Zero components in a changed row must retain signed-zero bits.
+                ref[name][1].view(-1)[0] = -0.
+                symbols[name][1].view(-1)[1] = 32767
+                symbols[name][127].view(-1)[0] = -32767
+                symbols[name][-1].view(-1)[-1] = 7
+            original = {name: value.clone() for name, value in ref.items()}
+            body = _stream_enc._sparse_body([symbols[name].numpy() for name in FIELDS])
+            planar = _stream_fmt._sparse_zigzag_byteplane(body, len(ref['logscale']), rest)
+            for magic, payload in ((fua.PLANAR_MAGIC, planar),):
+                with self.subTest(rest=rest, magic=magic):
+                    packet = _encode_body(magic, payload, 7, 257, rest, steps, _reference_hash(ref))
+                    decoded = decode_full_attribute_delta(packet, ref, frame_index=7)
+                    for name, step in zip(FIELDS, steps):
+                        integer = symbols[name].float()
+                        expected = torch.where(integer.ne(0), ref[name] + integer * step, ref[name])
+                        self.assertTrue(torch.equal(decoded[name].view(torch.int32), expected.view(torch.int32)))
+                        self.assertTrue(torch.equal(ref[name].view(torch.int32), original[name].view(torch.int32)))
+                    decoded['logscale'][0, 0] = 123.
+                    self.assertTrue(torch.equal(ref['logscale'].view(torch.int32), original['logscale'].view(torch.int32)))
+
+    def test_reordered_survivors_bind_reference_and_roundtrip(self):
+        ref = dict(logscale=torch.arange(15).reshape(5, 3).float(),
+                   sh_dc=torch.arange(15).reshape(5, 1, 3).float(),
+                   sh_rest=torch.arange(45).reshape(5, 3, 3).float())
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))])
+        update = ResidualAppearanceAttributes(FullUpdateConfig(enabled=True))
+        update.setup(ref, optimizer, (.01, .01, .01))
+        with torch.no_grad():
+            update.parameters['sh_dc'][4, 0, 0] = .003
+            update.parameters['sh_rest'][1, 2, 2] = -.004
+        rows = torch.tensor([4, 1, 3])
+        update.retain(rows, optimizer)
+        kept = {name: value[rows] for name, value in ref.items()}
+        packet = encode_full_attribute_delta(kept, update.symbols(), frame_index=10, steps=update.steps)
+        decoded = decode_full_attribute_delta(packet, kept, frame_index=10)
+        expected = update.canonical(kept)
+        for name in FIELDS:
+            self.assertTrue(torch.equal(decoded[name], expected[name]))
+        swapped = {name: value[torch.tensor([1, 0, 2])] for name, value in kept.items()}
+        with self.assertRaises(ValueError):
+            decode_full_attribute_delta(packet, swapped, frame_index=10)
+
+
+def make_full_attribute_stream(directory, *, magic):
+    count = 512
+    xyz = torch.zeros(count, 3)
+    rotation = torch.zeros(count, 4)
+    rotation[:, 0] = 1
+    owner = torch.ones(count, dtype=torch.long)
+    parents = torch.tensor([-1, 0])
+    prior = DecodedState(xyz, rotation, owner, parents, 0)
+    raw = dict(xyz=xyz, rotation=rotation, logscale=torch.zeros(count, 3),
+               opacity=torch.zeros(count, 1), sh_dc=torch.zeros(count, 1, 3),
+               sh_rest=torch.zeros(count, 3, 3))
+    region = torch.zeros(2, 3, dtype=torch.int16)
+    points = torch.zeros(count, 3, dtype=torch.int16)
+    motion = encode_motion(prior, 1, 1., torch.arange(count), owner, parents,
+        region, region, points, points, torch.empty(0, dtype=torch.long),
+        torch.empty(0, 3), torch.empty(0, 4), .001, .001)
+    full_attribute_reference = {name: raw[name] for name in fua.FIELDS}
+    symbols = {name: torch.zeros_like(value) for name, value in full_attribute_reference.items()}
+    for value in symbols.values():
+        value[-1].flatten()[0] = 7
+    arrays = [symbols[name].to(torch.int16).numpy().astype('<i2', copy=False)
+              for name in fua.FIELDS]
+    body = _stream_fmt._sparse_zigzag_byteplane(_stream_enc._sparse_body(arrays), count, 3)
+    packet = _stream_enc._encode_body(magic, body, 1, count, 3, (.005, .001, .001),
+                              _stream_fmt._reference_hash(full_attribute_reference))
+    assert packet[:4] == magic
+    directory = Path(directory)
+    (directory / 'motion_001.bin').write_bytes(motion)
+    (directory / 'fullattr_001.bin').write_bytes(packet)
+    manifest = dict(frame=1, motion='motion_001.bin', birth=None, full_update=True,
+                    full_attribute_update='fullattr_001.bin',
+                    full_attribute_update_timing='after_regional_dc_before_births',
+                    opacity_update_timing='before_births')
+    index = directory / 'frame_001.json'
+    index.write_text(json.dumps(manifest))
+    payload = len(motion) + len(packet)
+    summary = dict(motion=dict(bytes=len(motion)), birth=None,
+                   full_attribute_update=dict(archive_bytes=len(packet)),
+                   packet_bytes=payload, manifest_bytes=index.stat().st_size,
+                   encoded_bytes=payload + index.stat().st_size,
+                   complete_dynamic_update_bytes=payload + index.stat().st_size,
+                   shared_reference_bytes=11, decoder_reference='reference_frame0.npz')
+    return prior, raw, manifest, summary, packet
+
+
+class FullAttributeReplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def test_replay_full_attributes_leave_previous_state_independent(self):
+        for magic in (fua.PLANAR_MAGIC,):
+            with self.subTest(magic=magic), tempfile.TemporaryDirectory() as directory:
+                stream = Path(directory)
+                prior, raw, _, _, packet = make_full_attribute_stream(stream, magic=magic)
+                before = {name: value.clone() for name, value in raw.items()}
+                _, current = decode_frame(stream, 1, prior, raw)
+                for name in RAW_FIELDS:
+                    self.assertTrue(torch.equal(raw[name].view(torch.int32), before[name].view(torch.int32)), name)
+                    self.assertNotEqual(current[name].data_ptr(), raw[name].data_ptr(), name)
+                    current[name].fill_(123)
+                    self.assertTrue(torch.equal(raw[name].view(torch.int32), before[name].view(torch.int32)), name)
+
+                damaged = bytearray(packet)
+                damaged[-1] ^= 1
+                (stream / 'fullattr_001.bin').write_bytes(damaged)
+                with self.assertRaises(ValueError):
+                    decode_frame(stream, 1, prior, raw)
+                for name in RAW_FIELDS:
+                    self.assertTrue(torch.equal(raw[name].view(torch.int32), before[name].view(torch.int32)), name)
+
+
+def full_attribute_reference(count=8, rest=3):
+    result = dict(logscale=torch.zeros(count, 3), sh_dc=torch.zeros(count, 1, 3),
+                  sh_rest=torch.zeros(count, rest, 3))
+    result['logscale'][0, 0] = -0.
+    return result
+
+
+def full_attribute_reference_packet(ref, symbols, frame=10):
+    arrays = [symbols[name].to(torch.int16).numpy().astype('<i2', copy=False) for name in fua.FIELDS]
+    sparse = _stream_enc._sparse_body(arrays)
+    planar = _stream_fmt._sparse_zigzag_byteplane(sparse, len(ref['logscale']), ref['sh_rest'].shape[1])
+    args = (frame, len(ref['logscale']), ref['sh_rest'].shape[1], FULL_ATTRIBUTE_STEPS, _stream_fmt._reference_hash(ref))
+    return _stream_enc._encode_body(fua.PLANAR_MAGIC, planar, *args)
+
+
+def full_attribute_bits(value):
+    return value.detach().cpu().contiguous().numpy().tobytes()
+
+
+class FUA3CodecTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def test_fua3_full_packet_matches_reference_layout(self):
+        gen = torch.Generator().manual_seed(20261104)
+        for count, active_mod, magnitude in ((8, 1, 32767), (4096, 127, 30),
+                                             (300, 3, 20), (500, 1, 4)):
+            ref = full_attribute_reference(count)
+            symbols = {name: torch.randint(-magnitude, magnitude + 1, value.shape,
+                                            generator=gen).float() for name, value in ref.items()}
+            for value in symbols.values():
+                value[torch.arange(count) % active_mod != 0] = 0
+            for name in fua.FIELDS:
+                symbols[name][0].flatten()[0] = -32767
+                symbols[name][-1].flatten()[-1] = 32767
+            new = full_attribute_reference_packet(ref, symbols)
+            packet = fua.encode_full_attribute_delta(ref, symbols, frame_index=10, steps=FULL_ATTRIBUTE_STEPS)
+            self.assertEqual(packet, new)
+            results = [fua.decode_full_attribute_delta(p, ref, frame_index=10)
+                       for p in (new, packet)]
+            for name, step in zip(fua.FIELDS, FULL_ATTRIBUTE_STEPS):
+                expected = torch.where(symbols[name].ne(0), ref[name] + symbols[name] * step, ref[name])
+                for result in results:
+                    self.assertEqual(full_attribute_bits(result[name]), full_attribute_bits(expected))
+
+    def test_empty_fields_extremes_and_signed_range(self):
+        ref = full_attribute_reference(4, rest=0)
+        zero = {name: torch.zeros_like(value) for name, value in ref.items()}
+        self.assertIsNone(fua.encode_full_attribute_delta(ref, zero, frame_index=10, steps=FULL_ATTRIBUTE_STEPS))
+        empty_body = struct.pack('<III', 0, 0, 0)
+        empty = _stream_enc._encode_body(fua.PLANAR_MAGIC, empty_body, 10, 4, 0, FULL_ATTRIBUTE_STEPS, _stream_fmt._reference_hash(ref))
+        decoded = fua.decode_full_attribute_delta(empty, ref, frame_index=10)
+        for name in fua.FIELDS:
+            self.assertEqual(full_attribute_bits(decoded[name]), full_attribute_bits(ref[name]))
+        symbols = {name: value.clone() for name, value in zero.items()}
+        symbols['logscale'][0, :2] = torch.tensor([-32767., 32767.])
+        for packet in (full_attribute_reference_packet(ref, symbols),):
+            out = fua.decode_full_attribute_delta(packet, ref, frame_index=10)
+            self.assertEqual(full_attribute_bits(out['logscale']), full_attribute_bits(torch.where(
+                symbols['logscale'].ne(0), ref['logscale'] + symbols['logscale'] * FULL_ATTRIBUTE_STEPS[0], ref['logscale'])))
+        symbols['logscale'][0, 0] = -32768
+        with self.assertRaises(ValueError):
+            fua.encode_full_attribute_delta(ref, symbols, frame_index=10, steps=FULL_ATTRIBUTE_STEPS)
+        # FUA3 must reject the unsupported -32768 symbol.
+        planar = struct.pack('<I', 1) + b'\x01' + bytes([255, 0, 0, 255, 0, 0]) + struct.pack('<II', 0, 0)
+        packet = _stream_enc._encode_body(fua.PLANAR_MAGIC, planar, 10, 4, 0, FULL_ATTRIBUTE_STEPS, _stream_fmt._reference_hash(ref))
+        with self.assertRaises(ValueError):
+            fua.decode_full_attribute_delta(packet, ref, frame_index=10)
+
+    def test_corrupt_headers_streams_gaps_and_rows_are_rejected(self):
+        ref = full_attribute_reference(3)
+        symbols = {name: torch.zeros_like(value) for name, value in ref.items()}
+        symbols['logscale'][1, 1] = -7
+        good = full_attribute_reference_packet(ref, symbols)
+        for broken in (good[:3], good[:-1], good + b'\0', b'BAD!' + good[4:],
+                       good[:fua.HEADER.size] + b'not-zlib'):
+            with self.subTest(length=len(broken)), self.assertRaises(ValueError):
+                fua.decode_full_attribute_delta(broken, ref, frame_index=10)
+        altered = {name: value.clone() for name, value in ref.items()}
+        altered['sh_dc'][0, 0, 0] = 1
+        with self.assertRaises(ValueError):
+            fua.decode_full_attribute_delta(good, altered, frame_index=10)
+        with self.assertRaises(ValueError):
+            fua.decode_full_attribute_delta(good, ref, frame_index=11)
+        empty = struct.pack('<I', 0)
+        row = bytes([2, 0, 0, 0, 0, 0])  # zigzag(1), three low then high bytes
+        bad_bodies = [struct.pack('<I', 4) + b'\1' * 4 + row * 4 + empty * 2,
+                      struct.pack('<I', 1) + b'\0' + row + empty * 2,
+                      struct.pack('<I', 1) + b'\4' + row + empty * 2,
+                      struct.pack('<I', 1) + b'\x81\0' + row + empty * 2,
+                      struct.pack('<I', 1) + b'\1' + bytes(6) + empty * 2,
+                      struct.pack('<I', 1) + b'\1' + row[:-1],
+                      struct.pack('<I', 1) + b'\1' + row + empty * 2 + b'\0']
+        for body in bad_bodies:
+            packet = _stream_enc._encode_body(fua.PLANAR_MAGIC, body, 10, 3, 3, FULL_ATTRIBUTE_STEPS, _stream_fmt._reference_hash(ref))
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                fua.decode_full_attribute_delta(packet, ref, frame_index=10)
+
 
 
 if __name__ == "__main__":

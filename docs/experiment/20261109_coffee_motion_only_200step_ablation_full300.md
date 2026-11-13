@@ -9,7 +9,7 @@
 
 因移除探测，200 步组的 101–104 步正常进行运动优化，合计 200 次优化；300 步组的四次探测不更新参数，因此其前 200 步有 196 次优化，两组这四步使用的训练相机也可能不同。两组均从自己的真实解码状态逐帧递推。这个对比衡量完整纠偏训练方案相对 200 步运动主干的效果；步数、选点探测及选中点位置/透明度更新同时变化，不能将差值全部归因于尺度或 SH 属性包。如需单独识别稀疏属性机制的因果贡献，还需同训练步数的无属性纠偏对照。
 
-200 步运行 `output/experiments/coffee_motion_only_200step_prox10_300frames_20261109/20261109T091930_f8dd09`，配置 `config/coffee_motion_only_200step_prox10_300frames_20261109.yaml`；300 步运行 `output/experiments/coffee_early_joint_rmse08_prox10_1pct_300frames_20261109/20261109T024323_086490`。本次新增 `ablation_motion_only` 消融开关，关闭稀疏属性分支并在 200 步真实编码收尾；正常训练默认不启用。两次运行目录均含源码快照。
+200 步运行 `output/comparison/coffee_martini_200step_no_repair`，配置 `config/coffee_motion_only_200step_prox10_300frames_20261109.yaml`；300 步运行 `output/experiments/coffee_early_joint_rmse08_prox10_1pct_300frames_20261109/20261109T024323_086490`。本次新增 `ablation_motion_only` 消融开关，关闭稀疏属性分支并在 200 步真实编码收尾；正常训练默认不启用。两次运行目录均含源码快照。
 
 ## 完整结果
 
