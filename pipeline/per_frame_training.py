@@ -144,7 +144,7 @@ class PerFrameTraining:
         context = self.context
         if not 1 <= step <= 200:
             raise ValueError('Full-attribute training requires steps 1 through 200')
-        phase = frame_plan_phase(context, step)
+        phase = self.per_frame_phase(step)
         if getattr(self, '_plan_timed_phase', None) != phase:
             self._plan_record_phase_time()
         if getattr(self, '_plan_phase_started', None) is None:

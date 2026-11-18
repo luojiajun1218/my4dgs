@@ -37,8 +37,16 @@ from .model.spatial_motion_training import FullUpdateSpatialMotionTraining
 from .model.regional_attributes_update import RegionalAttributesUpdate
 from .data import _collate_single_view
 from .loss import compute_training_loss, temporal_repair_weights
-from .per_frame_training import (PerFrameTraining, fitting_old_motion,
+from .per_frame_training import (fitting_old_motion,
     regional_attribute_repair_active, effective_final_joint_refine_steps)
+if os.environ.get('RECONGS_POINT_ONLY') == '1':
+    if os.environ.get('RECONGS_HIERARCHY_ABLATION'):
+        raise ValueError('Select only one per-frame experiment')
+    from .per_frame_point_only import PerFrameTraining, PointOnlySpatialMotionTraining as FullUpdateSpatialMotionTraining
+elif os.environ.get('RECONGS_HIERARCHY_ABLATION'):
+    from .per_frame_hierarchy_ablation import PerFrameTraining
+else:
+    from .per_frame_training import PerFrameTraining
 
 
 BIRTH_ALLOCATION = 'clone_small_v1'
@@ -426,6 +434,9 @@ class Module(BaseModule):
         renderer_type = ContributionRenderer if cfg.effective_motion_observations else Renderer
         self.renderer = renderer_type(cfg.renderer, self.gaussians)
         self.motion = FullUpdateSpatialMotionTraining(cfg.rigid_tree)
+        configure_motion = getattr(self.per_frame_training, 'configure_motion', None)
+        if configure_motion is not None:
+            configure_motion(self.motion)
         self.full_attribute_update = None
         self.regional_full_attributes = None
         self.opacity_update = QuantizedOpacityUpdate(cfg.opacity_update) if cfg.opacity_update.enabled else None
@@ -1275,7 +1286,7 @@ class Module(BaseModule):
             attribute_aware_gate=self.config.full_update.attribute_aware_gate,
             gate_cost=('motion plus estimated regional attributes and point residuals after candidate rebase'
                        if self.config.full_update.attribute_aware_gate else 'motion only'),
-            regional_opacity_l1_weight=regional_full.opacity_l1_weight,
+            regional_opacity_l1_weight=regional_full.opacity_l1_weight if regional_full is not None else None,
             point_sh_rest_rate_multiplier=self.config.full_update.point_sh_rest_rate_multiplier,
             joint_gate_start_step=gate_restart,
             gate_reopen_logit_limit=self.config.rigid_tree.spatial_gate.gate_reopen_logit_limit,
@@ -1283,6 +1294,9 @@ class Module(BaseModule):
         if getattr(self, 'gate_refine_image_ste', False):
             manifest['gate_refine_image_ste'] = (f'hard cut forward; candidate-total path-probability gate derivative '
                 f'at steps {self.config.rigid_tree.spatial_gate.joint_gate_start_step}-180')
+        adjust_manifest = getattr(self.per_frame_training, 'adjust_manifest', None)
+        if adjust_manifest is not None:
+            adjust_manifest(manifest)
         add_frame_packet_manifest(manifest, encoded, self, full_reference, logscale_update)
         manifest_path = stream_dir / f'frame_{self.current_frame:03d}.json'
         # The manifest is transmitted per frame; whitespace is not needed

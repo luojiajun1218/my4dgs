@@ -19,7 +19,7 @@ output 中历史结果仅用于读取；目录可能包含软链接，不修改�
 
 ## 项目结构与模块组织
 
-`main.py` 是训练入口，默认直接加载 `pipeline`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。首帧静态训练核心位于 `pipeline/first_frame/`，由 `scripts/train_first_frame.py` 调用，不依赖项目外 ReCon-GS 源码。`pipeline/__init__.py` 按需导出训练入口。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
+`main.py` 是训练入口，默认直接加载 `pipeline`。实现直接放在 `pipeline/`，其中 `entry.py` 提供 `Config` 和 `Pipeline`，`data.py`、`module.py`、`trainer.py` 分别负责数据、模型训练逻辑和训练调度，`model/` 存放运动与码流模块。`pipeline/__init__.py` 按需导出训练入口。新代码使用 `pipeline.model.*` 等规范导入路径。实验配置放在 `config/`，数值回归检查放在 `tests/`，方法说明和来源记录放在 `docs/`。`data/`、`output/` 与 `references/` 属于本地数据或实验产物，其中可能包含软链接；不要随意复制大型数据或修改链接指向的原文件。
 30帧以内（包括30帧）的实验结果都放`tmp/`文件夹内
 当全300帧实验的效果超过`output/best`文件夹中记录的时候，你询问用户“需不需要把结果移到`output/best`中”。注意这里是整体移过去，不是软链接。
 不要没事就写test文件，非必要不写test文件，无必要也不跑测试。
@@ -52,3 +52,4 @@ python main.py --config=config/xxxxx.yaml
 - goal模式自动运行时，尽量别做什么对照实验，我们的目的是为了发论文，是为了整体的效果变好才让你继续自动运行的。
 - goal模式你可以先跑30帧看下结果，结果好的话再跑300帧。你应该分析下30帧的结果，然后找出可能的提升（无论是超参数还是机制方法），然后再跑300帧的。
 - 现在最大的问题应该是这里的机制不work，我需要你自动分析实验结果，找出可能的原因（代码逻辑上的疏忽 / 整体方法的问题）并加以改进。
+

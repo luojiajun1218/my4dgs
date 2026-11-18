@@ -1,3 +1,5 @@
+"""项目训练入口：读取配置，启动 pipeline 并记录运行日志。"""
+
 import os
 import sys
 import warnings
@@ -28,44 +30,9 @@ def resolve_config(argv: List[str], Config: Type) -> Tuple["Config", DictConfig]
     if flags.FLAGS.config:
         args = oc.merge(oc.load(flags.FLAGS.config), args)
 
-    # Removed production policies must not silently survive as libgs extras.
-    birth = oc.select(args, "module.birth", default={}) or {}
-    removed = sorted(key for key in birth if key.startswith("tail_commit_"))
-    if removed:
-        raise ValueError(f"Removed ABCD/periodic attribute policies: {removed}. "
-                         "Remove these keys and start a new experiment from the shared first frame.")
-
-    full_update = oc.select(args, "module.full_update", default={}) or {}
-    if oc.select(args, "module.rigid_tree.target_update_bytes", default=0) != 0:
-        raise ValueError("Byte-budget feedback is retired; set a fixed module.rigid_tree.rate_loss_weight")
-    if (oc.select(args, "module.rigid_tree.initial_rate_multiplier", default=1) != 1 or
-            oc.select(args, "module.rigid_tree.min_rate_multiplier", default=1) != 1):
-        raise ValueError("Rate multipliers are retired; use a fixed rate_loss_weight")
-    if full_update.get("enabled", False):
-        supported = {"enabled", "audit_camera_sequence",
-                     "gradient_diagnostics", "logscale_step", "sh_dc_step", "sh_rest_step",
-                     "storage_loss_enabled", "per_attribute_l1_weight", "point_dc_rate_scale", "point_logscale_rate_multiplier", "point_sh_rest_rate_multiplier",
-                     "repair_temporal_weight",
-                     "repair_temporal_scale", "repair_temporal_lag", "repair_rmse_mix", "motion_rmse_mix",
-                     "early_joint_repair", "dense_color_200", "regional_full_200", "attribute_aware_gate",
-                     "regional_opacity_l1_weight", "shared_region_orientation"}
-        unsupported = sorted(set(full_update) - supported)
-        if unsupported:
-            raise ValueError(f"Retired full-update training options: {unsupported}. "
-                             "Use the current 200-step full-attribute plan.")
-    retired = [name for name in ("learnable_gate", "point_gate_enabled",
-                                 "gate_probability_weighted_proximal",
-                                 "temporal_focus_strength", "tail_rmse_mix")
-               if full_update.get(name, False)]
-    if retired:
-        raise ValueError(f"Removed learnable attribute-repair options: {retired}. "
-                         "Use the image-based regional repair configuration instead.")
-    retired_resume = [name for name in ("resume_allow_repair_gate_change",
-                                        "resume_allow_temporal_focus_change",
-                                        "resume_allow_tail_rmse_change")
-                      if args.get(name, False)]
-    if retired_resume:
-        raise ValueError(f"Removed attribute-repair resume options: {retired_resume}")
+    validate_fields = getattr(Config, 'validate_fields', None)
+    if validate_fields is not None:
+        validate_fields(args)
 
     # libgs retains valid strings after trying to call typing.Optional itself.
     # Silence only these known Path/str conversion notices, not other warnings.

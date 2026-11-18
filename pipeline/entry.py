@@ -4,7 +4,8 @@
 具体数据处理、模型计算及训练调度分别由对应文件负责。
 """
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
@@ -18,6 +19,20 @@ from libgs.utils.general import safe_state
 from .data import DataConfig, DataModule
 from .module import Module, ModuleConfig
 from .trainer import Trainer, TrainerConfig
+
+
+def _validate_config_fields(values, config_type, path=''):
+    """拒绝配置类中不存在的字段，避免 libgs 忽略嵌套配置中的拼写错误。"""
+    if not isinstance(values, Mapping):
+        raise ValueError(f'{path or "config"} must be a mapping')
+    config_fields = {item.name: item for item in fields(config_type) if item.init}
+    unknown = sorted(set(values) - config_fields.keys())
+    if unknown:
+        raise ValueError(f'Unknown configuration fields in {path or "config"}: {unknown}')
+    for name, value in values.items():
+        field_type = config_fields[name].type
+        if is_dataclass(field_type):
+            _validate_config_fields(value, field_type, f'{path}.{name}' if path else name)
 
 
 @dataclass
@@ -42,6 +57,10 @@ class Config(BaseConfig):
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     module: ModuleConfig = field(default_factory=ModuleConfig)
+
+    @classmethod
+    def validate_fields(cls, values):
+        _validate_config_fields(values, cls)
 
 
 class Pipeline(BasePipeline):

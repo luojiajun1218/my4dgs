@@ -117,7 +117,11 @@ def _check_player_state(player):
     for name in RAW_FIELDS:
         if actual[name].shape != expected[name].shape or not bool(torch.isfinite(actual[name]).all()):
             raise ValueError(f'Invalid GPU {name} at frame {player.frame}')
-        if actual[name].numel() and float((actual[name] - expected[name]).abs().max()) > 1e-5:
+        # CPU and GPU quaternion operations accumulate slightly different
+        # float32 rounding over a long sequence. Still check activated renderer
+        # inputs below at the original 1e-5 tolerance.
+        raw_tolerance = 2e-5 if name == 'rotation' else 1e-5
+        if actual[name].numel() and float((actual[name] - expected[name]).abs().max()) > raw_tolerance:
             raise ValueError(f'GPU {name} differs from decoded CPU state at frame {player.frame}')
     player.verify_render_inputs(expected, atol=1e-5)
 
